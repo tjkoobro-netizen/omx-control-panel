@@ -1,0 +1,2347 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OMX 제어판</title>
+<link rel="icon" href="data:image/svg+xml,<svg viewBox='0 0 32 32' fill='none' stroke='%230b6e8a' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round' xmlns='http://www.w3.org/2000/svg'>        <rect x='4.5' y='24.5' width='13' height='4' rx='1.6' fill='%230b6e8a' stroke='none'/>        <path d='M11 24.5V18.5'/><path d='M11 18.5L19.5 10.5'/><path d='M19.5 10.5L25.5 14.5'/>        <circle cx='11' cy='18.5' r='2.4' fill='%23ffffff'/><circle cx='19.5' cy='10.5' r='2.2' fill='%23ffffff'/>        <path d='M25.5 14.5l3.2-1.6M25.5 14.5l1.4 3.3' stroke-width='2.2'/>      </svg>">
+<link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<style>
+/* Layout: navy app bar (brand, status, tabs) over a two-column console of white panels.
+   Type: Pretendard for UI, system mono for paths/numbers. Accent: deep teal-blue; status colours separate. */
+:root {
+  --bg: #eef1f5; --surface: #ffffff; --surface-2: #f6f8fb; --fg: #0f1b2a; --muted: #5b6878;
+  --line: #dde3ea; --line-strong: #c3ccd7;
+  --accent: #0b6e8a; --accent-hover: #095b72; --accent-fg: #ffffff; --accent-soft: #e2f0f4;
+  --appbar: #0d1b2a; --appbar-2: #13263a; --appbar-fg: #e8eef5; --appbar-muted: #93a6bb;
+  --ok: #157a3d; --ok-soft: #e2f3e8; --warn: #a45a07; --warn-soft: #fdf1df; --bad: #c0261b; --bad-soft: #fde8e6;
+  --code-bg: #0b1220; --code-fg: #d3deeb;
+  --shadow: 0 1px 2px rgba(15, 27, 42, .06), 0 1px 1px rgba(15, 27, 42, .04);
+  --font: "Pretendard Variable", Pretendard, "Noto Sans KR", "Apple SD Gothic Neo", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "DejaVu Sans Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0a1017; --surface: #111a24; --surface-2: #15202c; --fg: #e5ecf4; --muted: #93a3b5;
+    --line: #213042; --line-strong: #2e4055;
+    --accent: #4bb8d6; --accent-hover: #6fcae3; --accent-fg: #06141b; --accent-soft: #0f2a35;
+    --appbar: #060b11; --appbar-2: #0c1520; --appbar-fg: #e5ecf4; --appbar-muted: #8193a8;
+    --ok: #5fd08a; --ok-soft: #0f2a1b; --warn: #f0b45a; --warn-soft: #2b2112; --bad: #ff8b80; --bad-soft: #351816;
+    --code-bg: #05090e; --code-fg: #cfdbea; --shadow: none; color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--font); font-size: 14px; line-height: 1.55; letter-spacing: -0.005em; }
+code, .mono { font-family: var(--mono); font-size: 12.5px; letter-spacing: 0; }
+.muted { color: var(--muted); }
+h1, h2, h3 { margin: 0; text-wrap: balance; letter-spacing: -0.01em; }
+h2 { font-size: 15px; font-weight: 700; }
+
+/* ---------- app bar ---------- */
+.appbar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; background: var(--appbar); color: var(--appbar-fg); box-shadow: 0 1px 0 rgba(255,255,255,.06), 0 6px 16px rgba(4, 10, 18, .18); }
+.appbar-in { max-width: 1320px; margin: 0 auto; padding-inline: 20px; display: flex; align-items: center; gap: 14px; padding-block: 10px; flex-wrap: wrap; }
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand .logo { width: 34px; height: 34px; border-radius: 9px; background: linear-gradient(145deg, #12839f, #0b5d75); display: grid; place-items: center; flex: none; }
+.brand .logo svg { width: 24px; height: 24px; }
+.brand h1 { font-size: 16.5px; font-weight: 750; color: #fff; white-space: nowrap; }
+.brand .sub { font-size: 12px; color: var(--appbar-muted); white-space: nowrap; }
+.appbar .status { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.chip { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px; border-radius: 999px; background: var(--appbar-2); color: var(--appbar-fg); font-size: 12px; white-space: nowrap; border: 1px solid rgba(255,255,255,.06); }
+.chip b { font-weight: 650; }
+.chip .dot { width: 7px; height: 7px; border-radius: 50%; background: #3ddc84; box-shadow: 0 0 0 3px rgba(61,220,132,.16); }
+.appbar button.help-open { height: 30px; background: transparent; color: var(--appbar-fg); border-color: rgba(255,255,255,.22); }
+.appbar button.help-open:hover:not(:disabled) { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.4); }
+.tabs { max-width: 1320px; margin: 0 auto; padding-inline: 20px; display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+.tabs button { height: 40px; border: 0; border-radius: 0; background: none; padding: 0 16px; font-weight: 650; font-size: 14px; color: var(--appbar-muted); border-bottom: 2.5px solid transparent; white-space: nowrap; }
+.tabs button:hover:not(:disabled) { color: #fff; background: rgba(255,255,255,.04); border-color: transparent; }
+.tabs button[aria-selected="true"] { color: #fff; border-bottom-color: #4bc6e4; }
+.tabs button .n { display: inline-grid; place-items: center; width: 20px; height: 20px; margin-right: 6px; border-radius: 6px; background: rgba(255,255,255,.1); font-size: 11.5px; }
+.tabs button[aria-selected="true"] .n { background: #4bc6e4; color: #06141b; }
+
+/* ---------- page ---------- */
+.wrap { max-width: 1320px; margin: 0 auto; padding-inline: 20px; padding-block: 18px 48px; display: grid; gap: 16px; }
+.grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 960px) { .grid { grid-template-columns: 1fr; } }
+.col { display: grid; gap: 16px; min-width: 0; }
+/* collect tab: keep the camera panel on screen while scrolling to the record buttons */
+.grid.pin-grid { align-items: stretch; }
+.grid.pin-grid > .col { align-content: start; }
+.panel.cam-pin { position: sticky; top: calc(var(--appbar-h, 96px) + 8px); z-index: 5; box-shadow: 0 10px 28px rgba(4, 10, 18, .22); }
+.panel.cam-pin .cam-note { display: none; }
+@media (max-width: 960px) { .panel.cam-pin { position: static; box-shadow: var(--shadow); } }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; display: grid; gap: 12px; min-width: 0; box-shadow: var(--shadow); }
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 30px; }
+.panel-head h2 { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.panel-head > .row, .panel-head > .pill, .panel-head > span { flex: none; }
+.panel > p, .panel p.muted { margin: 0; font-size: 13px; line-height: 1.6; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+/* ---------- controls ---------- */
+button { font: inherit; font-size: 13.5px; font-weight: 550; height: 34px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--surface); color: var(--fg); cursor: pointer; white-space: nowrap; display: inline-flex; align-items: center; justify-content: center; gap: 6px; transition: background .12s, border-color .12s, color .12s; }
+button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 650; }
+button.primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); color: var(--accent-fg); }
+button.danger { border-color: color-mix(in srgb, var(--bad) 55%, var(--line-strong)); color: var(--bad); }
+button.danger:hover:not(:disabled) { background: var(--bad-soft); border-color: var(--bad); color: var(--bad); }
+button:disabled { opacity: .42; cursor: not-allowed; }
+.meta-line { font-size: 12.5px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.qbtn { width: 20px; height: 20px; padding: 0; border-radius: 50%; font-size: 11px; font-weight: 700; color: var(--muted); border-color: var(--line); background: var(--surface-2); }
+label.f { display: grid; gap: 5px; font-size: 12.5px; font-weight: 600; color: var(--muted); min-width: 0; }
+input[type=text], input[type=number], select { font: inherit; font-size: 13.5px; font-weight: 450; color: var(--fg); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px; height: 36px; padding: 0 10px; width: 100%; min-width: 0; }
+input[type=text]:hover, input[type=number]:hover, select:hover { border-color: var(--muted); }
+input[type=checkbox], input[type=radio] { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); flex: none; }
+input[type=range] { accent-color: var(--accent); }
+.fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 560px) { .fields { grid-template-columns: 1fr; } }
+form { display: grid; gap: 12px; }
+/* checkbox + text on one line; long text wraps next to the box, not under it */
+.opt { display: grid; grid-template-columns: 16px minmax(0, 1fr); column-gap: 10px; align-items: start; font-size: 13px; line-height: 1.5; }
+.opt input { margin-top: 2px; }
+.opt label, .opt span { cursor: pointer; }
+.opt label b { color: var(--fg); }
+
+/* ---------- status pieces ---------- */
+.pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; font-size: 12px; font-weight: 600; padding: 0 10px; border-radius: 999px; background: var(--surface-2); color: var(--muted); border: 1px solid var(--line); white-space: nowrap; }
+.pill.ok { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.pill.bad { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
+.pill.warn { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.pill.ok::before, .pill.bad::before, .pill.warn::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.phase { font-size: 17px; font-weight: 750; font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.bar { height: 6px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--line); overflow: hidden; }
+.bar > div { height: 100%; background: var(--accent); width: 0; transition: width .4s linear; border-radius: 999px; }
+.progress { display: grid; gap: 10px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.checks { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; font-size: 13px; }
+.checks li { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.checks li .pill { min-width: 64px; justify-content: center; }
+
+/* ---------- camera ---------- */
+.cams { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 560px) { .cams { grid-template-columns: 1fr; } }
+figure { margin: 0; display: grid; gap: 6px; min-width: 0; }
+.frame { position: relative; aspect-ratio: 4 / 3; max-width: 100%; background: var(--code-bg); border-radius: 10px; overflow: hidden; display: grid; place-items: center; color: #6f8197; font-size: 12.5px; text-align: center; padding: 12px; border: 1px solid #0f1a28; }
+.frame img, .frame video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; background: var(--code-bg); }
+.frame img.ghost { background: transparent; pointer-events: none; }
+figcaption { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 12.5px; color: var(--muted); }
+figcaption b { color: var(--fg); font-weight: 650; }
+details.align { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; display: grid; gap: 10px; background: var(--surface-2); }
+details.align[open] { border-color: var(--accent); background: var(--surface); }
+details.align summary { cursor: pointer; font-weight: 650; font-size: 13.5px; }
+
+/* ---------- callouts ---------- */
+.safety { display: grid; grid-template-columns: 18px minmax(0, 1fr); column-gap: 12px; align-items: center; background: var(--warn-soft); border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent); border-radius: 12px; padding: 12px 16px; }
+.safety input { width: 18px; height: 18px; accent-color: var(--warn); }
+.safety label { font-weight: 650; font-size: 13.5px; cursor: pointer; color: var(--fg); }
+.safety .qbtn { grid-column: 3; }
+.safety { grid-template-columns: 18px minmax(0, 1fr) auto; }
+.safe-start { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: grid; gap: 8px; background: var(--surface-2); }
+.safe-start b { font-size: 13px; }
+.tip-box { margin: 0; background: var(--warn-soft); border-left: 3px solid var(--warn); padding: 10px 12px; border-radius: 0 8px 8px 0; font-size: 12.5px; line-height: 1.6; }
+.warn-box { background: var(--bad-soft); border: 1px solid color-mix(in srgb, var(--bad) 35%, transparent); border-radius: 10px; padding: 10px 12px; font-size: 12.5px; line-height: 1.6; display: grid; gap: 2px; }
+.warn-box b { color: var(--bad); }
+
+/* toast: floating, bottom right */
+.toast { position: fixed; right: 20px; bottom: calc(20px + env(safe-area-inset-bottom, 0px)); z-index: 50; max-width: min(460px, calc(100vw - 40px)); padding: 12px 16px; border-radius: 10px; background: var(--appbar); color: var(--appbar-fg); font-size: 13px; line-height: 1.5; box-shadow: 0 10px 30px rgba(4, 10, 18, .28); border-left: 4px solid #4bc6e4; }
+.toast:empty { display: none; }
+.toast.err { border-left-color: #ff6b5e; }
+.toast.ok { border-left-color: #3ddc84; }
+
+/* ---------- logs, charts ---------- */
+pre.log { margin: 0; background: var(--code-bg); color: var(--code-fg); border-radius: 10px; padding: 12px 14px; font-family: var(--mono); font-size: 11.5px; line-height: 1.55; height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #0f1a28; }
+#trChart { width: 100%; max-width: 100%; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; }
+
+/* ---------- replay / episodes ---------- */
+.episodes { display: flex; flex-wrap: wrap; gap: 6px; max-height: 120px; overflow-y: auto; }
+.episodes button, .ep-chips button { height: 28px; padding: 0 10px; font-size: 12px; font-variant-numeric: tabular-nums; font-weight: 550; }
+.episodes button[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.player { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.player input[type=range] { flex: 1 1 160px; min-width: 0; }
+.player select { width: auto; }
+
+/* ---------- training tab ---------- */
+.quick select { width: auto; height: 34px; }
+.ds-list { display: grid; gap: 6px; }
+.ds-item { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; display: grid; gap: 8px; background: var(--surface); }
+.ds-item.on { border-color: var(--accent); background: var(--accent-soft); }
+.ds-row { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.ds-row .name { height: auto; padding: 0; border: 0; background: none; font-family: var(--mono); font-size: 12.5px; font-weight: 550; color: var(--fg); justify-content: flex-start; overflow: hidden; text-overflow: ellipsis; text-decoration: underline dotted var(--muted); text-underline-offset: 3px; }
+.ds-row .name:hover:not(:disabled) { color: var(--accent); }
+.ds-row .meta { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ep-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.ep-chips button.off { text-decoration: line-through; color: var(--bad); border-color: var(--bad); background: var(--bad-soft); }
+.ep-chips button.cur { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pv { border: 1px solid var(--accent); border-radius: 12px; padding: 12px; display: grid; gap: 10px; background: var(--surface); }
+.seg { display: grid; gap: 6px; }
+.seg label { display: grid; grid-template-columns: 16px auto minmax(0, 1fr); column-gap: 10px; align-items: baseline; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; cursor: pointer; font-size: 13px; }
+.seg label:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+.seg label input { align-self: center; }
+.seg label .muted { font-size: 12.5px; }
+
+/* ---------- lists (recent runs, eval history) ---------- */
+.recent-runs { list-style: none; margin: 0; padding: 0; display: grid; }
+.recent-runs li { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; padding: 10px 2px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.recent-runs li:last-child { border-bottom: 0; }
+.est { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; display: grid; gap: 6px; background: var(--surface-2); font-size: 13px; }
+.est.warn { background: var(--warn-soft); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.est.bad { background: var(--bad-soft); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+.est .ram { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.est .meter { flex: 1 1 140px; height: 8px; border-radius: 99px; background: var(--line); overflow: hidden; }
+.est .meter > div { height: 100%; background: var(--ok); }
+.est.warn .meter > div { background: var(--warn); }
+.est.bad .meter > div { background: var(--bad); }
+.est .msg { font-size: 12.5px; line-height: 1.55; }
+.est button { height: 28px; font-size: 12px; justify-self: start; }
+label.f .qbtn { margin-left: 4px; vertical-align: 1px; }
+.plan { list-style: none; margin: 0; padding: 0; display: grid; }
+.plan li { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 10px 2px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.plan li:last-child { border-bottom: 0; }
+.plan li.muted { display: block; }
+.plan .no { width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; background: var(--surface-2); border: 1px solid var(--line); font-weight: 700; font-size: 12px; }
+.plan .meta { font-size: 12px; color: var(--muted); line-height: 1.55; overflow-wrap: anywhere; }
+.plan .acts { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.plan .acts button { height: 28px; padding: 0 9px; font-size: 12px; }
+.plan li.done .no { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
+.plan li.run .no { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.plan li.bad .no { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
+.plan li.off { opacity: .55; }
+.recent-runs li.muted { display: block; }
+.recent-runs .no { font-weight: 750; color: var(--accent); font-variant-numeric: tabular-nums; }
+.recent-runs .li-main { display: grid; gap: 2px; min-width: 0; }
+.recent-runs code { font-size: 12.5px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent-runs .meta { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent-runs .li-act { display: flex; gap: 6px; }
+.recent-runs li button { height: 28px; padding: 0 10px; font-size: 12px; }
+
+/* ---------- evaluation tab ---------- */
+.ev-results { display: flex; flex-wrap: wrap; gap: 8px; }
+.ev-ep { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; display: grid; gap: 6px; justify-items: center; font-size: 12.5px; font-weight: 600; min-width: 112px; background: var(--surface-2); }
+.ev-ep .btns { display: flex; gap: 4px; }
+.ev-ep button { height: 26px; padding: 0 10px; font-size: 12px; }
+.ev-ep button.on-success { background: var(--ok); border-color: var(--ok); color: #fff; }
+.ev-ep button.on-fail { background: var(--bad); border-color: var(--bad); color: #fff; }
+.ev-ep.pending { opacity: .5; }
+.model-info { font-size: 12.5px; display: grid; gap: 3px; padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; color: var(--muted); }
+.model-info b { color: var(--fg); }
+.model-info code { font-size: 11.5px; overflow-wrap: anywhere; color: var(--fg); }
+
+/* ---------- dialogs ---------- */
+dialog { padding: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); color: var(--fg); box-shadow: 0 24px 60px rgba(4, 10, 18, .35); }
+dialog::backdrop { background: rgba(8, 15, 24, .55); backdrop-filter: blur(2px); }
+dialog#runsDlg { width: min(1320px, calc(100vw - 32px)); max-height: calc(100vh - 48px); }
+dialog#reportDlg { width: min(1400px, calc(100vw - 32px)); max-height: calc(100vh - 48px); }
+.runs-wrap { padding: 0 22px 20px; display: grid; gap: 12px; }
+.runs-scroll { overflow: auto; max-height: calc(100vh - 210px); border: 1px solid var(--line); border-radius: 10px; }
+table.runs { border-collapse: collapse; width: 100%; font-size: 13px; }
+table.runs th { position: sticky; top: 0; background: var(--surface-2); color: var(--muted); font-weight: 650; font-size: 12px; text-align: left; white-space: nowrap; }
+table.runs td, table.runs th { padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+table.runs td { white-space: nowrap; }
+table.runs td.wrap { white-space: normal; min-width: 160px; }
+table.runs td.num { text-align: right; font-variant-numeric: tabular-nums; }
+table.runs code { font-size: 12px; }
+table.runs tbody tr:hover { background: var(--accent-soft); }
+table.runs .copy-path, table.runs .clean-run { height: 26px; font-size: 11.5px; padding: 0 8px; margin-top: 6px; }
+.report-imgs { display: grid; gap: 14px; }
+.report-imgs img { width: 100%; border: 1px solid var(--line); border-radius: 8px; }
+.report-imgs figcaption { font-size: 12px; }
+dialog#help { width: min(940px, calc(100vw - 32px)); max-height: calc(100vh - 48px); }
+.help-wrap { display: grid; grid-template-columns: 200px minmax(0, 1fr); max-height: calc(100vh - 50px); }
+@media (max-width: 680px) { .help-wrap { grid-template-columns: 1fr; } .help-nav { display: none; } }
+.help-nav { border-right: 1px solid var(--line); padding: 14px 10px; display: grid; align-content: start; gap: 2px; overflow-y: auto; background: var(--surface-2); }
+.help-nav a { color: var(--fg); text-decoration: none; padding: 7px 10px; border-radius: 7px; font-size: 13px; font-weight: 550; }
+.help-nav a:hover, .help-nav a.on { background: var(--accent-soft); color: var(--accent); }
+.help-body { overflow-y: auto; padding: 4px 26px 26px; min-width: 0; }
+.help-top { position: sticky; top: 0; background: var(--surface); display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 16px 0 12px; border-bottom: 1px solid var(--line); z-index: 1; }
+.help-top h2 { font-size: 16.5px; }
+.help-body section { padding-top: 18px; display: grid; gap: 8px; scroll-margin-top: 60px; font-size: 13.5px; }
+.help-body h3 { font-size: 15px; color: var(--accent); }
+.help-body p, .help-body li { max-width: 72ch; }
+.help-body p { margin: 0; }
+.help-body ol, .help-body ul { margin: 0; padding-left: 20px; display: grid; gap: 4px; }
+.help-body code { font-size: 12px; background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.help-body .tip { background: var(--warn-soft); border-left: 3px solid var(--warn); padding: 8px 12px; border-radius: 0 8px 8px 0; }
+.help-body table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.help-body th, .help-body td { text-align: left; border-bottom: 1px solid var(--line); padding: 7px 8px; vertical-align: top; }
+.help-body th { color: var(--muted); font-weight: 600; }
+.help-table { overflow-x: auto; }
+/* "?" opens a compact popup with only that topic */
+dialog#help.single { width: min(580px, calc(100vw - 32px)); }
+dialog#help.single .help-wrap { grid-template-columns: 1fr; }
+dialog#help.single .help-nav { display: none; }
+dialog#help.single .help-body section:not(.current) { display: none; }
+dialog#help.single .help-body section { padding-top: 12px; }
+dialog#help.single .help-body section h3 { display: none; }
+.help-full { height: auto; font-size: 12.5px; color: var(--accent); background: none; border: 0; padding: 8px 0 0; text-decoration: underline; justify-self: start; }
+dialog#help:not(.single) .help-full { display: none; }
+@media (prefers-reduced-motion: reduce) { .bar > div, button { transition: none; } }
+</style>
+</head>
+<body>
+<header class="appbar">
+  <div class="appbar-in">
+    <div class="brand">
+      <div class="logo"><svg viewBox="0 0 32 32" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="4.5" y="24.5" width="13" height="4" rx="1.6" fill="#fff" stroke="none"/>
+        <path d="M11 24.5V18.5"/><path d="M11 18.5L19.5 10.5"/><path d="M19.5 10.5L25.5 14.5"/>
+        <circle cx="11" cy="18.5" r="2.4" fill="#0b5d75"/><circle cx="19.5" cy="10.5" r="2.2" fill="#0b5d75"/>
+        <path d="M25.5 14.5l3.2-1.6M25.5 14.5l1.4 3.3" stroke-width="2.2"/>
+      </svg></div>
+      <div>
+        <h1>OMX 제어판</h1>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v1.6.1</span></div>
+      </div>
+    </div>
+    <div class="status">
+      <span class="chip"><span class="dot"></span><span id="gpuName">GPU 노트북</span></span>
+      <span class="chip">계정 <b id="user">-</b></span>
+      <span class="chip mono" id="gpu" hidden></span>
+      <button type="button" class="help-open" data-help="start">사용법</button>
+    </div>
+  </div>
+  <nav class="tabs" role="tablist" aria-label="작업 단계">
+    <button type="button" role="tab" id="tabBtn-collect" aria-controls="tab-collect" aria-selected="true"><span class="n">1</span>데이터 수집</button>
+    <button type="button" role="tab" id="tabBtn-train" aria-controls="tab-train" aria-selected="false"><span class="n">2</span>학습</button>
+    <button type="button" role="tab" id="tabBtn-eval" aria-controls="tab-eval" aria-selected="false"><span class="n">3</span>평가</button>
+  </nav>
+</header>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<div class="wrap">
+
+<div id="tab-collect" role="tabpanel" aria-labelledby="tabBtn-collect">
+<div class="safety">
+  <input type="checkbox" id="confirm">
+  <label for="confirm">로봇 옆에 사람이 있고, 리더와 팔로워 자세를 비슷하게 맞췄습니다</label>
+</div>
+
+<div class="grid pin-grid">
+  <div class="col">
+    <section class="panel" id="camPanel">
+      <div class="panel-head">
+        <h2>카메라</h2>
+        <div class="row">
+          <span class="pill" id="camState">꺼짐</span>
+          <label class="opt" style="grid-template-columns:16px auto;align-items:center;font-size:12.5px" title="아래로 스크롤해도 카메라 화면이 왼쪽 위에 붙어 따라옵니다"><input type="checkbox" id="camPin" checked><span>화면 고정</span></label>
+          <button id="camBtn" type="button">카메라 켜기</button>
+        </div>
+      </div>
+      <div class="cams">
+        <figure>
+          <div class="frame" id="frame-front">카메라 꺼짐</div>
+          <figcaption><span><b>front</b> · 글로벌 카메라</span><span class="mono" id="bright-front"></span></figcaption>
+        </figure>
+        <figure>
+          <div class="frame" id="frame-wrist">카메라 꺼짐</div>
+          <figcaption><span><b>wrist</b> · 팔로워 장착</span><span class="mono" id="bright-wrist"></span></figcaption>
+        </figure>
+      </div>
+      <p class="muted cam-note" style="margin:0">카메라 보기는 카메라 없는 텔레옵과 동시에 쓸 수 있습니다. 녹화를 시작하면 녹화 프로그램이 카메라를 쓰고, 이 화면에는 그 프로그램이 읽는 영상이 그대로 나옵니다.</p>
+      <details class="align" id="alignBox">
+        <summary>카메라 위치 맞추기 (학습 때 화면과 겹쳐 보기)</summary>
+        <div class="row">
+          <label class="f" style="flex:1 1 220px">기준 장면 (이 데이터의 첫 화면)
+            <select id="alignRepo"></select>
+          </label>
+          <label class="f" style="flex:1 1 160px">겹침 정도
+            <input type="range" id="alignOpacity" min="0" max="100" value="50" aria-label="기준 장면 투명도">
+          </label>
+        </div>
+        <p class="meta-line" style="margin:0" id="alignResult">카메라를 켜고 기준 장면을 고르면 front 화면 위에 반투명으로 겹쳐 보입니다.</p>
+        <p class="muted" style="margin:0">기준 사진과 실제 화면의 책상 모서리, 로봇 베이스, 접시가 겹치도록 front 카메라를 움직이세요. 모델은 학습 때와 같은 구도에서만 제대로 동작합니다. 맞춘 뒤에는 카메라를 테이프나 거치대로 고정하세요.</p>
+      </details>
+    </section>
+
+    <section class="panel" id="replay">
+      <div class="panel-head">
+        <h2>녹화 다시보기</h2>
+        <span class="muted meta-line" id="rpInfo"></span>
+      </div>
+      <label class="f">데이터셋 (공유 폴더 전체)
+        <select id="rpSelect"><option value="">데이터셋을 고르세요</option></select>
+      </label>
+      <div class="episodes" id="rpEpisodes"></div>
+      <div class="cams" id="rpVideos" hidden>
+        <figure>
+          <div class="frame"><video id="rpFront" muted playsinline preload="auto"></video></div>
+          <figcaption><span><b>front</b> · 글로벌 카메라</span></figcaption>
+        </figure>
+        <figure>
+          <div class="frame"><video id="rpWrist" muted playsinline preload="auto"></video></div>
+          <figcaption><span><b>wrist</b> · 팔로워 장착</span></figcaption>
+        </figure>
+      </div>
+      <div class="player" id="rpControls" hidden>
+        <button type="button" id="rpPlay">재생</button>
+        <button type="button" id="rpRestart">처음으로</button>
+        <input type="range" id="rpSeek" min="0" max="1000" value="0" aria-label="재생 위치">
+        <span class="mono" id="rpTime">0:00 / 0:00</span>
+        <select id="rpSpeed" aria-label="재생 속도">
+          <option value="0.5">0.5배</option><option value="1" selected>1배</option><option value="2">2배</option><option value="4">4배</option>
+        </select>
+      </div>
+      <p class="muted" id="rpTask" style="margin:0"></p>
+      <div id="rpUploadRow" hidden style="display:grid;gap:8px">
+        <label class="f">설명 (선택)<input type="text" id="rpNote" autocomplete="off"></label>
+        <div class="row">
+          <button type="button" id="rpUpload">이 데이터셋 Hugging Face에 올리기 (비공개)</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>로그</h2>
+        <span class="muted meta-line" id="jobLabel"></span>
+      </div>
+      <pre class="log" id="log">아직 실행한 작업이 없습니다.</pre>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>점검</h2>
+        <button id="checkBtn" type="button">점검하기</button>
+      </div>
+      <ul class="checks" id="checks"><li class="muted">포트, 모터, 카메라, GPU, 다른 사용자 여부를 확인합니다.</li></ul>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>멈췄을 때 복구</h2>
+      </div>
+      <div class="row">
+        <button class="danger" id="killBtn" type="button">강제 종료</button>
+        <button id="resetBtn" type="button">모터 초기화</button>
+      </div>
+      <div class="warn-box" role="note">
+        <b>모터 초기화는 팔로워 팔을 내려둔 상태에서만 누르세요.</b>
+        초기화하면 모든 모터의 토크가 즉시 풀립니다. 팔이 들려 있으면 그대로 떨어져 팔이나 물체가 부딪힐 수 있습니다. 내려둘 수 없으면 옆 사람이 팔을 손으로 받친 상태에서 누릅니다.
+      </div>
+      <p class="muted" style="margin:0">중지를 눌러도 끝나지 않거나 다음 실행이 안 될 때 <b>강제 종료</b>로 실행 중인 텔레옵·녹화를 즉시 끝내 포트와 카메라를 풀어줍니다. 강제 종료는 토크를 유지해 팔이 그 자세로 멈춥니다. 그래도 모터가 응답하지 않으면 <b>모터 초기화</b>로 모든 모터를 재부팅해 에러를 지웁니다. 두 버튼 모두 한 번 더 눌러야 실행됩니다.</p>
+      <ul class="checks" id="recoverResult"></ul>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>텔레옵</h2>
+        <span class="pill" id="teleopState">대기</span>
+      </div>
+      <div class="row">
+        <button class="primary" id="teleopBtn" type="button">텔레옵 시작</button>
+        <button class="danger" id="teleopStop" type="button">중지</button>
+      </div>
+      <p class="muted" style="margin:0" id="teleopInfo">카메라 없이 실행합니다. 화면은 왼쪽 카메라 보기로 확인하세요.</p>
+      <div class="safe-start">
+        <div class="row" style="justify-content:space-between">
+          <b>안전 시작 · 안전 정지</b>
+          <span class="pill" id="ssState">확인 중</span>
+        </div>
+        <p class="meta-line muted" style="margin:0" id="ssInfo">텔레옵·녹화·평가를 시작하면 팔로워가 ① 시작 자세로 팔을 들고 ② 그리퍼를 닫은 뒤 ③ 리더 자세로 천천히 다가갑니다. 그동안 모터 출력은 30%로 제한됩니다.</p>
+        <p class="meta-line muted" style="margin:0" id="ssRestInfo"></p>
+        <div class="row">
+          <button type="button" id="ssSave" title="리더 위치만 읽습니다. 로봇은 움직이지 않습니다">리더 자세를 시작 자세로 저장</button>
+          <button type="button" id="ssSaveRest" title="리더 위치만 읽습니다. 로봇은 움직이지 않습니다">리더 자세를 끝 자세로 저장</button>
+        </div>
+        <p class="meta-line muted" style="margin:0">리더암을 손으로 원하는 자세로 잡은 채 누르세요(리더 위치만 읽고 로봇은 움직이지 않습니다). <b>시작 자세</b>: 팔을 든 자세(그리퍼가 바닥에서 충분히 떨어진 자세). <b>끝 자세</b>: 팔을 접어 작업대에 내려놓은 자세. 같은 로봇을 쓰는 팀 전체에 적용됩니다.</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>학습 데이터 녹화</h2>
+        <span class="pill" id="recState">대기</span>
+      </div>
+      <form id="recForm">
+        <label class="f">데이터셋
+          <select id="dsSelect"><option value="">새 데이터셋 만들기</option></select>
+        </label>
+        <label class="f" id="nameField">새 데이터셋 이름 (날짜_시간 MMDD_HHMM, 고쳐 써도 됨)
+          <input type="text" id="dsName" autocomplete="off">
+        </label>
+        <label class="f">작업 설명 (영어 한 문장, 데이터셋 안에서는 항상 같게)
+          <input type="text" id="task" value="Pick up the strawberry and place it on the white plate">
+        </label>
+        <div class="fields">
+          <label class="f">에피소드 수<input type="number" id="episodes" min="1" value="10"></label>
+          <label class="f">시연 시간(초)<input type="number" id="episodeS" min="5" value="30"></label>
+          <label class="f">원위치 시간(초)<input type="number" id="resetS" min="0" value="15"></label>
+        </div>
+        <p class="muted meta-line" id="repoPreview" style="margin:0"></p>
+        <div class="opt">
+          <input type="checkbox" id="voice"><label for="voice">음성 안내 (이 노트북 스피커로 시작·원위치·끝을 알려줌)</label>
+        </div>
+        <div class="opt">
+          <input type="checkbox" id="autoUpload"><label for="autoUpload">녹화가 정상으로 끝나면 Hugging Face에 자동 업로드 (비공개)</label>
+        </div>
+        <label class="f">설명 (선택. 무엇을 녹화했는지 짧게)
+          <input type="text" id="dsNote" placeholder="예: 딸기를 빨간 테이프 위에서 집어 흰 접시에 놓기, 카메라 위치 고정" autocomplete="off">
+        </label>
+        <div class="row"><button class="primary" type="submit" id="recBtn">녹화 시작</button></div>
+      </form>
+
+      <div class="progress" id="recProgress" hidden>
+        <div class="row" style="justify-content:space-between">
+          <span class="phase" id="recPhase">-</span>
+          <span class="meta-line" id="recCount"></span>
+        </div>
+        <div class="bar"><div id="recBar"></div></div>
+        <p class="warn-box" id="recLoopWarn" hidden style="margin:0"></p>
+        <div class="row">
+          <button type="button" id="nextBtn" title="키보드 → 와 같음">다음으로</button>
+          <button type="button" id="rerecBtn" title="키보드 ← 와 같음">이번 것 다시 찍기</button>
+          <button type="button" class="danger" id="recStop" title="키보드 Esc 와 같음">녹화 끝내기 (저장)</button>
+        </div>
+        <p class="muted" style="margin:0">끝내기를 누르면 완료된 에피소드까지 저장되고, 진행 중이던 에피소드는 버려집니다.</p>
+      </div>
+      <div class="row" id="uploadRow" hidden>
+        <span class="pill" id="uploadState"></span>
+        <span class="muted" id="uploadMsg"></span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Rerun으로도 보기 (선택)</h2>
+      <div class="opt">
+        <input type="checkbox" id="useRerun"><label for="useRerun">텔레옵·녹화 중 관절 그래프와 영상을 Rerun으로 보내기</label>
+      </div>
+      <label class="f"><span>내 노트북 Tailscale IP (내 노트북에서 <code>rerun</code>을 먼저 켜두세요)</span>
+        <input type="text" id="viewerIp" placeholder="100.x.x.x (tailscale ip -4)" autocomplete="off">
+      </label>
+    </section>
+  </div>
+</div>
+</div>
+
+<div id="tab-train" role="tabpanel" aria-labelledby="tabBtn-train" hidden>
+<div class="grid">
+  <div class="col">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>학습 데이터 고르기</h2>
+        <span class="muted meta-line" id="trSelSummary"></span>
+      </div>
+      <p class="muted" style="margin:0">녹화 원본 중에서 고릅니다. 데이터셋 이름을 누르면 에피소드가 펼쳐지고, <b>에피소드를 누르면 아래에서 영상이 재생</b>됩니다. 보고 나서 <b>학습에서 빼기</b>를 누르면 줄이 그어집니다. 여러 개를 고르면 하나로 합쳐 학습하고, 어떤 녹화의 몇 번 에피소드를 썼는지 자동으로 기록합니다.</p>
+      <div class="row quick">
+        <button type="button" id="trAll">전체 선택</button>
+        <button type="button" id="trNone">선택 해제</button>
+        <select id="trDate" aria-label="날짜별 선택"><option value="">날짜별 선택</option></select>
+        <button type="button" id="trShort" title="고른 데이터셋마다 길이 중앙값의 60%보다 짧은 에피소드를 뺍니다">짧은 에피소드 빼기</button>
+        <button type="button" id="trResetEx">제외 초기화</button>
+      </div>
+      <div class="ds-list" id="trDatasets"><p class="muted">불러오는 중...</p></div>
+      <div class="pv" id="trPv" hidden>
+        <div class="row" style="justify-content:space-between">
+          <b class="mono" id="trPvTitle"></b>
+          <span class="pill" id="trPvState"></span>
+        </div>
+        <div class="cams">
+          <figure><div class="frame"><video id="trPvFront" muted playsinline preload="auto"></video></div><figcaption><span><b>front</b></span></figcaption></figure>
+          <figure><div class="frame"><video id="trPvWrist" muted playsinline preload="auto"></video></div><figcaption><span><b>wrist</b></span></figcaption></figure>
+        </div>
+        <div class="player">
+          <button type="button" id="trPvPlay">재생</button>
+          <input type="range" id="trPvSeek" min="0" max="1000" value="0" aria-label="재생 위치">
+          <span class="mono" id="trPvTime">0:00 / 0:00</span>
+          <select id="trPvSpeed" aria-label="재생 속도"><option value="1">1배</option><option value="2" selected>2배</option><option value="4">4배</option></select>
+        </div>
+        <div class="row">
+          <button type="button" id="trPvPrev">◀ 이전</button>
+          <button type="button" class="danger" id="trPvToggle">학습에서 빼기</button>
+          <button type="button" id="trPvNext">다음 ▶</button>
+          <button type="button" id="trPvClose" style="margin-left:auto">닫기</button>
+        </div>
+        <p class="muted" style="margin:0">단축키: <span class="mono">스페이스</span> 재생·멈춤 · <span class="mono">X</span> 빼기·넣기 · <span class="mono">← →</span> 이전·다음 에피소드</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>학습 설정</h2></div>
+      <div class="row" style="gap:6px;font-size:12.5px;font-weight:600;color:var(--muted)">정책 <button type="button" class="qbtn help-open" data-help="tr-policy" title="정책 설명" aria-label="정책 설명">?</button></div>
+      <div class="seg" role="radiogroup" aria-label="정책">
+        <label><input type="radio" name="trPolicy" value="act" checked> <b>ACT</b> <span class="muted">추천 · 시연 수십 개로 정해진 작업 하나를 정밀하게</span></label>
+        <label><input type="radio" name="trPolicy" value="diffusion"> <b>Diffusion</b> <span class="muted">동작이 부드러움 · 데이터가 더 필요</span></label>
+      </div>
+      <div class="fields">
+        <label class="f"><span>스텝 수 <button type="button" class="qbtn help-open" data-help="tr-steps" title="스텝 수 설명" aria-label="스텝 수 설명">?</button></span><input type="number" id="trSteps" min="100" step="1000" value="40000"></label>
+        <label class="f"><span>배치 크기 <button type="button" class="qbtn help-open" data-help="tr-batch" title="배치 크기 설명" aria-label="배치 크기 설명">?</button></span><input type="number" id="trBatch" min="1" max="64" value="8"></label>
+        <label class="f"><span>데이터 로딩 수 <button type="button" class="qbtn help-open" data-help="tr-workers" title="데이터 로딩 수 설명" aria-label="데이터 로딩 수 설명">?</button></span><input type="number" id="trWorkers" min="0" max="16" value="8"></label>
+      </div>
+      <div class="opt"><input type="checkbox" id="trAug" checked><label for="trAug">이미지 증강 <button type="button" class="qbtn help-open" data-help="tr-aug" title="이미지 증강 설명" aria-label="이미지 증강 설명">?</button></label></div>
+      <div class="est" id="trEst" hidden>
+        <div class="ram"><b id="trEstRam"></b><span class="meter"><div id="trEstBar"></div></span><button type="button" class="qbtn help-open" data-help="tr-ram" title="예상 RAM 설명" aria-label="예상 RAM 설명">?</button></div>
+        <div class="msg" id="trEstTime"></div>
+        <div class="msg" id="trEstMsg"></div>
+        <button type="button" id="trEstApply" hidden>권장값 적용</button>
+      </div>
+      <label class="f">메모 (선택. 학습 기록 표의 비고에 표시)
+        <input type="text" id="trNote" placeholder="예: 실패 에피소드 제외, 증강 비교용" autocomplete="off">
+      </label>
+      <p class="muted meta-line" style="margin:0" id="trPreview"></p>
+      <div class="row">
+        <button class="primary" type="button" id="trStart">바로 시작</button>
+        <button type="button" id="trQueueAdd" title="지금 설정을 학습 계획 맨 뒤에 넣습니다. 앞 학습이 끝나면 자동으로 시작합니다">계획에 추가</button>
+      </div>
+      <p class="muted" style="margin:0">여러 학습을 이어서 하려면 설정을 바꿔가며 <b>계획에 추가</b>한 뒤, 오른쪽 학습 계획에서 <b>계획 실행</b>을 누르세요.</p>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>진행 상황</h2>
+        <span class="pill" id="trPhase">대기</span>
+      </div>
+      <p class="mono" style="margin:0" id="trRun"></p>
+      <div class="bar"><div id="trBar"></div></div>
+      <div class="row" style="justify-content:space-between">
+        <span class="meta-line" id="trStep"></span>
+        <span class="meta-line" id="trEta"></span>
+      </div>
+      <canvas id="trChart" height="180" aria-label="손실 그래프"></canvas>
+      <p class="muted meta-line" style="margin:0" id="trGpu"></p>
+      <div class="row">
+        <button class="danger" type="button" id="trStop">학습 중지</button>
+        <span class="opt" id="trStopNextBox" hidden style="grid-template-columns:16px auto;align-items:center"><input type="checkbox" id="trStopNext"><label for="trStopNext">중지한 뒤 계획의 다음 학습을 이어서 시작 (끄면 계획 일시정지)</label></span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>학습 계획</h2>
+        <div class="row">
+          <span class="pill" id="tqState">비어 있음</span>
+          <button type="button" class="primary" id="tqRun">계획 실행</button>
+          <button type="button" id="tqPause">일시정지</button>
+        </div>
+      </div>
+      <p class="muted meta-line" style="margin:0" id="tqRunner"></p>
+      <ul class="plan" id="tqList"><li class="muted">왼쪽에서 설정을 고르고 <b>계획에 추가</b>를 누르면 여기에 쌓입니다. 앞 학습이 끝나면 다음 학습이 자동으로 시작되고, 브라우저·SSH를 닫거나 제어판이 재시작돼도 계속됩니다.</li></ul>
+      <div class="row"><button type="button" id="tqClear">끝난 항목 지우기</button></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>학습 기록</h2>
+        <div class="row">
+          <button type="button" id="trRefresh">새로고침</button>
+          <button type="button" class="primary" id="trRunsOpen">전체 기록 보기</button>
+        </div>
+      </div>
+      <ul class="recent-runs" id="trRecent"><li class="muted">불러오는 중...</li></ul>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>학습 로그</h2></div>
+      <pre class="log" id="trLog">아직 학습 기록이 없습니다.</pre>
+    </section>
+  </div>
+</div>
+</div>
+
+<div id="tab-eval" role="tabpanel" aria-labelledby="tabBtn-eval" hidden>
+<div class="safety">
+  <input type="checkbox" id="evConfirm">
+  <label for="evConfirm">로봇 옆에 사람이 있고, 팔로워 전원을 바로 뽑을 수 있습니다 (모델이 로봇을 스스로 움직입니다)</label>
+</div>
+<div class="grid">
+  <div class="col">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>실행 화면</h2>
+        <span class="pill" id="evPhase">대기</span>
+      </div>
+      <div class="cams">
+        <figure><div class="frame" id="evFrame-front">평가를 시작하면 실시간 영상이 나옵니다</div><figcaption><span><b>front</b> · 글로벌 카메라</span></figcaption></figure>
+        <figure><div class="frame" id="evFrame-wrist">평가를 시작하면 실시간 영상이 나옵니다</div><figcaption><span><b>wrist</b> · 팔로워 장착</span></figcaption></figure>
+      </div>
+      <div class="row" style="justify-content:space-between">
+        <span class="phase" id="evStepText">대기 중</span>
+        <span class="meta-line" id="evCount"></span>
+      </div>
+      <div class="bar"><div id="evBar"></div></div>
+      <p class="warn-box" id="evLoopWarn" hidden style="margin:0"></p>
+      <div class="row">
+        <button type="button" id="evNext" title="지금 시도(또는 원위치)를 일찍 끝내기">다음으로</button>
+        <button type="button" id="evRerec" title="이번 시도를 버리고 다시">이번 것 다시</button>
+        <button type="button" id="evStop" title="끝난 시도까지 저장하고 종료">평가 끝내기 (저장)</button>
+        <button type="button" class="danger" id="evKill" title="즉시 중단, 팔로워는 그 자세로 멈춤">즉시 중단</button>
+      </div>
+      <p class="muted" style="margin:0">원위치 시간에는 로봇이 마지막 자세로 멈춰 있습니다. 그동안 딸기를 빼서 제자리에 놓으세요. 평소에는 <b>평가 끝내기</b>로 마칩니다. <b>즉시 중단</b>(두 번 클릭)은 위험할 때만 쓰세요. 프로그램을 바로 끝내서 팔로워는 그 자세로 멈추지만, <b>이번 평가의 관절 기록이 저장되지 않습니다</b>(영상은 남음). 그래도 움직이면 팔로워 전원을 뽑으세요.</p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>결과 표시</h2>
+        <span class="mono" id="evScore"></span>
+      </div>
+      <p class="muted meta-line" style="margin:0" id="evResultTitle">평가를 시작하거나 아래 평가 기록에서 고르세요.</p>
+      <div class="ev-results" id="evResults"></div>
+      <p class="muted" style="margin:0">시도가 끝날 때마다 성공인지 실패인지 눌러주세요. 결과는 학습 기록 표의 "평가" 칸에 자동으로 붙습니다. 다시 누르면 지워집니다.</p>
+      <div class="row">
+        <button type="button" id="evReport">분석 자료 만들기</button>
+        <button type="button" id="evReportOpen" hidden>분석 자료 보기</button>
+        <span class="muted" id="evReportState"></span>
+      </div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="panel">
+      <div class="panel-head"><h2>모델 고르기</h2></div>
+      <label class="f">학습 기록의 모델
+        <select id="evModel"><option value="">불러오는 중...</option></select>
+      </label>
+      <div class="model-info" id="evModelInfo"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>평가 설정</h2></div>
+      <label class="f">작업 문장 (학습 데이터와 같은 문장)
+        <input type="text" id="evTask" autocomplete="off">
+      </label>
+      <div class="fields">
+        <label class="f">시도 횟수<input type="number" id="evEpisodes" min="1" max="100" value="5"></label>
+        <label class="f">시도 시간(초)<input type="number" id="evEpisodeS" min="3" value="30"></label>
+        <label class="f">원위치 시간(초)<input type="number" id="evResetS" min="0" value="15"></label>
+      </div>
+      <div class="opt">
+        <input type="checkbox" id="evSmooth"><label for="evSmooth"><b>부드럽게 실행</b> (ACT 시간 앙상블: 매 스텝 예측해 겹치는 동작을 평균 · 3초마다 튀는 동작이 줄어듦 · 스텝당 약 10ms 더 걸림)</label>
+      </div>
+      <div class="fields">
+        <label class="f"><span>CPU 스레드 수 <button type="button" class="qbtn help-open" data-help="ev-threads" title="CPU 스레드 수 설명" aria-label="CPU 스레드 수 설명">?</button></span><input type="number" id="evThreads" min="1" max="24" value="4"></label>
+      </div>
+      <p class="muted meta-line" style="margin:0" id="evPreview"></p>
+      <div class="row"><button class="primary" type="button" id="evStart">평가 시작</button></div>
+      <p class="tip-box">처음엔 딸기와 접시를 <b>녹화 때와 같은 위치</b>에 두고 시작하세요. 같은 위치에서 성공하는 걸 본 뒤 조금씩 옮겨봅니다. Rerun으로도 보려면 ① 탭의 "Rerun으로도 보기"를 켜두면 함께 적용됩니다.</p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>평가 기록</h2>
+        <button type="button" id="evRefresh">새로고침</button>
+      </div>
+      <ul class="recent-runs" id="evList"><li class="muted">불러오는 중...</li></ul>
+    </section>
+  </div>
+</div>
+</div>
+</div>
+
+<dialog id="reportDlg" aria-labelledby="reportTitle">
+  <div class="runs-wrap">
+    <div class="help-top">
+      <h2 id="reportTitle">평가 분석 자료</h2>
+      <button type="button" id="reportClose">닫기</button>
+    </div>
+    <p class="tip-box">피드백을 받으려면 Claude와의 대화에서 <b>"평가 분석해줘"</b>와 아래 폴더 경로를 알려주세요. 이 폴더의 사진과 수치(report.json)를 읽고 어디를 고치면 되는지 알려줍니다.<br><code class="mono" id="reportPath"></code> <button type="button" id="reportCopy">경로 복사</button></p>
+    <div class="report-imgs" id="reportImgs"></div>
+  </div>
+</dialog>
+
+<dialog id="runsDlg" aria-labelledby="runsTitle">
+  <div class="runs-wrap">
+    <div class="help-top">
+      <h2 id="runsTitle">학습 기록 <span class="muted" style="font-size:13px;font-weight:400">팀 전체 · <span id="runsPath">INDEX.md</span></span></h2>
+      <div class="row">
+        <button type="button" id="trRefresh2">새로고침</button>
+        <button type="button" id="runsClose">닫기</button>
+      </div>
+    </div>
+    <div class="runs-scroll"><table class="runs" id="trRuns"></table></div>
+    <p class="muted" style="margin:0">학습이 끝나면 자동으로 한 줄 추가됩니다. 비고는 학습 시작 때 쓴 메모이고, 나중에 고치려면 모델 폴더의 summary.json 안 note를 수정한 뒤 새로고침하세요.</p>
+  </div>
+</dialog>
+
+<dialog id="help" aria-labelledby="helpTitle">
+<div class="help-wrap">
+  <nav class="help-nav" id="helpNav" aria-label="매뉴얼 목차">
+    <a href="#h-start">처음 시작하기</a>
+    <a href="#h-open">제어판 여는 방법</a>
+    <a href="#h-safety">안전 확인</a>
+    <a href="#h-check">점검</a>
+    <a href="#h-camera">카메라</a>
+    <a href="#h-teleop">텔레옵</a>
+    <a href="#h-record">학습 데이터 녹화</a>
+    <a href="#h-replay">녹화 다시보기</a>
+    <a href="#h-train">② 학습 시키기</a>
+    <a href="#h-train-runs">학습 기록</a>
+    <a href="#h-eval">③ 평가</a>
+    <a href="#h-recover">멈췄을 때 복구</a>
+    <a href="#h-rerun">Rerun으로 보기</a>
+    <a href="#h-log">로그</a>
+    <a href="#h-data">저장 위치와 이름</a>
+    <a href="#h-trouble">문제 해결</a>
+  </nav>
+  <div class="help-body" id="helpBody">
+    <div class="help-top">
+      <h2 id="helpTitle">OMX 제어판 매뉴얼</h2>
+      <button type="button" id="helpClose">닫기</button>
+    </div>
+    <button type="button" class="help-full" id="helpFull">전체 매뉴얼 보기</button>
+
+    <section id="h-start">
+      <h3>처음 시작하기</h3>
+      <p>제어판은 GPU 노트북에서 돌아가는 웹 페이지입니다. 버튼을 누르면 GPU 노트북이 로봇과 카메라를 직접 움직이고, 이 브라우저는 화면 역할만 합니다.</p>
+      <ol>
+        <li><b>점검하기</b>로 로봇, 모터, 카메라, 다른 사용자 여부를 확인합니다.</li>
+        <li><b>카메라 켜기</b>로 global 카메라에 팔로워와 작업 공간이 다 들어오는지 봅니다.</li>
+        <li>로봇 옆 사람이 리더와 팔로워 자세를 맞추고, 맨 위 <b>안전 확인란</b>을 체크합니다.</li>
+        <li><b>텔레옵 시작</b>으로 조작을 연습합니다.</li>
+        <li>텔레옵을 <b>중지</b>하고 <b>녹화 시작</b>으로 학습 데이터를 모읍니다.</li>
+        <li><b>녹화 다시보기</b>로 잘 찍혔는지 확인합니다.</li>
+      </ol>
+      <p class="tip">로봇은 한 번에 한 사람, 한 프로그램만 제어할 수 있습니다. 텔레옵과 녹화는 동시에 실행되지 않습니다.</p>
+    </section>
+
+    <section id="h-open">
+      <h3>제어판 여는 방법</h3>
+      <ul>
+        <li><b>바탕화면 아이콘</b>: "OMX 제어판"을 더블클릭합니다. 서버를 켜고 연결한 뒤 크롬 새 창으로 엽니다.</li>
+        <li><b>터미널</b>: 내 노트북 터미널에서 <code>omx-panel</code>을 입력합니다.</li>
+        <li><b>VS Code Remote-SSH</b>: GPU 노트북 터미널에서 <code>omx-panel</code> 실행 후, 포트(Ports) 탭의 8765에서 지구본 아이콘을 누릅니다.</li>
+      </ul>
+      <p>주소 <code>127.0.0.1:8765</code>는 SSH 연결을 통해 GPU 노트북으로 이어집니다. 내 노트북을 재부팅했다면 위 방법으로 다시 여세요. 브라우저를 닫아도 실행 중인 텔레옵이나 녹화는 계속됩니다.</p>
+    </section>
+
+    <section id="h-safety">
+      <h3>안전 확인</h3>
+      <p>텔레옵과 녹화는 시작하면 팔로워가 리더 자세로 움직입니다(안전 시작으로 천천히). 그래서 맨 위 확인란을 체크해야만 시작 버튼이 동작합니다.</p>
+      <ul>
+        <li>로봇 옆에 사람이 있어야 합니다. 원격에서는 주변이 보이지 않습니다.</li>
+        <li>리더와 팔로워 자세가 크게 다르면 엘보 모터에 과부하가 걸릴 수 있습니다.</li>
+        <li>팔로워 주변에 걸릴 물건이 없어야 합니다.</li>
+        <li>팔로워 전원 공급기를 바로 뽑을 수 있는 곳에 둡니다.</li>
+      </ul>
+      <p><b>안전 시작</b>: 시작하면 팔로워가 ① 저장한 시작 자세로 팔을 들고 ② 그리퍼를 닫은 뒤 ③ 리더 자세로 천천히 다가갑니다. 이 동안 모터 출력은 30%로 제한됩니다. 다가가는 중에 리더를 잡고 움직이기 시작하면 바로 원래 출력과 속도로 따라잡습니다. 리더나 팔로워의 회전 관절이 한 바퀴 넘게 읽히면 자동으로 보정하고, 둘의 차이가 너무 크면(약 160° 이상) 시작하지 않고 이유를 알려줍니다. 녹화는 이 과정이 끝난 뒤에 시작됩니다.</p>
+      <p><b>안전 정지</b>: 중지하면 ① 저장한 끝 자세로 천천히 옮기고 ② 모터 출력을 3초에 걸쳐 줄인 뒤 ③ 토크를 끕니다. 그래서 팔이 툭 떨어지지 않습니다. 정지에 몇 초 걸리며, 그동안 상태가 "천천히 내려놓는 중"으로 보입니다. 이때 중지를 한 번 더 누르면 바로 끝나지만 토크가 켜진 채 그 자세로 멈춥니다.</p>
+      <p><b>시작 자세·끝 자세 저장</b>(텔레옵 칸): 리더암을 손으로 원하는 자세로 잡고 저장 버튼을 누릅니다. 리더 위치만 읽고 로봇은 움직이지 않습니다. 시작 자세는 그리퍼가 바닥에서 충분히 떨어진 "팔을 든 자세", 끝 자세는 "팔을 접어 작업대에 내려놓은 자세"로 정합니다. 처음 쓰기 전에 꼭 저장하세요.</p>
+    </section>
+
+    <section id="h-check">
+      <h3>점검</h3>
+      <p><b>점검하기</b>를 누르면 아래를 한 번에 확인합니다. 로봇은 움직이지 않습니다.</p>
+      <div class="help-table"><table>
+        <tr><th>항목</th><th>정상</th><th>문제일 때</th></tr>
+        <tr><td>로봇 포트</td><td><code>/dev/omx_follower</code>, <code>/dev/omx_leader</code> 있음</td><td>USB를 확인합니다</td></tr>
+        <tr><td>모터</td><td>팔로워 6개(ID 11–16), 리더 6개(ID 1–6) 응답</td><td>"하드웨어 에러"는 과부하입니다. <a href="#h-recover">모터 초기화</a>를 누르거나 팔로워 전원을 껐다 켭니다</td></tr>
+        <tr><td>카메라</td><td>front, wrist 연결됨</td><td>USB를 다시 꽂습니다</td></tr>
+        <tr><td>다른 사용자</td><td>비어 있음</td><td>다른 사람이 로봇을 쓰는 중입니다. 끝날 때까지 기다립니다</td></tr>
+      </table></div>
+      <p>로봇 프로그램이 실행 중이면 통신이 섞이지 않도록 모터 점검은 건너뜁니다.</p>
+    </section>
+
+    <section id="h-camera">
+      <h3>카메라</h3>
+      <ul>
+        <li><b>카메라 켜기</b>: front(글로벌)와 wrist(팔로워 장착) 영상을 약 15fps로 보여줍니다.</li>
+        <li>각 영상 아래 숫자는 밝기입니다. <b>"검은 화면"</b>이 뜨면 렌즈 캡, 가림, USB를 확인합니다.</li>
+        <li>카메라 보기는 <b>카메라 없는 텔레옵과 동시에</b> 쓸 수 있습니다.</li>
+        <li><b>녹화를 시작하면 카메라 보기는 자동으로 꺼지고</b>, 녹화 프로그램이 읽는 영상이 같은 자리에 나옵니다.</li>
+        <li><b>화면 고정</b>(기본 켜짐): 아래로 스크롤해도 카메라 칸이 왼쪽 위에 붙어 따라 내려옵니다. 녹화 버튼과 영상을 한 화면에서 보며 작업할 수 있습니다. 다시보기·로그를 볼 때 가리면 체크를 끄세요. 좁은 창(한 줄 배치)에서는 고정하지 않습니다.</li>
+      </ul>
+      <p class="tip">global 카메라에는 팔로워 전체와 물체 위치가 들어오고, 리더나 사람 손은 들어오지 않아야 합니다. 정해진 위치는 녹화와 실행 내내 바꾸지 않습니다.</p>
+      <p><b>카메라 위치 맞추기</b>: 카메라 칸 아래를 펼치고 기준 데이터(학습에 쓴 녹화)를 고르면, 그 첫 화면이 front 영상 위에 반투명으로 겹쳐 보입니다. 아래 문구가 "학습 때와 같은 위치입니다"가 될 때까지 카메라를 옮기세요. 카메라 위치가 바뀌면 모델은 처음 보는 장면으로 받아들여 성공률이 크게 떨어집니다.</p>
+    </section>
+
+    <section id="h-teleop">
+      <h3>텔레옵</h3>
+      <ul>
+        <li><b>텔레옵 시작</b>: 안전 시작(팔 들기 → 그리퍼 닫기 → 천천히 리더 자세로) 뒤 리더를 따라 움직입니다. 데이터는 저장되지 않습니다.</li>
+        <li>상태 칸에 경과 시간과 제어 주기(정상은 약 60Hz)가 표시됩니다.</li>
+        <li><b>중지</b>: 안전 정지(끝 자세로 이동 → 출력 서서히 줄이기 → 토크 끄기)로 끝냅니다. 몇 초 걸립니다.</li>
+        <li>기본은 카메라 없이 실행합니다. 화면은 왼쪽 카메라 보기로 확인합니다. <a href="#h-rerun">Rerun 보기</a>를 켜면 카메라를 포함해 실행하고 영상을 Rerun으로 보냅니다.</li>
+      </ul>
+    </section>
+
+    <section id="h-record">
+      <h3>학습 데이터 녹화</h3>
+      <ol>
+        <li><b>데이터셋</b>: 새로 만들거나, 내 기존 데이터셋을 골라 이어서 녹화합니다.</li>
+        <li><b>새 데이터셋 이름</b>: 현재 시각 <code>MMDD_HHMM</code>이 미리 채워집니다. 고쳐 써도 됩니다.</li>
+        <li><b>작업 설명</b>: 영어 한 문장입니다. 같은 데이터셋에서는 항상 같은 문장을 씁니다.</li>
+        <li><b>에피소드 수 / 시연 시간 / 원위치 시간</b>을 정하고 <b>녹화 시작</b>을 누릅니다.</li>
+      </ol>
+      <p>녹화는 "녹화 중"과 "원위치 시간"을 번갈아 반복합니다. 원위치 시간은 저장되지 않으니 이때 물체를 제자리에 놓습니다.</p>
+      <div class="help-table"><table>
+        <tr><th>버튼</th><th>하는 일</th></tr>
+        <tr><td>다음으로</td><td>지금 단계를 바로 끝냅니다. 시연이 일찍 끝났거나 원위치를 마쳤을 때 누릅니다</td></tr>
+        <tr><td>이번 것 다시 찍기</td><td>방금 에피소드를 버리고 다시 찍습니다. 실패한 시연은 꼭 다시 찍으세요</td></tr>
+        <tr><td>녹화 끝내기 (저장)</td><td>완료된 에피소드까지 저장하고 끝냅니다. 진행 중이던 에피소드는 버려집니다</td></tr>
+      </table></div>
+      <p><b>음성 안내</b>를 체크하면 이 노트북 스피커로 "에피소드 N 녹화 시작", "물체를 원위치하세요", "저장 완료"를 알려줍니다.</p>
+      <p><b>Hugging Face 자동 업로드</b>를 체크하면, 녹화가 정상으로 끝난 뒤 <code>huggingface.co/datasets/&lt;HF 아이디&gt;/omx_&lt;첫 키워드&gt;_&lt;MMDD_HHMM&gt;</code>에 비공개로 올립니다. 키워드는 설명과 작업 문장을 보고 자동으로 정합니다. 예를 들어 "딸기를 집어 접시에 놓기"는 strawberry, pick_place, plate가 되고, 첫 키워드가 이름에 들어갑니다. 키워드는 태그로도 붙고, 설명·작업 문장·에피소드 수·카메라 구성·녹화 시각이 데이터셋 페이지에 표로 정리됩니다. 강제 종료했거나 에러로 끝난 녹화는 올리지 않습니다. 업로드는 공유 폴더 저장 다음에 따로 하므로, 실패해도 녹화 데이터는 남아 있습니다. 처음 한 번은 터미널에서 <code>ssh -t omx-gpu '~/venv/il/bin/hf auth login'</code>으로 로그인해야 합니다. 이때 Write 권한 토큰이 필요합니다.</p>
+      <p class="tip">처음엔 에피소드 2~3개로 짧게 시험하고, 다시보기로 확인한 뒤 본 녹화를 합니다. 학습에는 보통 50개 이상이 필요합니다.</p>
+    </section>
+
+    <section id="h-replay">
+      <h3>녹화 다시보기</h3>
+      <ol>
+        <li><b>데이터셋</b>에서 고릅니다. 공유 폴더의 팀 전체 데이터셋이 나옵니다.</li>
+        <li><b>에피소드 버튼</b>을 누르면 그 에피소드가 열립니다.</li>
+        <li><b>재생</b>: front와 wrist가 함께 재생되고, 에피소드 끝에서 멈춥니다.</li>
+      </ol>
+      <p>재생 위치 막대로 넘겨볼 수 있고, 처음으로 버튼과 0.5배~4배 속도 조절이 있습니다. 영상 아래에 작업 설명과 프레임 수가 나옵니다.</p>
+      <p>확인할 점: 팔로워가 화면 밖으로 나가는지, wrist 영상이 검은지, 사람 손이 찍혔는지, 실패한 시연이 섞였는지 봅니다.</p>
+      <p>예전에 녹화한 데이터셋은 <b>이 데이터셋 Hugging Face에 올리기</b> 버튼으로 나중에 올릴 수 있습니다. 진행 상황은 녹화 칸 아래에 표시됩니다.</p>
+    </section>
+
+    <section id="h-train">
+      <h3>② 학습 시키기</h3>
+      <ol>
+        <li><b>학습 데이터 고르기</b>: 녹화 원본에 체크합니다. <b>빠른 선택</b>으로 전체 선택·선택 해제·날짜별 선택을 할 수 있고, <b>짧은 에피소드 빼기</b>는 데이터셋마다 길이 중앙값의 60%보다 짧은 에피소드(중간에 끊긴 시연 등)를 뺍니다.</li>
+        <li><b>영상 보며 고르기</b>: 이름을 눌러 에피소드를 펼친 뒤 에피소드를 누르면 아래에서 front·wrist 영상이 2배속으로 재생됩니다. 실패한 시연이면 <b>학습에서 빼기</b>(단축키 X)를 누르고, <b>다음 ▶</b>(→)으로 넘기며 훑어봅니다. 스페이스는 재생·멈춤입니다.</li>
+        <li><b>학습 설정</b>: 정책(ACT 추천), 스텝 수, 배치 크기, 이미지 증강을 정합니다. 아래에 예상 소요 시간과 데이터 반복 횟수, 저장 위치가 나옵니다.</li>
+        <li><b>바로 시작</b>을 누르면 진행 막대, 남은 시간, 손실 그래프가 실시간으로 표시됩니다.</li>
+      </ol>
+      <p><b>학습 계획 (여러 학습 이어서 하기)</b>: 예를 들어 같은 데이터로 ACT를 먼저, 끝나면 Diffusion을 학습하려면</p>
+      <ol>
+        <li>데이터와 ACT 설정을 고르고 <b>계획에 추가</b>, 정책을 Diffusion으로 바꾸고 다시 <b>계획에 추가</b>합니다.</li>
+        <li>오른쪽 <b>학습 계획</b>에서 <b>계획 실행</b>을 누릅니다. 위에서부터 하나씩 학습하고, 앞 학습이 끝나면 다음 학습을 자동으로 시작합니다. 다른 계정이 GPU로 학습 중이면 끝날 때까지 기다렸다 시작합니다.</li>
+        <li>계획은 GPU 노트북에 파일로 저장되고 제어판과 따로 돌아갑니다. 브라우저·SSH를 닫거나 제어판이 재시작돼도 계속됩니다.</li>
+      </ol>
+      <ul>
+        <li>대기 중인 항목은 <b>▲▼</b>로 순서를 바꾸거나 <b>취소</b>할 수 있습니다. 실행 중에 새 항목을 추가하면 맨 뒤에서 차례를 기다립니다.</li>
+        <li>앞 학습이 <b>실패</b>하면(예: GPU 메모리 부족) 실패로 표시하고 다음 항목으로 넘어갑니다. 로그는 그대로 남고, <b>다시 넣기</b>로 같은 설정을 맨 뒤에 다시 넣을 수 있습니다.</li>
+        <li>실행 중인 학습을 <b>학습 중지</b>로 멈추면 기본은 <b>계획 전체 일시정지</b>입니다. 중지 버튼 옆 체크를 켜고 멈추면 다음 항목을 바로 시작합니다. <b>일시정지</b> 버튼은 지금 학습은 끝까지 하고 다음 항목만 시작하지 않습니다.</li>
+        <li>항목마다 결과 모델 경로, 최종 손실, 걸린 시간이 표시됩니다.</li>
+        <li>같은 녹화·같은 에피소드 조합으로 합친 학습 데이터가 이미 있으면 새로 만들지 않고 그대로 씁니다.</li>
+      </ul>
+      <p>여러 데이터셋을 고르거나 에피소드를 빼면, 남은 에피소드로 <code>&lt;계정&gt;/train_&lt;키워드&gt;_&lt;MMDD_HHMM&gt;</code> 학습 데이터를 새로 만듭니다. 원본 녹화는 바뀌지 않습니다. 모델은 같은 시각을 붙여 <code>/srv/il/checkpoints/&lt;계정&gt;/&lt;정책&gt;_&lt;키워드&gt;_&lt;MMDD_HHMM&gt;</code>에 저장되므로, 이름만으로 짝을 찾을 수 있습니다.</p>
+      <p>로봇은 움직이지 않으니 안전 확인이 필요 없습니다. 브라우저를 닫거나 제어판을 재시작해도 학습은 계속됩니다. GPU는 하나라서 <b>한 번에 한 학습만</b> 돌립니다. 다른 사람이 학습 중이면 바로 시작 버튼이 잠기고 누가 쓰는지 표시됩니다. 이때도 계획에 넣어두면 GPU가 비는 대로 시작합니다.</p>
+      <p><b>학습 중지</b>는 한 번 더 눌러야 실행됩니다. 멈추면 그때까지의 중간 저장은 남지만, 최종 모델과 기록 표 줄은 생기지 않습니다.</p>
+      <p class="tip">ACT 기준 배치 8, 4만 스텝에 약 2시간입니다. 데이터가 20~50개라면 데이터를 30~80바퀴 도는 정도면 충분합니다. 손실 그래프가 평평해지면 더 늘려도 큰 차이가 없습니다.</p>
+    </section>
+
+    <section id="h-tr-policy">
+      <h3>정책</h3>
+      <p>로봇이 카메라 영상과 관절 위치를 보고 다음 동작을 정하는 <b>모델의 종류</b>예요.</p>
+      <ul>
+        <li><b>ACT</b>: 시연 수십 개로 정해진 작업 하나를 정확하게 따라 하는 데 강해요. 학습이 빠르고 메모리도 적게 써요. 처음엔 ACT를 추천해요.</li>
+        <li><b>Diffusion</b>: 동작이 부드럽고 여러 방식의 시연을 잘 섞어요. 대신 데이터가 더 필요하고, 학습이 몇 배 느리고, 이미지 2장(지금과 직전)을 함께 봐서 RAM도 2배 가까이 써요.</li>
+      </ul>
+      <p>정책을 바꾸면 배치 크기와 데이터 로딩 수가 그 정책의 기본값(ACT 8·8, Diffusion 16·4)으로 바뀌어요.</p>
+    </section>
+
+    <section id="h-tr-steps">
+      <h3>스텝 수</h3>
+      <p>모델 가중치를 <b>몇 번 고칠지</b>예요. 한 스텝마다 배치 하나를 보고 조금씩 고쳐요. 많을수록 오래 배우지만 시간이 늘고, 너무 많으면 녹화 데이터만 외우는(과적합) 경우도 있어요.</p>
+      <p>데이터를 몇 바퀴 보는지 = 스텝 × 배치 ÷ 전체 프레임 수. 아래 예상 칸에 바퀴 수가 나와요.</p>
+      <p class="tip">참고: ACT 30,000~100,000, Diffusion 50,000~200,000. 손실 그래프가 평평해지면 더 늘려도 큰 차이가 없어요.</p>
+    </section>
+
+    <section id="h-tr-batch">
+      <h3>배치 크기</h3>
+      <p>한 스텝에 <b>함께 보는 프레임 수</b>예요. 크면 학습이 안정적이고 같은 스텝에서 더 많은 데이터를 보지만, GPU 메모리와 RAM을 더 쓰고 스텝 하나가 느려져요.</p>
+      <p class="tip">RAM이나 GPU 메모리가 부족하면 먼저 데이터 로딩 수를, 그래도 부족하면 배치를 줄이세요. 배치를 절반으로 줄이면 같은 바퀴 수를 보기 위해 스텝을 2배로 늘려야 해요.</p>
+    </section>
+
+    <section id="h-tr-workers">
+      <h3>데이터 로딩 수</h3>
+      <p>녹화 영상에서 프레임을 꺼내 이미지로 바꾸고 증강해서 배치로 묶는 <b>보조 프로세스(CPU) 개수</b>예요. 많으면 GPU가 데이터를 덜 기다려서 빨라지지만, 프로세스마다 배치를 2개씩 미리 만들어 쌓아 두기 때문에 <b>RAM을 많이 써요</b>.</p>
+      <p class="tip">학습이 RAM 부족으로 멈추면(로그에 <code>DataLoader worker ... killed</code>) 이 값을 먼저 줄이세요. 0이면 보조 프로세스 없이 학습 프로그램이 직접 읽어서 RAM은 가장 적게 쓰지만 아주 느려요.</p>
+    </section>
+
+    <section id="h-tr-aug">
+      <h3>이미지 증강</h3>
+      <p>학습할 때 영상의 밝기·대비·색감·위치를 조금씩 무작위로 바꿔서 보여 주는 기능이에요. 조명이나 카메라가 조금 달라져도 모델이 덜 헷갈리게 돼요. 보통 켜 두세요.</p>
+      <p>증강은 데이터 로딩 프로세스가 CPU로 처리해서, 켜면 스텝이 조금 느려질 수 있어요.</p>
+    </section>
+
+    <section id="h-tr-ram">
+      <h3>예상 RAM·학습 시간</h3>
+      <p><b>예상 RAM</b>은 정책·배치·데이터 로딩 수·카메라 수와 해상도로 계산하고, 이 GPU 노트북에서 실제로 잰 값으로 맞춘 숫자예요. <b>사용 가능</b>은 지금 GPU 노트북에 남은 RAM이에요.</p>
+      <ul>
+        <li>초록: 넉넉해요.</li>
+        <li>노랑(사용 가능의 70% 이상): 학습 중에 다른 일을 하면 모자랄 수 있어요.</li>
+        <li>빨강(90% 이상): RAM 부족으로 학습이 죽을 가능성이 높아요. 시작 전에 한 번 더 묻고, <b>권장값 적용</b>으로 줄인 값을 넣을 수 있어요. 학습 계획도 시작하는 순간 다시 확인해서, 모자라면 시작하지 않고 "메모리 부족 예상"으로 표시해요.</li>
+      </ul>
+      <p>RAM이 모자라면 리눅스가 학습 프로그램(때로는 화면·소리 같은 다른 프로그램까지)을 강제로 꺼요. GPU 메모리와는 다른 문제예요.</p>
+      <p><b>예상 학습 시간</b>은 같은 정책·배치·로딩 수로 했던 이전 학습의 스텝당 시간 × 스텝 수예요. 기록이 없으면 "알 수 없음"으로 나와요.</p>
+    </section>
+
+    <section id="h-train-runs">
+      <h3>학습 기록</h3>
+      <p>팀 전체의 학습이 번호순으로 누적됩니다. 칸에는 최근 3개만 간단히 보이고, <b>전체 기록 보기</b>를 누르면 넓은 창에서 전체 표를 봅니다. <code>/srv/il/checkpoints/INDEX.md</code>와 같은 내용이고, 학습이 끝나면 자동으로 한 줄 추가됩니다.</p>
+      <ul>
+        <li><b>모델</b>: <b>경로 복사</b>를 누르면 평가할 때 <code>--policy.path</code>에 넣을 경로가 복사됩니다.</li>
+        <li><b>학습 데이터 / 원본 녹화</b>: 어떤 녹화의 몇 번 에피소드로 학습했는지 보여줍니다. 각 모델 폴더의 <code>TRAINED_ON.md</code>에도 같은 내용이 있습니다.</li>
+        <li><b>중간 저장 지우기</b>: 내 학습만, 최종 모델이 있을 때만 보입니다. 1만 스텝마다 저장된 중간 결과(하나에 약 600MB)를 지우고 최종 모델은 남깁니다.</li>
+        <li><b>비고</b>: 학습 시작 때 쓴 메모가 들어갑니다. 평가 결과 같은 나중 메모는 모델 폴더의 <code>summary.json</code> 안 <code>note</code>에 적고 새로고침하세요.</li>
+      </ul>
+    </section>
+
+    <section id="h-eval">
+      <h3>③ 평가</h3>
+      <p>학습된 모델로 로봇을 실제로 움직여 몇 번 성공하는지 확인합니다. <b>모델이 로봇을 스스로 움직이므로</b>, 로봇 옆에 사람이 있고 팔로워 전원을 바로 뽑을 수 있을 때만 합니다.</p>
+      <ol>
+        <li><b>모델 고르기</b>: 학습 기록의 모델 중에서 고릅니다. 어떤 데이터로 학습했는지와 지금까지의 평가 결과가 함께 보입니다.</li>
+        <li><b>평가 설정</b>: 작업 문장(학습 데이터와 같은 문장, 자동 입력), 시도 횟수, 시도 시간, 원위치 시간을 정합니다.</li>
+        <li>안전 확인란을 체크하고 <b>평가 시작</b>을 누릅니다. 모델을 불러오는 데 몇 초 걸립니다.</li>
+        <li><b>실행 화면</b>에서 실시간 영상과 남은 시간을 봅니다. 원위치 시간에는 로봇이 멈춰 있으니 딸기를 빼서 제자리에 놓습니다.</li>
+        <li>시도가 끝날 때마다 <b>결과 표시</b>에서 성공·실패를 누릅니다. 결과는 학습 기록 표의 "평가" 칸에 자동으로 붙습니다.</li>
+      </ol>
+      <div class="help-table"><table>
+        <tr><th>버튼</th><th>하는 일</th></tr>
+        <tr><td>다음으로</td><td>지금 시도나 원위치를 일찍 끝냅니다</td></tr>
+        <tr><td>이번 것 다시</td><td>방금 시도를 버리고 다시 합니다(딸기 위치를 잘못 놓았을 때 등)</td></tr>
+        <tr><td>평가 끝내기 (저장)</td><td>끝난 시도까지 저장하고 종료합니다</td></tr>
+        <tr><td>즉시 중단</td><td>두 번 눌러야 실행됩니다. 프로그램을 바로 끝내고 팔로워는 그 자세로 멈춥니다. 위험해 보일 때 씁니다</td></tr>
+      </table></div>
+      <p>평가 영상은 <code>&lt;계정&gt;/eval_&lt;모델&gt;_&lt;MMDD_HHMM&gt;</code>으로 저장됩니다. 평가 기록의 <b>다시보기</b>를 누르면 ① 탭 다시보기에서 바로 열립니다. 예전 평가도 <b>결과 표시</b>를 눌러 나중에 성공·실패를 표시할 수 있습니다.</p>
+      <p class="tip">처음엔 딸기와 접시를 녹화 때와 같은 위치에 두세요. 같은 위치에서 성공하는 걸 본 뒤 조금씩 옮겨 어디까지 되는지 봅니다. 시작 전에 ① 탭의 "카메라 위치 맞추기"로 front 카메라가 학습 때와 같은지 확인하세요.</p>
+      <p><b>부드럽게 실행</b>: ACT가 3초마다 새 동작 묶음으로 바뀌며 튀는 현상을 줄입니다. 매 스텝 예측해서 겹치는 동작을 평균 내는 방식입니다. 모델을 다시 학습할 필요는 없고, 스텝당 약 10ms가 더 걸립니다.</p>
+      <p><b>분석 자료 만들기</b>: 고른 평가의 시도 장면, 학습 시연과 비교한 관절 그래프, 딸기 시작 위치 지도를 만듭니다. Claude와의 대화에서 "평가 분석해줘"와 표시된 폴더 경로를 알려주면 개선점을 알려줍니다.</p>
+    </section>
+
+    <section id="h-ev-threads">
+      <h3>CPU 스레드 수</h3>
+      <p>평가할 때 카메라 이미지 전처리 같은 <b>CPU 계산을 몇 개로 나눠 동시에 처리할지</b>예요. 모델 추론은 GPU가 하기 때문에 이 값은 결과(정확도)는 바꾸지 않고 속도만 바꿔요.</p>
+      <p>값이 너무 크면 작은 일을 너무 잘게 나누고 서로 기다리느라 CPU를 다 써 버려요. 그러면 제어가 초당 30번을 못 맞추고 로봇이 끊겨요. 너무 작으면 계산이 느려져요.</p>
+      <div class="help-table"><table>
+        <tr><th>스레드</th><th>제어 속도 (부드럽게 켬)</th><th>CPU 사용</th></tr>
+        <tr><td>1~8</td><td>30Hz 유지</td><td>약 3~4코어</td></tr>
+        <tr><td>24 (예전 기본)</td><td>약 23Hz, 매번 느림</td><td>약 22코어</td></tr>
+      </table></div>
+      <p class="tip">기본값 4는 이 GPU 노트북에서 측정해 가장 안정적이었던 값이에요. 평가 중에 "제어 속도 ○Hz / 목표 30Hz" 경고가 뜨면 먼저 학습 같은 다른 작업을 멈추고, 그래도 뜨면 이 값을 2나 8로 바꿔 보세요.</p>
+    </section>
+
+    <section id="h-recover">
+      <h3>멈췄을 때 복구</h3>
+      <p>두 버튼 모두 실수 방지를 위해 <b>한 번 더 눌러야</b> 실행됩니다.</p>
+      <ul>
+        <li><b>강제 종료</b>: 중지를 눌러도 끝나지 않거나 다음 실행이 안 될 때 씁니다. 실행 중인 텔레옵·녹화와 하위 프로세스를 즉시 끝내고 포트, 카메라, 잠금을 풉니다. 팔로워는 토크가 켜진 채 자세를 유지합니다. 녹화 중이었다면 진행 중이던 에피소드는 저장되지 않습니다.</li>
+        <li><b>모터 초기화</b>: 강제 종료 후에도 모터가 응답하지 않거나 점검에서 하드웨어 에러가 나올 때 씁니다. 두 팔의 모터 12개를 재부팅해 에러를 지웁니다. <b>토크가 즉시 풀려 팔로워가 떨어지므로, 팔을 내려둔 상태에서만 누릅니다.</b> 내려둘 수 없으면 옆 사람이 팔을 받친 상태에서 누릅니다.</li>
+      </ul>
+      <p>그래도 "에러 남음"이 나오면 팔로워 전원(12V)을 껐다 켭니다.</p>
+    </section>
+
+    <section id="h-rerun">
+      <h3>Rerun으로 보기 (선택)</h3>
+      <p>녹화 중에는 카메라를 녹화 프로그램이 쓰고 있어서 제어판 카메라 화면이 꺼집니다. 녹화 중에도 영상과 관절 그래프를 보려면 Rerun을 씁니다.</p>
+      <ol>
+        <li>내 노트북 터미널에서 <code>source ~/venv/il/bin/activate</code> 후 <code>rerun</code>을 실행해 창을 띄워둡니다.</li>
+        <li>제어판에서 "Rerun으로 보내기"를 체크하고 내 노트북 Tailscale IP를 넣습니다. 확인은 <code>tailscale ip -4</code>로 합니다.</li>
+        <li>텔레옵이나 녹화를 시작하면 Rerun 창에 나타납니다.</li>
+      </ol>
+      <p>Rerun 버전은 GPU 노트북과 같은 0.26.2여야 합니다.</p>
+    </section>
+
+    <section id="h-log">
+      <h3>로그</h3>
+      <p>실행 중인 텔레옵·녹화의 출력이 실시간으로 나옵니다. 문제가 생기면 여기의 마지막 줄들을 확인합니다. 전체 기록은 GPU 노트북의 <code>~/il_ws/omx_logs/</code>에 실행할 때마다 파일로 남습니다.</p>
+      <p>"Headless environment detected", "pynput" 경고는 원격 실행이라 키보드 단축키를 끈다는 뜻입니다. 정상이니 무시하세요. 같은 기능은 녹화 버튼으로 합니다.</p>
+    </section>
+
+    <section id="h-data">
+      <h3>저장 위치와 이름</h3>
+      <div class="help-table"><table>
+        <tr><th>무엇</th><th>위치</th></tr>
+        <tr><td>녹화 데이터셋</td><td><code>&lt;데이터 폴더&gt;/계정/MMDD_HHMM</code> (기본 <code>/srv/il/lerobot_data</code>)</td></tr>
+        <tr><td>캘리브레이션 (팀 공유)</td><td><code>&lt;데이터 폴더&gt;/calibration</code></td></tr>
+        <tr><td>학습 결과(모델), 학습 기록 표</td><td><code>&lt;모델 폴더&gt;/계정/…</code>, <code>INDEX.md</code> (기본 <code>/srv/il/checkpoints</code>)</td></tr>
+        <tr><td>이 GPU 노트북의 실제 위치</td><td>설치 때 정한 값이며 <code>python omx_config.py</code>로 확인합니다</td></tr>
+        <tr><td>실행 로그</td><td>GPU 노트북 <code>~/il_ws/omx_logs/</code></td></tr>
+      </table></div>
+      <p>데이터셋은 계정별 폴더로 나뉘어 서로 덮어쓰지 않습니다. 한 번 모은 데이터셋은 고치지 말고 새 이름으로 추가합니다. 어떤 데이터로 어떤 모델을 학습했는지 재현하기 위해서입니다.</p>
+    </section>
+
+    <section id="h-trouble">
+      <h3>문제 해결</h3>
+      <div class="help-table"><table>
+        <tr><th>증상</th><th>해결</th></tr>
+        <tr><td>"제어판 서버와 연결이 끊겼습니다"</td><td>바탕화면 아이콘이나 <code>omx-panel</code>로 다시 엽니다</td></tr>
+        <tr><td>카메라 켜기가 거부됨</td><td>녹화나 카메라를 쓰는 텔레옵이 실행 중입니다. 끝난 뒤 켜거나, 멈춘 경우 강제 종료합니다</td></tr>
+        <tr><td>wrist가 검은 화면</td><td>렌즈 캡이나 가림, USB를 확인합니다</td></tr>
+        <tr><td>wrist 영상이 끊기듯 느림</td><td>조명을 밝게 합니다. 카메라를 켤 때 fps 고정이 자동으로 적용됩니다</td></tr>
+        <tr><td>"다른 사람이 로봇을 쓰고 있습니다"</td><td>점검에 나온 사용자에게 확인합니다. 다른 계정의 프로그램은 강제 종료할 수 없습니다</td></tr>
+        <tr><td>모터 "하드웨어 에러"</td><td>모터 초기화 후, 리더와 팔로워 자세를 맞추고 다시 시작합니다</td></tr>
+        <tr><td>녹화가 "저장 중"에서 오래 멈춤</td><td>1분 넘게 그대로면 강제 종료하고 로그를 확인합니다</td></tr>
+        <tr><td>포트 없음</td><td>USB 허브와 케이블을 확인합니다. 노트북 본체 포트에 직접 꽂으면 더 안정적입니다</td></tr>
+      </table></div>
+    </section>
+  </div>
+</div>
+</dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+// ---- Manual popup: "사용법" and the "?" next to each panel title ----
+const HELP_FOR = {
+  "카메라": "camera", "녹화 다시보기": "replay", "로그": "log", "점검": "check",
+  "멈췄을 때 복구": "recover", "텔레옵": "teleop", "학습 데이터 녹화": "record", "Rerun으로도 보기 (선택)": "rerun",
+  "실행 화면": "eval", "결과 표시": "eval", "모델 고르기": "eval", "평가 설정": "eval", "평가 기록": "eval",
+  "학습 데이터 고르기": "train", "학습 설정": "train", "진행 상황": "train", "학습 기록": "train-runs", "학습 로그": "train",
+};
+for (const h of document.querySelectorAll(".panel h2")) {
+  const key = HELP_FOR[h.textContent.trim()];
+  if (!key) continue;
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "qbtn help-open"; b.dataset.help = key;
+  b.textContent = "?"; b.title = h.textContent.trim() + " 사용법"; b.setAttribute("aria-label", b.title);
+  h.appendChild(b);
+}
+(function addSafetyHelp() {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "qbtn help-open"; b.dataset.help = "safety";
+  b.textContent = "?"; b.title = "안전 확인 설명"; b.setAttribute("aria-label", b.title);
+  document.querySelector(".safety").appendChild(b);
+})();
+
+// single=true: only that topic in a small popup ("?"); false: the full manual ("사용법")
+function openHelp(section, single) {
+  const dlg = $("help");
+  section = section || "start";
+  const target = document.getElementById("h-" + section);
+  for (const s of $("helpBody").querySelectorAll("section")) s.classList.toggle("current", s === target);
+  dlg.classList.toggle("single", !!single);
+  $("helpTitle").textContent = single && target ? target.querySelector("h3").textContent : "OMX 제어판 매뉴얼";
+  if (!dlg.open) dlg.showModal();
+  if (single) $("helpBody").scrollTop = 0;
+  else if (target) target.scrollIntoView({ block: "start" });
+  markHelpNav(section);
+}
+$("helpFull").addEventListener("click", () => {
+  const current = $("helpBody").querySelector("section.current");
+  openHelp(current ? current.id.slice(2) : "start", false);
+});
+function markHelpNav(section) {
+  for (const a of $("helpNav").querySelectorAll("a")) a.classList.toggle("on", a.getAttribute("href") === "#h-" + section);
+}
+document.addEventListener("click", (ev) => {
+  const b = ev.target.closest(".help-open");
+  if (b) { openHelp(b.dataset.help, b.classList.contains("qbtn")); return; }
+  const link = ev.target.closest("#help a[href^='#h-']");
+  if (link) {
+    ev.preventDefault();
+    const id = link.getAttribute("href").slice(1);
+    if ($("help").classList.contains("single")) { openHelp(id.slice(2), true); return; }
+    for (const s of $("helpBody").querySelectorAll("section")) s.classList.toggle("current", s.id === id);
+    document.getElementById(id).scrollIntoView({ block: "start", behavior: "smooth" });
+    markHelpNav(id.slice(2));
+  }
+});
+$("helpClose").addEventListener("click", () => $("help").close());
+$("help").addEventListener("click", (ev) => { if (ev.target === $("help")) $("help").close(); });  // click outside closes
+const store = {
+  get(k, d) { try { return localStorage.getItem(k) ?? d; } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+};
+$("viewerIp").value = store.get("omx.viewerIp", "");
+$("useRerun").checked = store.get("omx.useRerun", "0") === "1";
+$("task").value = store.get("omx.task", $("task").value);
+$("viewerIp").addEventListener("change", () => store.set("omx.viewerIp", $("viewerIp").value.trim()));
+$("useRerun").addEventListener("change", () => store.set("omx.useRerun", $("useRerun").checked ? "1" : "0"));
+$("task").addEventListener("change", () => store.set("omx.task", $("task").value));
+$("dsNote").value = store.get("omx.note", "");
+$("dsNote").addEventListener("change", () => store.set("omx.note", $("dsNote").value));
+$("autoUpload").checked = store.get("omx.autoUpload", "1") === "1";
+$("autoUpload").addEventListener("change", () => store.set("omx.autoUpload", $("autoUpload").checked ? "1" : "0"));
+$("voice").checked = store.get("omx.voice", "0") === "1";
+$("voice").addEventListener("change", () => {
+  store.set("omx.voice", $("voice").checked ? "1" : "0");
+  if ($("voice").checked) say("음성 안내를 켰습니다");  // the click also unlocks audio in the browser
+});
+
+let state = null;
+let streamsOn = false;
+
+// Voice prompts in this browser (the GPU laptop's speaker is not reachable from a remote session)
+let lastCue = "";
+let audioCtx = null;
+function beep(freq, ms) {
+  try {
+    audioCtx = audioCtx || new AudioContext();
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.frequency.value = freq; g.gain.value = 0.15;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + ms / 1000);
+  } catch (e) {}
+}
+function say(text) {
+  if (!$("voice").checked) return;
+  beep(880, 120);
+  try {
+    if (!("speechSynthesis" in window)) return;
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "ko-KR"; u.rate = 1.05;
+    speechSynthesis.speak(u);
+  } catch (e) {}
+}
+function voiceCue(job) {
+  const info = job.info || {};
+  if (job.kind !== "record" && job.kind !== "eval") return;
+  const key = [job.running, info.phase, info.episode].join("|");
+  if (key === lastCue) return;
+  const first = lastCue === "";
+  lastCue = key;
+  if (first) return;  // do not announce the state that was already there when the page opened
+  if (info.phase === "녹화 중") say(`에피소드 ${(info.episode || 0) + 1} 녹화 시작`);
+  else if (info.phase === "실행 중") say(`시도 ${(info.episode || 0) + 1} 시작`);
+  else if (info.phase === "원위치 시간" && job.kind === "eval") say("시도 끝. 성공 여부를 누르고 딸기를 원위치하세요");
+  else if (info.phase === "원위치 시간") say("녹화 끝. 물체를 원위치하세요");
+  else if (info.phase === "다시 찍기") say("다시 찍습니다");
+  else if (info.phase === "저장 중") say("녹화를 마치고 저장합니다");
+  else if (info.phase === "끝남") say(info.returncode === 0 ? "저장 완료" : "녹화가 비정상 종료됐습니다");
+}
+
+let toastTimer = null;
+function toast(msg, kind) {
+  const t = $("toast");
+  t.textContent = msg || "";
+  t.className = "toast" + (kind ? " " + kind : "");
+  clearTimeout(toastTimer);
+  if (msg) toastTimer = setTimeout(() => { t.textContent = ""; }, kind === "err" ? 9000 : 5000);
+}
+
+async function api(path, body) {
+  const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  const data = await res.json();
+  if (!res.ok || data.error) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+function viewerIp() { return $("useRerun").checked ? $("viewerIp").value.trim() : ""; }
+
+// camera panel follows the scroll into the empty left area (record buttons and video on one screen)
+function applyCamPin() {
+  $("camPanel").classList.toggle("cam-pin", $("camPin").checked);
+}
+(function initCamPin() {
+  const head = document.querySelector(".appbar");
+  const setH = () => document.documentElement.style.setProperty("--appbar-h", head.offsetHeight + "px");
+  setH();
+  if (window.ResizeObserver) new ResizeObserver(setH).observe(head); else window.addEventListener("resize", setH);
+  try { if (localStorage.getItem("omx.camPin") === "0") $("camPin").checked = false; } catch (e) {}
+  $("camPin").addEventListener("change", () => {
+    try { localStorage.setItem("omx.camPin", $("camPin").checked ? "1" : "0"); } catch (e) {}
+    applyCamPin();
+  });
+  applyCamPin();
+})();
+
+// MJPEG <img> that reconnects when the server closes the stream (e.g. preview -> record hand-over)
+function streamImg(name, alt, isOn) {
+  const img = document.createElement("img");
+  img.alt = alt;
+  const connect = () => { img.src = "/stream/" + name + "?t=" + Date.now(); };
+  img.onerror = () => setTimeout(() => { if (img.isConnected && isOn()) connect(); }, 1000);
+  connect();
+  return img;
+}
+
+// on: false | "preview" (camera view) | "live" (record/eval program's frames); a new source reconnects
+function setStreams(on) {
+  if (on === streamsOn) return;
+  streamsOn = on;
+  applyCamPin();
+  for (const name of ["front", "wrist"]) {
+    const box = $("frame-" + name);
+    box.textContent = "";
+    if (on) {
+      box.appendChild(streamImg(name, name + " 카메라 실시간 화면", () => streamsOn === on));
+    } else {
+      box.textContent = state && state.job.running && state.job.kind === "record" ? "녹화 프로그램이 카메라 사용 중" : "카메라 꺼짐";
+    }
+  }
+}
+
+function fmtSec(s) { s = Math.max(0, Math.round(s)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }
+
+function render(s) {
+  state = s;
+  $("user").textContent = s.user;
+  if (s.gpu_name) $("gpuName").textContent = s.gpu_name;
+  if (s.version) $("appVersion").textContent = "v" + s.version;
+  if (s.ckpt_home) $("runsPath").textContent = s.ckpt_home + "/INDEX.md";
+  const job = s.job || {};
+  const running = !!job.running;
+  const info = job.info || {};
+
+  setStreams(s.preview ? "preview" : s.live ? "live" : false);
+  renderEval(s);
+  $("camState").textContent = s.preview ? "켜짐" : "꺼짐";
+  $("camState").className = "pill" + (s.preview ? " ok" : "");
+  $("camBtn").textContent = s.preview ? "카메라 끄기" : "카메라 켜기";
+  for (const name of ["front", "wrist"]) {
+    const b = s.brightness[name];
+    const el = $("bright-" + name);
+    if (b === undefined) { el.textContent = ""; continue; }
+    el.textContent = b < 5 ? "검은 화면 · 렌즈·USB 확인" : "밝기 " + b;
+    el.style.color = b < 5 ? "var(--bad)" : "";
+  }
+
+  voiceCue(job);
+  const teleopRunning = running && job.kind === "teleop";
+  const recRunning = running && job.kind === "record";
+  $("teleopState").textContent = teleopRunning ? (info.phase || "실행 중") + " · " + fmtSec(job.elapsed) : "대기";
+  $("teleopState").className = "pill" + (teleopRunning ? " ok" : "");
+  $("teleopInfo").textContent = teleopRunning && ["안전 시작 중", "천천히 내려놓는 중"].includes(info.phase) && info.safe_start ? info.safe_start
+    : teleopRunning && info.loop ? "제어 주기 " + info.loop + (info.with_cameras ? " · 카메라는 Rerun으로 전송 중" : "")
+    : "카메라 없이 실행합니다. 화면은 왼쪽 카메라 보기로 확인하세요. Rerun 보기를 켜면 카메라를 포함해 실행합니다.";
+  $("teleopBtn").disabled = running;
+  $("teleopStop").disabled = !teleopRunning;
+  $("recBtn").disabled = running;
+  $("camBtn").disabled = recRunning || (teleopRunning && info.with_cameras);
+
+  $("recProgress").hidden = !(job.kind === "record" && (running || info.phase === "끝남"));
+  $("recState").textContent = recRunning ? (info.phase === "안전 시작 중" ? "안전 시작 중" : info.phase || "실행 중") : (job.kind === "record" && info.phase === "끝남" ? "끝남" : "대기");
+  $("recState").className = "pill" + (recRunning ? (info.phase === "원위치 시간" ? " warn" : " ok") : "");
+  if (job.kind === "record") {
+    const total = info.phase === "원위치 시간" ? info.reset_s : info.episode_s;
+    const el = info.phase_elapsed || 0;
+    $("recPhase").textContent = (info.phase || "-") + (recRunning && total && (info.phase === "녹화 중" || info.phase === "원위치 시간") ? " · " + fmtSec(total - el) + " 남음" : "");
+    $("recCount").textContent = info.repo_id ? info.repo_id + (info.episode !== undefined ? " · 에피소드 " + (info.episode + 1) : "") + (info.target ? " (이번 목표 " + info.target + "개)" : "") : "";
+    $("recBar").style.width = total ? Math.min(100, (el / total) * 100) + "%" : "0";
+    if (info.phase === "끝남") $("recPhase").textContent = info.returncode === 0 ? "녹화 완료 · 저장됨" : "종료됨 (코드 " + info.returncode + ") · 로그 확인";
+  }
+  const rw = recRunning && info.loop_warn;
+  $("recLoopWarn").hidden = !rw;
+  if (rw) $("recLoopWarn").textContent = `녹화 속도 ${rw.hz}Hz (최저 ${rw.min_hz}Hz) / 목표 ${rw.target}Hz: 프레임이 빠져 학습 데이터 품질이 떨어질 수 있습니다. 학습 등 다른 작업을 멈추세요.`;
+  for (const id of ["nextBtn", "rerecBtn", "recStop"]) $(id).disabled = !recRunning;
+
+  $("jobLabel").textContent = job.kind ? (job.kind === "record" ? "녹화" : "텔레옵") + (running ? " 실행 중" : " 종료") : "";
+  if (s.log && s.log.length) {
+    const box = $("log");
+    const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+    box.textContent = s.log.join("\n");
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  }
+
+  renderUpload(s);
+  fillReplaySelect(s.datasets);
+  renderTrainDatasets(s.datasets);
+  fillAlignSelect(s.datasets);
+  updateGhost();
+  const sel = $("dsSelect");
+  const current = sel.value;
+  const opts = ['<option value="">새 데이터셋 만들기</option>'].concat(
+    s.datasets.filter(d => d.repo_id.startsWith(s.user + "/"))  // resume only your own datasets
+      .map(d => `<option value="${d.repo_id}">${d.repo_id} · ${d.episodes}개 (이어서 녹화)</option>`));
+  if (sel.dataset.sig !== opts.join("")) {
+    sel.innerHTML = opts.join("");
+    sel.dataset.sig = opts.join("");
+    sel.value = current;
+  }
+  updateRepoPreview();
+}
+
+// ---- Hugging Face upload status ----
+let lastUploadPhase = null;
+function renderUpload(s) {
+  const u = s.upload || {};
+  $("uploadRow").hidden = !u.phase;
+  if (u.phase) {
+    $("uploadState").textContent = u.phase + (u.running && u.elapsed !== undefined ? " · " + fmtSec(u.elapsed) : "");
+    $("uploadState").className = "pill " + (u.running ? "warn" : u.returncode === 0 ? "ok" : "bad");
+    $("uploadMsg").innerHTML = u.url ? `<a href="${u.url}" target="_blank" rel="noopener">${u.url.replace("https://", "")}</a>`
+      : (u.error || (u.repo_id ? u.repo_id + " → Hugging Face" : ""));
+    if (lastUploadPhase !== null && lastUploadPhase !== u.phase) {
+      if (u.phase === "업로드 완료") say("허깅페이스 업로드 완료");
+      else if (u.phase === "업로드 실패") say("허깅페이스 업로드에 실패했습니다");
+    }
+  }
+  lastUploadPhase = u.phase || "";
+  $("rpUploadRow").hidden = !$("rpSelect").value;
+  $("rpUpload").disabled = !!u.running;
+}
+$("rpUpload").addEventListener("click", () =>
+  act(() => api("/api/upload", { repo_id: $("rpSelect").value, description: $("rpNote").value }),
+      "업로드를 시작했습니다. 진행 상황은 녹화 칸 아래에 표시됩니다."));
+
+function updateRepoPreview() {
+  const existing = $("dsSelect").value;
+  $("nameField").hidden = !!existing;
+  if (existing) { $("repoPreview").textContent = "기존 데이터셋에 이어서 저장: " + existing; return; }
+  const name = $("dsName").value.toLowerCase().replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
+  $("repoPreview").textContent = name && state ? "저장 위치: " + state.data_home + "/" + state.user + "/" + name : "";
+}
+
+// Pre-fill the dataset name with the current time (MMDD_HHMM) until the user edits it
+let nameEdited = false;
+function stampNow() {
+  const d = new Date(), p = (n) => String(n).padStart(2, "0");
+  return p(d.getMonth() + 1) + p(d.getDate()) + "_" + p(d.getHours()) + p(d.getMinutes());
+}
+function refreshStamp() {
+  if (!nameEdited) $("dsName").value = stampNow();
+  updateRepoPreview();
+}
+refreshStamp();
+setInterval(refreshStamp, 15000);
+$("dsName").addEventListener("input", () => { nameEdited = $("dsName").value.trim() !== ""; updateRepoPreview(); });
+$("dsSelect").addEventListener("change", updateRepoPreview);
+
+async function poll() {
+  try { render(await (await fetch("/api/status")).json()); }
+  catch (e) { toast("제어판 서버와 연결이 끊겼습니다. 바탕화면의 OMX 제어판 아이콘을 다시 눌러주세요.", "err"); }
+}
+setInterval(poll, 1000);
+poll();
+
+function needConfirm() {
+  if (!$("confirm").checked) { toast("시작 전에 위의 안전 확인란을 체크해주세요.", "err"); return true; }
+  return false;
+}
+
+async function act(fn, okMsg) {
+  try { const r = await fn(); if (okMsg) toast(typeof okMsg === "function" ? okMsg(r) : okMsg, "ok"); poll(); }
+  catch (e) { toast(e.message, "err"); }
+}
+
+$("camBtn").addEventListener("click", () => act(() => api("/api/preview", { on: !(state && state.preview) })));
+
+$("checkBtn").addEventListener("click", async () => {
+  $("checkBtn").disabled = true;
+  $("checks").innerHTML = '<li class="muted">점검 중...</li>';
+  try {
+    const r = await api("/api/check");
+    const items = [];
+    const pill = (ok, text) => `<span class="pill ${ok ? "ok" : "bad"}">${text}</span>`;
+    for (const [p, ok] of Object.entries(r.ports)) items.push(`<li>${pill(ok, ok ? "있음" : "없음")}<span class="mono">${p}</span></li>`);
+    for (const [n, m] of Object.entries(r.motors)) {
+      if (n === "note") { items.push(`<li><span class="pill warn">건너뜀</span>${m}</li>`); continue; }
+      items.push(`<li>${pill(m.ok, m.ok ? "정상" : "문제")}<span>${n === "follower" ? "팔로워" : "리더"} 모터: ${m.msg}</span></li>`);
+    }
+    for (const [n, ok] of Object.entries(r.cameras)) items.push(`<li>${pill(ok, ok ? "연결됨" : "없음")}<span>${n} 카메라</span></li>`);
+    items.push(`<li>${pill(!r.others.length, r.others.length ? "사용 중" : "비어 있음")}<span>${r.others.length ? "다른 사용자: " + r.others.join(", ") : "다른 사람이 로봇을 쓰지 않음"}</span></li>`);
+    $("checks").innerHTML = items.join("");
+    $("gpu").textContent = r.gpu; $("gpu").hidden = !r.gpu;
+  } catch (e) { $("checks").innerHTML = `<li class="muted">${e.message}</li>`; }
+  $("checkBtn").disabled = false;
+});
+
+$("teleopBtn").addEventListener("click", () => {
+  if (needConfirm()) return;
+  act(() => api("/api/teleop", { confirm: true, viewer_ip: viewerIp() }), "텔레옵을 시작했습니다. 팔로워가 리더 자세로 움직입니다.");
+});
+$("teleopStop").addEventListener("click", () => act(() => api("/api/stop"), "텔레옵을 중지합니다."));
+
+$("recForm").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  if (needConfirm()) return;
+  act(() => api("/api/record", {
+    confirm: true,
+    repo_id: $("dsSelect").value,
+    name: $("dsName").value,
+    task: $("task").value,
+    episodes: Number($("episodes").value),
+    episode_s: Number($("episodeS").value),
+    reset_s: Number($("resetS").value),
+    viewer_ip: viewerIp(),
+    upload: $("autoUpload").checked,
+    description: $("dsNote").value,
+  }), (r) => {
+    nameEdited = false;  // next recording gets a fresh MMDD_HHMM
+    return (r.resume ? "이어서 녹화합니다: " : "녹화를 시작합니다: ") + r.repo_id;
+  });
+});
+// ---- Replay: play one episode from both camera videos in sync ----
+const rp = { detail: null, ep: null };
+const vFront = $("rpFront"), vWrist = $("rpWrist");
+
+function fillReplaySelect(datasets) {
+  const sel = $("rpSelect");
+  const opts = ['<option value="">데이터셋을 고르세요</option>'].concat(
+    datasets.filter(d => d.episodes > 0).map(d => `<option value="${d.repo_id}">${d.repo_id} · 에피소드 ${d.episodes}개</option>`));
+  const sig = opts.join("");
+  if (sel.dataset.sig === sig) return;
+  const current = sel.value;
+  sel.innerHTML = sig;
+  sel.dataset.sig = sig;
+  sel.value = current;
+}
+
+$("rpSelect").addEventListener("change", async () => {
+  const repo = $("rpSelect").value;
+  rp.detail = null; rp.ep = null;
+  vFront.pause(); vWrist.pause();
+  $("rpVideos").hidden = $("rpControls").hidden = true;
+  $("rpEpisodes").innerHTML = ""; $("rpTask").textContent = ""; $("rpInfo").textContent = "";
+  if (!repo) return;
+  try {
+    const res = await fetch("/api/dataset?repo=" + encodeURIComponent(repo));
+    const d = await res.json();
+    if (d.error) throw new Error(d.error);
+    rp.detail = d;
+    const notes = d.notes || {};
+    $("rpNote").value = notes.description || "";
+    const total = d.episodes.reduce((s, e) => s + e.seconds, 0);
+    $("rpInfo").textContent = `${d.episodes.length}개 · ${Math.round(total)}초 · ${d.fps}fps`;
+    $("rpEpisodes").innerHTML = d.episodes.map(e =>
+      `<button type="button" data-ep="${e.index}" aria-pressed="false">에피소드 ${e.index + 1} · ${e.seconds}초</button>`).join("");
+    if (d.episodes.length) openEpisode(d.episodes[0].index);
+  } catch (e) { toast(e.message, "err"); }
+});
+
+$("rpEpisodes").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button[data-ep]");
+  if (b) openEpisode(Number(b.dataset.ep));
+});
+
+function setSrc(video, url) {
+  if (video.getAttribute("src") !== url) { video.src = url; video.load(); }
+}
+
+function openEpisode(index) {
+  const ep = rp.detail.episodes.find(e => e.index === index);
+  if (!ep) return;
+  rp.ep = ep;
+  for (const b of $("rpEpisodes").querySelectorAll("button")) b.setAttribute("aria-pressed", String(Number(b.dataset.ep) === index));
+  vFront.pause(); vWrist.pause();
+  $("rpVideos").hidden = $("rpControls").hidden = false;
+  $("rpTask").textContent = ep.task ? "작업: " + ep.task + ` · ${ep.length}프레임` : "";
+  const f = ep.videos.front, w = ep.videos.wrist;
+  if (f) setSrc(vFront, f.url);
+  if (w) setSrc(vWrist, w.url);
+  const seekStart = () => { if (f) vFront.currentTime = f.from; if (w) vWrist.currentTime = w.from; updateTime(); };
+  if (vFront.readyState >= 1) seekStart(); else vFront.addEventListener("loadedmetadata", seekStart, { once: true });
+  if (w && vWrist.readyState < 1) vWrist.addEventListener("loadedmetadata", () => { vWrist.currentTime = w.from; }, { once: true });
+  $("rpPlay").textContent = "재생";
+}
+
+function epRange() { const f = rp.ep && rp.ep.videos.front; return f ? [f.from, f.to] : [0, 0]; }
+
+function updateTime() {
+  if (!rp.ep) return;
+  const [from, to] = epRange();
+  const t = Math.min(Math.max(vFront.currentTime - from, 0), to - from);
+  $("rpTime").textContent = fmtSec(t) + " / " + fmtSec(to - from);
+  $("rpSeek").value = to > from ? Math.round((t / (to - from)) * 1000) : 0;
+}
+
+vFront.addEventListener("timeupdate", () => {
+  if (!rp.ep) return;
+  const [from, to] = epRange();
+  if (vFront.currentTime >= to - 0.03) {  // stop at the end of this episode (one file may hold several)
+    vFront.pause(); vWrist.pause();
+    vFront.currentTime = to - 0.03;
+    $("rpPlay").textContent = "재생";
+  }
+  const w = rp.ep.videos.wrist;
+  if (w && !vWrist.paused) {  // keep the wrist video in step with the front one
+    const target = w.from + (vFront.currentTime - from);
+    if (Math.abs(vWrist.currentTime - target) > 0.15) vWrist.currentTime = target;
+  }
+  updateTime();
+});
+
+$("rpPlay").addEventListener("click", () => {
+  if (!rp.ep) return;
+  if (vFront.paused) {
+    const [from, to] = epRange();
+    if (vFront.currentTime >= to - 0.05) { vFront.currentTime = from; const w = rp.ep.videos.wrist; if (w) vWrist.currentTime = w.from; }
+    const rate = Number($("rpSpeed").value);
+    vFront.playbackRate = vWrist.playbackRate = rate;
+    vFront.play().catch(() => {});
+    if (rp.ep.videos.wrist) vWrist.play().catch(() => {});
+    $("rpPlay").textContent = "일시정지";
+  } else {
+    vFront.pause(); vWrist.pause();
+    $("rpPlay").textContent = "재생";
+  }
+});
+$("rpRestart").addEventListener("click", () => {
+  if (!rp.ep) return;
+  const [from] = epRange();
+  vFront.currentTime = from;
+  const w = rp.ep.videos.wrist; if (w) vWrist.currentTime = w.from;
+  updateTime();
+});
+$("rpSeek").addEventListener("input", () => {
+  if (!rp.ep) return;
+  const [from, to] = epRange();
+  const t = (Number($("rpSeek").value) / 1000) * (to - from);
+  vFront.currentTime = from + t;
+  const w = rp.ep.videos.wrist; if (w) vWrist.currentTime = w.from + t;
+  updateTime();
+});
+$("rpSpeed").addEventListener("change", () => { vFront.playbackRate = vWrist.playbackRate = Number($("rpSpeed").value); });
+
+// ---- Tabs ----
+function showTab(name) {
+  for (const t of ["collect", "train", "eval"]) {
+    $("tab-" + t).hidden = t !== name;
+    $("tabBtn-" + t).setAttribute("aria-selected", String(t === name));
+  }
+  store.set("omx.tab", name);
+  if (name === "train") { pollTrain(); loadRuns(false); loadQueue(); }
+  if (name === "eval") { loadEvalModels(); loadEvals(); }
+}
+$("tabBtn-collect").addEventListener("click", () => showTab("collect"));
+$("tabBtn-train").addEventListener("click", () => showTab("train"));
+$("tabBtn-eval").addEventListener("click", () => showTab("eval"));
+
+// ---- Training tab ----
+const tr = { selected: new Set(), exclude: {}, open: new Set(), episodes: {}, datasets: [], lastPhase: null, runsSig: "" };
+
+function trPolicy() { return document.querySelector("input[name=trPolicy]:checked").value; }
+
+function renderTrainDatasets(all) {
+  const list = all.filter(d => d.kind === "recording" && d.episodes > 0);
+  const sig = JSON.stringify(list.map(d => [d.repo_id, d.episodes]));
+  if (sig !== tr.sig) { tr.sig = sig; tr.datasets = list; fillDateSelect(); drawTrainDatasets(); }
+}
+
+function drawTrainDatasets() {
+  const box = $("trDatasets");
+  if (!tr.datasets.length) { box.innerHTML = '<p class="muted">녹화된 데이터셋이 없습니다. ① 데이터 수집 탭에서 먼저 녹화하세요.</p>'; return; }
+  box.innerHTML = tr.datasets.map(d => {
+    const on = tr.selected.has(d.repo_id), ex = tr.exclude[d.repo_id] || new Set();
+    const eps = tr.episodes[d.repo_id];
+    const chips = tr.open.has(d.repo_id)
+      ? `<div class="ep-chips">${eps ? eps.map(e => `<button type="button" data-repo="${d.repo_id}" data-ep="${e.index}" class="${ex.has(e.index) ? "off" : ""} ${pv.repo === d.repo_id && pv.ep === e.index ? "cur" : ""}" title="${e.seconds}초 · 눌러서 영상 보기">ep${e.index}</button>`).join("") : '<span class="muted">불러오는 중...</span>'}</div>` : "";
+    return `<div class="ds-item ${on ? "on" : ""}"><div class="ds-row">
+      <input type="checkbox" data-sel="${d.repo_id}" ${on ? "checked" : ""} aria-label="${d.repo_id} 선택">
+      <button type="button" class="name" data-open="${d.repo_id}" title="눌러서 에피소드 펼치기">${tr.open.has(d.repo_id) ? "▾" : "▸"} ${d.repo_id}</button>
+      <span class="meta">${d.episodes - ex.size}/${d.episodes}개 · ${d.minutes}분</span></div>${chips}</div>`;
+  }).join("");
+  updateTrainSummary();
+}
+
+$("trDatasets").addEventListener("click", async (ev) => {
+  const sel = ev.target.closest("[data-sel]"), open = ev.target.closest("[data-open]"), chip = ev.target.closest("[data-ep]");
+  if (sel) { sel.checked ? tr.selected.add(sel.dataset.sel) : tr.selected.delete(sel.dataset.sel); drawTrainDatasets(); return; }
+  if (open) {
+    const repo = open.dataset.open;
+    tr.open.has(repo) ? tr.open.delete(repo) : tr.open.add(repo);
+    drawTrainDatasets();
+    if (tr.open.has(repo) && !tr.episodes[repo]) { await ensureEpisodes(repo); drawTrainDatasets(); }
+    return;
+  }
+  if (chip) openPreview(chip.dataset.repo, Number(chip.dataset.ep));
+});
+
+
+// ---- Evaluation tab ----
+const ev = { models: [], view: null, evals: [], streams: false, sig: "" };
+async function loadEvalModels() {
+  let d;
+  try { d = await (await fetch("/api/train/runs")).json(); } catch (e) { return; }
+  const runs = (d.runs || []).slice().reverse();
+  const sig = JSON.stringify(runs.map(r => [r.number, r.model_path]));
+  if (sig === ev.sig) return;
+  ev.sig = sig; ev.models = runs;
+  const sel = $("evModel"), cur = sel.value || store.get("omx.evModel", "");
+  sel.innerHTML = runs.length ? runs.map(r => `<option value="${r.model_path}">#${r.number} ${r.id} · ${r.trainer} · 손실 ${r.final_loss ?? "-"}</option>`).join("")
+    : '<option value="">학습 기록이 없습니다. ② 학습 탭에서 먼저 학습하세요.</option>';
+  if (runs.some(r => r.model_path === cur)) sel.value = cur;
+  showEvalModel();
+}
+function showEvalModel() {
+  const r = ev.models.find(m => m.model_path === $("evModel").value);
+  store.set("omx.evModel", $("evModel").value);
+  if (!r) { $("evModelInfo").innerHTML = ""; return; }
+  const origin = Object.entries(r.origin || {}).map(([repo, eps]) => `${repo} ep${rangeText(eps)}`).join(", ") || "-";
+  const evals = (r.evals || []).map(e => `${e.success}/${e.total} (${e.date.slice(5, 10)})`).join(", ") || "아직 없음";
+  $("evModelInfo").innerHTML = `<span><b>${r.policy}</b> · ${r.steps >= 1000 ? r.steps / 1000 + "K" : r.steps}스텝 · 배치 ${r.batch_size} · 증강 ${r.augmentation ? "켬" : "끔"} · 최종 손실 ${r.final_loss ?? "-"}</span>
+    <span>학습 데이터: ${r.dataset_episodes}개 · 원본 ${origin}</span>
+    <span>지금까지 평가: ${evals}</span>
+    <code>${r.model_path}</code>`;
+  if (!$("evTask").dataset.touched) $("evTask").value = (r.tasks || [])[0] || "";
+  updateEvalPreview();
+}
+$("evModel").addEventListener("change", () => { $("evTask").dataset.touched = ""; showEvalModel(); });
+$("evSmooth").checked = store.get("omx.evSmooth", "1") === "1";
+$("evSmooth").addEventListener("change", () => store.set("omx.evSmooth", $("evSmooth").checked ? "1" : "0"));
+$("evTask").addEventListener("input", () => { $("evTask").dataset.touched = "1"; });
+function updateEvalPreview() {
+  const r = ev.models.find(m => m.model_path === $("evModel").value);
+  const n = Number($("evEpisodes").value) || 0, a = Number($("evEpisodeS").value) || 0, b = Number($("evResetS").value) || 0;
+  const total = n * a + Math.max(n - 1, 0) * b;
+  $("evPreview").textContent = r ? `예상 ${fmtSec(total)} · 저장: ${state ? state.user : "<계정>"}/eval_${r.id.replace(/\//g, "_")}_<MMDD_HHMM>` : "";
+}
+for (const id of ["evEpisodes", "evEpisodeS", "evResetS"]) $(id).addEventListener("input", updateEvalPreview);
+
+$("evStart").addEventListener("click", async () => {
+  if (!$("evConfirm").checked) { toast("시작 전에 위의 안전 확인란을 체크해주세요.", "err"); return; }
+  // a training on the same laptop takes the CPU and GPU: the control loop slows down and the results get worse
+  try {
+    const t = await (await fetch("/api/train/status")).json();
+    const tr = (t.gpu && t.gpu.trainings) || [];
+    if (tr.length && !confirm(`지금 GPU에서 학습이 실행 중입니다 (${tr.map(x => x.user + " " + x.elapsed).join(", ")}).\n학습과 평가를 동시에 하면 제어 속도가 떨어져 로봇이 끊기고 결과가 부정확합니다.\n그래도 평가를 시작할까요?`)) return;
+  } catch (e) { /* no training info: start anyway */ }
+  act(() => api("/api/eval/start", {
+    confirm: true, model_path: $("evModel").value, task: $("evTask").value,
+    episodes: Number($("evEpisodes").value), episode_s: Number($("evEpisodeS").value), reset_s: Number($("evResetS").value),
+    viewer_ip: viewerIp(), smooth: $("evSmooth").checked, threads: Number($("evThreads").value),
+  }), (r) => { ev.view = r.repo_id; return "평가를 시작합니다: " + r.repo_id + " (모델을 불러오는 데 몇 초 걸립니다)"; }).then(loadEvals);
+});
+$("evNext").addEventListener("click", () => act(() => api("/api/control", { cmd: "next" }), "다음 단계로 넘어갑니다."));
+$("evRerec").addEventListener("click", () => act(() => api("/api/control", { cmd: "rerecord" }), "이번 시도를 버리고 다시 합니다."));
+$("evStop").addEventListener("click", () => act(() => api("/api/control", { cmd: "stop" }), "평가를 끝내고 저장합니다."));
+
+function setEvalStreams(on) {
+  if (on === ev.streams) return;
+  ev.streams = on;
+  for (const name of ["front", "wrist"]) {
+    const box = $("evFrame-" + name);
+    box.textContent = "";
+    if (on) box.appendChild(streamImg(name, name + " 실시간 화면", () => ev.streams === on));
+    else box.textContent = "평가를 시작하면 실시간 영상이 나옵니다";
+  }
+}
+
+function renderEval(s) {
+  const job = s.job || {}, info = job.info || {};
+  const evalJob = job.kind === "eval";
+  const running = evalJob && job.running;
+  setEvalStreams(running && s.live);
+  $("evPhase").textContent = evalJob ? (info.phase || "-") : "대기";
+  $("evPhase").className = "pill " + (running ? (info.phase === "원위치 시간" ? "warn" : "ok") : evalJob && info.returncode ? "bad" : "");
+  if (evalJob) {
+    const total = info.phase === "원위치 시간" ? info.reset_s : info.episode_s, el = info.phase_elapsed || 0;
+    $("evStepText").textContent = running && total && ["실행 중", "원위치 시간"].includes(info.phase)
+      ? `${info.phase} · ${fmtSec(total - el)} 남음` : (info.phase === "끝남" ? (info.returncode === 0 ? "평가 완료 · 저장됨" : "종료됨 (코드 " + info.returncode + ")") : (info.phase || "대기 중"));
+    $("evCount").textContent = info.episode !== undefined ? `시도 ${info.episode + 1} / ${info.target}` : "";
+    $("evBar").style.width = total && running ? Math.min(100, el / total * 100) + "%" : "0";
+    if (!ev.view || running) ev.view = info.repo_id;
+  }
+  const lw = running && info.loop_warn;
+  $("evLoopWarn").hidden = !lw;
+  if (lw) $("evLoopWarn").textContent = `제어 속도 ${lw.hz}Hz (최저 ${lw.min_hz}Hz) / 목표 ${lw.target}Hz: 로봇 동작이 끊기고 결과가 부정확해질 수 있습니다. 다른 작업(학습 등)을 멈추거나, 다음 평가에서 CPU 스레드 수를 바꿔 보세요 (지금 ${info.threads || "-"}).`;
+  for (const id of ["evNext", "evRerec", "evStop", "evKill"]) $(id).disabled = !running;
+  $("evStart").disabled = !!job.running;
+  if (!$("tab-eval").hidden) renderEvalResults(running ? info : null);
+}
+
+async function loadEvals() {
+  try { ev.evals = (await (await fetch("/api/eval/list")).json()).evals || []; } catch (e) { return; }
+  $("evList").innerHTML = ev.evals.length ? ev.evals.slice(0, 12).map(e => `<li>
+      <span class="no">${e.marked ? Math.round(e.success / e.marked * 100) + "%" : "–"}</span>
+      <div class="li-main"><code title="${e.repo_id}">${e.repo_id.split("/").pop()}</code>
+      <span class="meta">${e.started ? e.started.slice(5) : ""} · 모델 ${e.run_number ? "#" + e.run_number : ""} · 성공 ${e.success}/${e.marked}${e.episodes > e.marked ? " · 미표시 " + (e.episodes - e.marked) : ""}${e.threads ? " · 스레드 " + e.threads : ""}${e.loop && e.loop.slow_warnings > 30 ? " · ⚠ 느림 " + e.loop.slow_median_hz + "Hz" : ""}</span></div>
+      <div class="li-act"><button type="button" data-view="${e.repo_id}">결과 표시</button>
+      <button type="button" data-replay="${e.repo_id}">다시보기</button></div></li>`).join("")
+    : '<li class="muted">아직 평가 기록이 없습니다.</li>';
+  renderEvalResults(null);
+}
+$("evRefresh").addEventListener("click", loadEvals);
+$("evList").addEventListener("click", (ev2) => {
+  const v = ev2.target.closest("[data-view]"), r = ev2.target.closest("[data-replay]");
+  if (v) { ev.view = v.dataset.view; renderEvalResults(null); pollReport(); }
+  if (r) {
+    showTab("collect");
+    $("rpSelect").value = r.dataset.replay;
+    $("rpSelect").dispatchEvent(new Event("change"));
+    document.getElementById("replay").scrollIntoView({ behavior: "smooth" });
+  }
+});
+setInterval(() => { if (!$("tab-eval").hidden) loadEvals(); }, 5000);
+
+function renderEvalResults(liveInfo) {
+  const e = ev.evals.find(x => x.repo_id === ev.view);
+  if (!ev.view) { $("evResults").innerHTML = ""; $("evScore").textContent = ""; return; }
+  $("evResultTitle").textContent = ev.view + (e && e.run_id ? " · 모델 " + e.run_id : "");
+  const results = (e && e.results) || {};
+  // episodes that exist: saved ones, plus the one that just finished during a live run
+  let count = e ? e.episodes : 0;
+  if (liveInfo && liveInfo.repo_id === ev.view && liveInfo.episode !== undefined) {
+    count = Math.max(count, liveInfo.episode + (liveInfo.phase === "실행 중" ? 0 : 1));
+  }
+  const target = liveInfo && liveInfo.repo_id === ev.view ? liveInfo.target : count;
+  const cells = [];
+  for (let i = 0; i < Math.max(count, target || 0); i++) {
+    const r = results[String(i)], done = i < count;
+    cells.push(`<div class="ev-ep ${done ? "" : "pending"}"><span>시도 ${i + 1}</span><div class="btns">
+      <button type="button" data-mark="${i}" data-res="success" class="${r === "success" ? "on-success" : ""}" ${done ? "" : "disabled"}>성공</button>
+      <button type="button" data-mark="${i}" data-res="fail" class="${r === "fail" ? "on-fail" : ""}" ${done ? "" : "disabled"}>실패</button></div></div>`);
+  }
+  const html = cells.join("") || '<span class="muted">아직 끝난 시도가 없습니다.</span>';
+  if ($("evResults").innerHTML !== html) $("evResults").innerHTML = html;
+  const marked = Object.values(results).filter(v => v === "success" || v === "fail").length;
+  const success = Object.values(results).filter(v => v === "success").length;
+  $("evScore").textContent = marked ? `성공 ${success} / ${marked} (${Math.round(success / marked * 100)}%)` : "";
+}
+$("evResults").addEventListener("click", async (e2) => {
+  const b = e2.target.closest("[data-mark]");
+  if (!b || !ev.view) return;
+  const cur = ((ev.evals.find(x => x.repo_id === ev.view) || {}).results || {})[b.dataset.mark];
+  const result = cur === b.dataset.res ? null : b.dataset.res;  // clicking the same choice clears it
+  try {
+    await api("/api/eval/mark", { repo_id: ev.view, episode: Number(b.dataset.mark), result });
+    const item = ev.evals.find(x => x.repo_id === ev.view);
+    if (item) { item.results = item.results || {}; if (result) item.results[b.dataset.mark] = result; else delete item.results[b.dataset.mark]; }
+    renderEvalResults(state && state.job && state.job.kind === "eval" && state.job.running ? state.job.info : null);
+    loadEvals();
+  } catch (err) { toast(err.message, "err"); }
+});
+
+// ---- Camera alignment overlay (collect tab, front camera) ----
+const align = { timer: null };
+function fillAlignSelect(datasets) {
+  const opts = datasets.filter(d => d.kind !== "eval" && d.episodes > 0).map(d => `<option value="${d.repo_id}">${d.repo_id}</option>`);
+  const sig = opts.join("");
+  if ($("alignRepo").dataset.sig === sig) return;
+  const cur = $("alignRepo").value || store.get("omx.alignRepo", "");
+  $("alignRepo").innerHTML = '<option value="">기준 장면 고르기</option>' + sig;
+  $("alignRepo").dataset.sig = sig;
+  if ([...$("alignRepo").options].some(o => o.value === cur)) $("alignRepo").value = cur;
+}
+function updateGhost() {
+  const box = $("frame-front"), repo = $("alignRepo").value, on = $("alignBox").open && repo && streamsOn;
+  let ghost = box.querySelector("img.ghost");
+  if (!on) { if (ghost) ghost.remove(); return; }
+  if (!ghost) { ghost = document.createElement("img"); ghost.className = "ghost"; ghost.alt = "기준 장면"; box.appendChild(ghost); }
+  const src = "/api/reference?repo=" + encodeURIComponent(repo) + "&cam=front";
+  if (ghost.getAttribute("src") !== src) ghost.src = src;
+  ghost.style.opacity = Number($("alignOpacity").value) / 100;
+}
+async function checkAlign() {
+  const repo = $("alignRepo").value;
+  if (!$("alignBox").open || !repo || !(state && state.preview)) {
+    $("alignResult").textContent = !(state && state.preview) ? "카메라를 켜면 기준 장면과 비교합니다. (녹화·평가 중에는 계산하지 않습니다)" : "기준 장면을 고르세요.";
+    return;
+  }
+  try {
+    const r = await (await fetch("/api/align?repo=" + encodeURIComponent(repo))).json();
+    if (r.error || !r.ok) { $("alignResult").textContent = r.error || r.msg; return; }
+    if (r.match < 0.25) {  // too few consistent matches: the numbers would be noise
+      $("alignResult").textContent = `학습 때 화면과 많이 다릅니다 (일치도 ${Math.round(r.match * 100)}%). 겹쳐 보이는 기준 장면을 보며 카메라 위치와 방향을 크게 옮기세요.`;
+      $("alignResult").style.color = "var(--bad)";
+      return;
+    }
+    const parts = [];
+    if (Math.abs(r.dx) >= 15) parts.push(`기준 장면이 ${r.dx > 0 ? "오른쪽" : "왼쪽"}으로 ${Math.abs(r.dx)}px 밀려 보임`);
+    if (Math.abs(r.dy) >= 15) parts.push(`${r.dy > 0 ? "아래" : "위"}로 ${Math.abs(r.dy)}px 밀려 보임`);
+    if (Math.abs(r.scale - 1) >= 0.04) parts.push(r.scale > 1 ? `지금이 ${Math.round((r.scale - 1) * 100)}% 더 가까움 (카메라를 멀리)` : `지금이 ${Math.round((1 - r.scale) * 100)}% 더 멂 (카메라를 가까이)`);
+    if (Math.abs(r.angle) >= 2) parts.push(`${Math.abs(r.angle)}° 돌아감`);
+    $("alignResult").textContent = r.aligned ? `✓ 학습 때와 같은 위치입니다 (일치도 ${Math.round(r.match * 100)}%)`
+      : `조정 필요: ${parts.join(", ") || "조금 더 맞추세요"} · 일치도 ${Math.round(r.match * 100)}%`;
+    $("alignResult").style.color = r.aligned ? "var(--ok)" : "";
+  } catch (e) { /* ignore */ }
+}
+$("alignRepo").addEventListener("change", () => { store.set("omx.alignRepo", $("alignRepo").value); updateGhost(); checkAlign(); });
+$("alignOpacity").addEventListener("input", updateGhost);
+$("alignBox").addEventListener("toggle", () => {
+  updateGhost();
+  clearInterval(align.timer);
+  if ($("alignBox").open) { checkAlign(); align.timer = setInterval(checkAlign, 1500); }
+});
+
+// ---- Evaluation analysis report ----
+const rep = { timer: null };
+async function pollReport() {
+  if (!ev.view) return;
+  let r;
+  try { r = await (await fetch("/api/eval/report?repo=" + encodeURIComponent(ev.view))).json(); } catch (e) { return; }
+  $("evReportOpen").hidden = !r.ready;
+  $("evReportState").textContent = r.running ? "만드는 중... (1~2분)" : r.failed ? "만들지 못했습니다. GPU 노트북 ~/il_ws/omx_logs/report.log 를 확인하세요." : r.ready ? `완료 · ${r.files.length}장` : "";
+  rep.last = r;
+  if (!r.running) clearInterval(rep.timer);
+}
+$("evReport").addEventListener("click", () => {
+  if (!ev.view) { toast("평가 기록에서 분석할 평가를 고르세요.", "err"); return; }
+  act(() => api("/api/eval/report", { repo_id: ev.view }), "분석 자료를 만드는 중입니다.").then(() => {
+    clearInterval(rep.timer); rep.timer = setInterval(pollReport, 2000); pollReport();
+  });
+});
+$("evReportOpen").addEventListener("click", () => {
+  const r = rep.last; if (!r) return;
+  const rel = r.dir.replace(/^.*?\/lerobot_data\//, "");
+  $("reportTitle").textContent = "평가 분석 자료 · " + ev.view;
+  $("reportPath").textContent = r.dir;
+  const order = (f) => f.startsWith("start_map") ? 0 : f.startsWith("joints") ? 1 : 2;
+  const caption = (f) => f.startsWith("start_map") ? "딸기 시작 위치: 초록 = 학습 시연, 빨강 = 이번 시도"
+    : f.startsWith("joints") ? "관절 움직임: 회색 띠 = 학습 시연 범위, 선 = 이번 시도" : "시도 장면 (위 front, 아래 wrist, 약 2~3초 간격)";
+  $("reportImgs").innerHTML = r.files.slice().sort((a, b) => order(a) - order(b) || a.localeCompare(b))
+    .map(f => `<figure><img src="/report/${rel}/${f}?t=${Date.now()}" alt="${f}" loading="lazy"><figcaption class="muted">${caption(f)} · ${f}</figcaption></figure>`).join("");
+  $("reportDlg").showModal();
+});
+$("reportClose").addEventListener("click", () => $("reportDlg").close());
+$("reportDlg").addEventListener("click", (e) => { if (e.target === $("reportDlg")) $("reportDlg").close(); });
+$("reportCopy").addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("reportPath").textContent); toast("경로를 복사했습니다.", "ok"); } catch (e) { toast($("reportPath").textContent, "ok"); }
+});
+
+// ---- Safe start: start pose saved from the leader arm ----
+async function loadStartPose() {
+  let d;
+  try { d = await (await fetch("/api/start_pose")).json(); } catch (e) { return; }
+  const p = d.pose;
+  if (p && p.joints) {
+    const j = p.joints, f = (v) => (v >= 0 ? "+" : "") + Number(v).toFixed(0);
+    $("ssState").textContent = "시작 자세 저장됨"; $("ssState").className = "pill ok";
+    $("ssInfo").textContent = `${p.saved_by || ""} · ${p.saved_at || ""} · 어깨 회전 ${f(j.shoulder_pan)}, 어깨 ${f(j.shoulder_lift)}, 팔꿈치 ${f(j.elbow_flex)}, 손목 ${f(j.wrist_flex)}, 손목 회전 ${f(j.wrist_roll)}. 시작하면 ① 이 자세로 팔을 들고 ② 그리퍼를 닫은 뒤 ③ 리더 자세로 천천히 다가갑니다 (출력 ${Math.round(d.settings.pwm_ratio * 100)}%).`;
+  } else {
+    $("ssState").textContent = "시작 자세 없음"; $("ssState").className = "pill warn";
+    $("ssInfo").textContent = "시작 자세가 저장되지 않아 ① 팔 들기를 건너뜁니다. 그리퍼 닫기와 느린 접근(출력 제한)은 그대로 합니다. 팔로워가 바닥에 엎드린 상태에서 시작하는 일이 있다면 꼭 저장하세요.";
+  }
+  const r = d.rest, ramp = d.settings.stop_ramp_s;
+  $("ssRestInfo").textContent = r && r.joints
+    ? `정지할 때: 끝 자세(${r.saved_by || ""} · ${r.saved_at || ""})로 천천히 옮긴 뒤 모터 출력을 ${ramp}초에 걸쳐 줄이고 토크를 끕니다.`
+    : `정지할 때: 끝 자세가 없어 그 자리에서 모터 출력을 ${ramp}초에 걸쳐 줄인 뒤 토크를 끕니다(팔이 천천히 내려앉음). 끝 자세를 저장하면 내려놓을 자리로 먼저 옮깁니다.`;
+}
+$("ssSave").addEventListener("click", () => act(() => api("/api/start_pose/save", { kind: "start" }), "리더 자세를 시작 자세로 저장했습니다.").then(loadStartPose));
+$("ssSaveRest").addEventListener("click", () => act(() => api("/api/start_pose/save", { kind: "rest" }), "리더 자세를 끝 자세로 저장했습니다.").then(loadStartPose));
+loadStartPose();
+
+// ---- Quick select ----
+async function ensureEpisodes(repo) {
+  if (!tr.episodes[repo]) {
+    try { const d = await (await fetch("/api/dataset?repo=" + encodeURIComponent(repo))).json(); tr.episodes[repo] = d.episodes || []; }
+    catch (e) { tr.episodes[repo] = []; }
+  }
+  return tr.episodes[repo];
+}
+function fillDateSelect() {
+  const groups = {};
+  for (const d of tr.datasets) {
+    const m = d.repo_id.match(/(\d{2})(\d{2})_\d{4}$/);
+    if (m) (groups[m[1] + m[2]] = groups[m[1] + m[2]] || []).push(d.repo_id);
+  }
+  const opts = ['<option value="">날짜별 선택</option>'].concat(Object.keys(groups).sort().reverse().map(k =>
+    `<option value="${k}">${Number(k.slice(0, 2))}월 ${Number(k.slice(2))}일 녹화 (${groups[k].length}개)</option>`));
+  const sig = opts.join("");
+  if ($("trDate").dataset.sig !== sig) { $("trDate").innerHTML = sig; $("trDate").dataset.sig = sig; }
+  tr.dateGroups = groups;
+}
+$("trAll").addEventListener("click", () => { tr.datasets.forEach(d => tr.selected.add(d.repo_id)); drawTrainDatasets(); });
+$("trNone").addEventListener("click", () => { tr.selected.clear(); drawTrainDatasets(); });
+$("trDate").addEventListener("change", () => {
+  const k = $("trDate").value;
+  if (!k) return;
+  tr.selected = new Set(tr.dateGroups[k] || []);
+  $("trDate").value = "";
+  drawTrainDatasets();
+  toast(`${Number(k.slice(0, 2))}월 ${Number(k.slice(2))}일 녹화 ${tr.selected.size}개를 골랐습니다.`, "ok");
+});
+$("trResetEx").addEventListener("click", () => { tr.exclude = {}; drawTrainDatasets(); toast("제외한 에피소드를 모두 되돌렸습니다.", "ok"); });
+$("trShort").addEventListener("click", async () => {
+  if (!tr.selected.size) { toast("먼저 데이터셋을 고르세요.", "err"); return; }
+  const removed = [];
+  for (const repo of tr.selected) {
+    const eps = await ensureEpisodes(repo);
+    if (eps.length < 3) continue;  // too few to tell what is "short"
+    const lens = eps.map(e => e.seconds).sort((a, b) => a - b);
+    const median = lens[Math.floor(lens.length / 2)];
+    const ex = tr.exclude[repo] = tr.exclude[repo] || new Set();
+    for (const e of eps) if (e.seconds < median * 0.6 && !ex.has(e.index)) { ex.add(e.index); removed.push(`${repo} ep${e.index} (${e.seconds}초)`); }
+  }
+  drawTrainDatasets();
+  toast(removed.length ? `짧은 에피소드 ${removed.length}개를 뺐습니다: ${removed.join(", ")}` : "기준(중앙값의 60%)보다 짧은 에피소드가 없습니다.", "ok");
+});
+
+// ---- Episode preview inside the training tab ----
+const pv = { repo: null, ep: null, info: null };
+const pvF = $("trPvFront"), pvW = $("trPvWrist");
+async function openPreview(repo, ep) {
+  const eps = await ensureEpisodes(repo);
+  const info = eps.find(e => e.index === ep);
+  if (!info) return;
+  Object.assign(pv, { repo, ep, info });
+  $("trPv").hidden = false;
+  $("trPvTitle").textContent = `${repo} · ep${ep} · ${info.seconds}초`;
+  updatePvState();
+  pvF.pause(); pvW.pause();
+  const f = info.videos.front, w = info.videos.wrist;
+  const load = (v, src, from) => {
+    const go = () => { v.currentTime = from; v.playbackRate = Number($("trPvSpeed").value); };
+    if (v.getAttribute("src") !== src) { v.src = src; v.load(); v.addEventListener("loadedmetadata", go, { once: true }); } else go();
+  };
+  if (f) load(pvF, f.url, f.from);
+  if (w) load(pvW, w.url, w.from);
+  drawTrainDatasets();
+  setTimeout(() => pvPlay(true), 300);
+}
+function updatePvState() {
+  const off = (tr.exclude[pv.repo] || new Set()).has(pv.ep);
+  $("trPvState").textContent = off ? "학습에서 뺌" : tr.selected.has(pv.repo) ? "학습에 포함" : "데이터셋 선택 안 됨";
+  $("trPvState").className = "pill " + (off ? "bad" : tr.selected.has(pv.repo) ? "ok" : "");
+  $("trPvToggle").textContent = off ? "다시 넣기" : "학습에서 빼기";
+}
+function pvRange() { const f = pv.info && pv.info.videos.front; return f ? [f.from, f.to] : [0, 0]; }
+function pvPlay(force) {
+  if (!pv.info) return;
+  const [from, to] = pvRange();
+  if (pvF.paused || force) {
+    if (pvF.currentTime >= to - 0.05) { pvF.currentTime = from; if (pv.info.videos.wrist) pvW.currentTime = pv.info.videos.wrist.from; }
+    pvF.playbackRate = pvW.playbackRate = Number($("trPvSpeed").value);
+    pvF.play().catch(() => {}); if (pv.info.videos.wrist) pvW.play().catch(() => {});
+    $("trPvPlay").textContent = "일시정지";
+  } else { pvF.pause(); pvW.pause(); $("trPvPlay").textContent = "재생"; }
+}
+pvF.addEventListener("timeupdate", () => {
+  if (!pv.info) return;
+  const [from, to] = pvRange();
+  if (pvF.currentTime >= to - 0.03) { pvF.pause(); pvW.pause(); pvF.currentTime = to - 0.03; $("trPvPlay").textContent = "재생"; }
+  const w = pv.info.videos.wrist;
+  if (w && !pvW.paused) { const t = w.from + (pvF.currentTime - from); if (Math.abs(pvW.currentTime - t) > 0.15) pvW.currentTime = t; }
+  const t = Math.min(Math.max(pvF.currentTime - from, 0), to - from);
+  $("trPvTime").textContent = fmtSec(t) + " / " + fmtSec(to - from);
+  $("trPvSeek").value = to > from ? Math.round(t / (to - from) * 1000) : 0;
+});
+$("trPvSeek").addEventListener("input", () => {
+  if (!pv.info) return;
+  const [from, to] = pvRange(), t = Number($("trPvSeek").value) / 1000 * (to - from);
+  pvF.currentTime = from + t; if (pv.info.videos.wrist) pvW.currentTime = pv.info.videos.wrist.from + t;
+});
+$("trPvSpeed").addEventListener("change", () => { pvF.playbackRate = pvW.playbackRate = Number($("trPvSpeed").value); });
+$("trPvPlay").addEventListener("click", () => pvPlay(false));
+function pvToggle() {
+  if (!pv.info) return;
+  const ex = tr.exclude[pv.repo] = tr.exclude[pv.repo] || new Set();
+  ex.has(pv.ep) ? ex.delete(pv.ep) : ex.add(pv.ep);
+  tr.selected.add(pv.repo);
+  updatePvState(); drawTrainDatasets();
+}
+function pvStep(dir) {
+  if (!pv.info) return;
+  const eps = tr.episodes[pv.repo] || [], i = eps.findIndex(e => e.index === pv.ep), n = eps[i + dir];
+  if (n) openPreview(pv.repo, n.index);
+}
+$("trPvToggle").addEventListener("click", pvToggle);
+$("trPvPrev").addEventListener("click", () => pvStep(-1));
+$("trPvNext").addEventListener("click", () => pvStep(1));
+$("trPvClose").addEventListener("click", () => { pvF.pause(); pvW.pause(); $("trPv").hidden = true; pv.repo = null; drawTrainDatasets(); });
+document.addEventListener("keydown", (ev) => {
+  if ($("tab-train").hidden || $("trPv").hidden || $("help").open) return;
+  if (ev.target.closest("input, select, textarea")) return;
+  if (ev.key === " ") { ev.preventDefault(); pvPlay(false); }
+  else if (ev.key === "x" || ev.key === "X") pvToggle();
+  else if (ev.key === "ArrowLeft") pvStep(-1);
+  else if (ev.key === "ArrowRight") pvStep(1);
+});
+
+function trainSelection() {
+  return tr.datasets.filter(d => tr.selected.has(d.repo_id)).map(d => ({ repo: d.repo_id, exclude: [...(tr.exclude[d.repo_id] || [])] }));
+}
+
+function updateTrainSummary() {
+  const sel = tr.datasets.filter(d => tr.selected.has(d.repo_id));
+  const eps = sel.reduce((n, d) => n + d.episodes - (tr.exclude[d.repo_id] || new Set()).size, 0);
+  const mins = sel.reduce((m, d) => m + d.minutes * (d.episodes - (tr.exclude[d.repo_id] || new Set()).size) / d.episodes, 0);
+  $("trSelSummary").textContent = sel.length ? `데이터셋 ${sel.length}개 · 에피소드 ${eps}개 · 약 ${mins.toFixed(1)}분` : "선택 없음";
+  const d = new Date(), p = (n) => String(n).padStart(2, "0");
+  const stamp = p(d.getMonth() + 1) + p(d.getDate()) + "_" + p(d.getHours()) + p(d.getMinutes());
+  $("trPreview").textContent = eps
+    ? `저장 위치 ${state && state.ckpt_home ? state.ckpt_home : "<모델 폴더>"}/${state ? state.user : "<계정>"}/${trPolicy()}_<키워드>_${stamp}`
+    : "학습할 데이터를 고르면 예상 RAM·학습 시간과 저장 위치가 표시됩니다.";
+  scheduleEstimate();
+}
+for (const id of ["trSteps", "trBatch", "trWorkers"]) $(id).addEventListener("input", updateTrainSummary);
+const TR_DEFAULTS = { act: { batch: 8, workers: 8 }, diffusion: { batch: 16, workers: 4 } };
+for (const r of document.querySelectorAll("input[name=trPolicy]")) r.addEventListener("change", () => {
+  const dflt = TR_DEFAULTS[trPolicy()];
+  $("trBatch").value = dflt.batch;
+  $("trWorkers").value = dflt.workers;
+  updateTrainSummary();
+});
+
+$("trStart").addEventListener("click", async () => { if (await ramOk()) act(() => api("/api/train/start", trainBody()),
+  "학습을 시작했습니다. 브라우저를 닫아도 학습은 계속됩니다.").then(pollTrain); });
+
+function trainBody() {
+  return {
+    policy: trPolicy(), steps: Number($("trSteps").value), batch_size: Number($("trBatch").value),
+    num_workers: Number($("trWorkers").value), augmentation: $("trAug").checked, note: $("trNote").value,
+    datasets: trainSelection(),
+  };
+}
+
+// ---- RAM / time estimate (server computes it from the settings and the GPU laptop's free RAM) ----
+const est = { timer: null, last: null, seq: 0 };
+function fmtDur(sec) {
+  const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
+  return h ? `${h}시간 ${m}분` : `${m}분`;
+}
+function scheduleEstimate() {
+  clearTimeout(est.timer);
+  est.timer = setTimeout(loadEstimate, 250);
+}
+async function loadEstimate() {
+  const seq = ++est.seq;
+  let e;
+  try { e = await api("/api/train/estimate", trainBody()); } catch (err) { return; }
+  if (seq !== est.seq) return;
+  est.last = e;
+  const box = $("trEst");
+  box.hidden = false;
+  box.className = "est " + (e.level === "ok" ? "" : e.level);
+  $("trEstRam").textContent = `예상 RAM 약 ${e.ram_gb}GB / 지금 사용 가능 ${e.avail_gb}GB`;
+  $("trEstBar").style.width = Math.min(100, e.ratio * 100) + "%";
+  const steps = Number($("trSteps").value) || 0;
+  $("trEstTime").textContent = (e.sec_per_step
+    ? `예상 학습 시간 약 ${fmtDur(e.total_s)} (스텝당 ${e.sec_per_step}초 · ${e.time_source})`
+    : "예상 학습 시간: 알 수 없음 (같은 정책·배치로 학습한 기록이 없음)")
+    + (e.epochs ? ` · 데이터 약 ${e.epochs}바퀴` : "") + (e.cameras ? ` · 카메라 ${e.cameras}대 ${e.resolution}` : "");
+  const sg = e.suggest;
+  $("trEstMsg").textContent = e.level === "bad"
+    ? "RAM 부족으로 학습이 중간에 죽을 가능성이 높습니다." + (sg ? ` 권장: 배치 ${sg.batch_size}, 데이터 로딩 ${sg.num_workers} (약 ${sg.ram_gb}GB).` : " 배치나 데이터 로딩 수를 줄이세요.")
+    : e.level === "warn"
+    ? "여유가 적습니다. 학습 중에 이 노트북으로 다른 큰 작업을 하지 마세요." + (sg ? ` 더 안전한 값: 배치 ${sg.batch_size}, 데이터 로딩 ${sg.num_workers} (약 ${sg.ram_gb}GB).` : "")
+    : "";
+  $("trEstMsg").hidden = !$("trEstMsg").textContent;
+  $("trEstApply").hidden = !sg;
+}
+$("trEstApply").addEventListener("click", () => {
+  const sg = est.last && est.last.suggest;
+  if (!sg) return;
+  const oldBatch = Number($("trBatch").value);
+  $("trBatch").value = sg.batch_size;
+  $("trWorkers").value = sg.num_workers;
+  if (sg.batch_size < oldBatch) toast(`배치를 ${oldBatch} → ${sg.batch_size}로 줄였습니다. 같은 바퀴 수를 보려면 스텝을 ${oldBatch / sg.batch_size}배로 늘리세요.`, "ok");
+  updateTrainSummary();
+});
+// ask once more before starting a job that probably runs out of RAM
+async function ramOk() {
+  await loadEstimate();
+  const e = est.last;
+  if (!e || e.level !== "bad") return true;
+  return confirm(`예상 RAM 약 ${e.ram_gb}GB가 지금 사용 가능한 ${e.avail_gb}GB에 거의 꽉 찹니다.\nRAM 부족으로 학습이 중간에 죽을 수 있습니다. 그래도 진행할까요?`);
+}
+
+// ---- training plan (sequential queue) ----
+const tq = { data: null };
+$("trQueueAdd").addEventListener("click", async () => { if (await ramOk()) act(async () => { tq.data = await api("/api/train/queue/add", trainBody()); renderQueue(); },
+  () => tq.data && tq.data.paused ? "계획에 추가했습니다. 계획 실행을 누르면 순서대로 학습합니다." : "계획에 추가했습니다. 앞 학습이 끝나면 자동으로 시작합니다."); });
+const queueCall = (action, body, msg) => act(async () => { tq.data = await api("/api/train/queue/" + action, body); renderQueue(); pollTrain(); }, msg);
+$("tqRun").addEventListener("click", () => queueCall("run", {}, "계획을 실행합니다. GPU가 비면 첫 대기 항목부터 시작합니다."));
+$("tqPause").addEventListener("click", () => queueCall("pause", {}, "계획을 일시정지했습니다. 실행 중인 학습은 끝까지 진행되고, 다음 항목은 시작하지 않습니다."));
+$("tqClear").addEventListener("click", () => queueCall("clear", {}));
+$("tqList").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-act]");
+  if (!b) return;
+  const msgs = { cancel: "취소했습니다.", retry: "계획 맨 뒤에 다시 넣었습니다.", up: null, down: null };
+  const a = b.dataset.act;
+  queueCall(a === "up" || a === "down" ? "move" : a, { id: b.dataset.id, dir: a === "up" ? -1 : 1 }, msgs[a]);
+});
+
+async function loadQueue() {
+  try { tq.data = await (await fetch("/api/train/queue")).json(); } catch (e) { return; }
+  renderQueue();
+}
+
+function renderQueue() {
+  const d = tq.data;
+  if (!d) return;
+  const esc = (t) => String(t ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const items = d.items || [];
+  const waiting = items.filter(x => x.status === "대기").length, running = items.some(x => x.status === "실행 중");
+  const state = running ? ["실행 중", "warn"] : waiting && !d.paused ? ["GPU 대기", "warn"] : waiting ? ["일시정지 · 대기 " + waiting, ""] : items.length ? ["끝남", "ok"] : ["비어 있음", ""];
+  $("tqState").textContent = state[0];
+  $("tqState").className = "pill " + state[1];
+  $("tqRun").disabled = !waiting || (!d.paused && d.runner_alive);
+  $("tqPause").disabled = d.paused || (!waiting && !running);
+  $("tqClear").disabled = !items.some(x => !["대기", "실행 중"].includes(x.status));
+  const r = d.runner || {};
+  $("tqRunner").textContent = d.runner_alive ? "계획 실행기: " + (r.status || "동작 중")
+    : waiting ? (d.paused ? "일시정지 상태입니다. 계획 실행을 누르면 대기 항목을 순서대로 학습합니다." : "계획 실행기가 멈춰 있습니다. 계획 실행을 다시 누르세요.") : "";
+  if (!items.length) {
+    $("tqList").innerHTML = '<li class="muted">왼쪽에서 설정을 고르고 <b>계획에 추가</b>를 누르면 여기에 쌓입니다. 앞 학습이 끝나면 다음 학습이 자동으로 시작되고, 브라우저·SSH를 닫거나 제어판이 재시작돼도 계속됩니다.</li>';
+    return;
+  }
+  const pol = { act: "ACT", diffusion: "Diffusion" };
+  const cls = { "완료": "done", "실행 중": "run", "실패": "bad", "중단": "bad", "취소": "off" };
+  const pill = { "완료": "ok", "실행 중": "warn", "실패": "bad", "중단": "bad" };
+  let wi = 0;
+  $("tqList").innerHTML = items.map((x, i) => {
+    const j = x.job || {}, ds = j.datasets || [];
+    const ex = ds.reduce((n, dd) => n + (dd.exclude || []).length, 0);
+    const lines = [`데이터 ${ds.length}개${ex ? ` (에피소드 ${ex}개 제외)` : ""}: ${ds.map(dd => dd.repo.split("/").pop()).join(", ")}`];
+    if (j.note) lines.push("메모: " + j.note);
+    if (x.started) lines.push(`시작 ${x.started}${x.finished ? " · 끝 " + x.finished : ""}${x.duration && x.status !== "실행 중" ? " · 소요 " + x.duration : ""}`);
+    if (x.final_loss !== undefined && x.final_loss !== null) lines.push("최종 손실 " + x.final_loss);
+    if (x.model_path) lines.push("모델 " + x.model_path);
+    else if (x.run_dir && x.status !== "대기") lines.push("결과 폴더 " + x.run_dir);
+    if (x.error) lines.push("오류: " + x.error);
+    let acts = "";
+    if (x.status === "대기") {
+      acts = `<button type="button" data-act="up" data-id="${x.id}" title="앞으로" ${wi === 0 ? "disabled" : ""}>▲</button>`
+        + `<button type="button" data-act="down" data-id="${x.id}" title="뒤로" ${wi === waiting - 1 ? "disabled" : ""}>▼</button>`
+        + `<button type="button" data-act="cancel" data-id="${x.id}">취소</button>`;
+      wi++;
+    } else if (["실패", "중단", "취소"].includes(x.status)) {
+      acts = `<button type="button" data-act="retry" data-id="${x.id}" title="같은 설정으로 계획 맨 뒤에 다시 넣기">다시 넣기</button>`;
+    }
+    return `<li class="${cls[x.status] || ""}"><span class="no">${i + 1}</span>
+      <div><b>${pol[j.policy] || j.policy} · ${Number(j.steps).toLocaleString()} 스텝 · 배치 ${j.batch_size} · 로딩 ${j.num_workers ?? 8}${j.augmentation ? " · 증강" : ""}</b>
+        <span class="pill ${pill[x.status] || ""}" style="margin-left:6px">${esc(x.status)}</span>
+        <div class="meta">${lines.map(esc).join("<br>")}</div></div>
+      <div class="acts">${acts}</div></li>`;
+  }).join("");
+}
+setInterval(() => { if (!$("tab-train").hidden) loadQueue(); }, 3000);
+
+function drawLossChart(losses) {
+  const c = $("trChart"), dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = 180;
+  c.width = w * dpr; c.height = h * dpr;
+  const g = c.getContext("2d"); g.scale(dpr, dpr); g.clearRect(0, 0, w, h);
+  const css = getComputedStyle(document.documentElement);
+  const col = (v) => css.getPropertyValue(v).trim();
+  g.font = "11.5px " + col("--font"); g.fillStyle = col("--muted");
+  if (!losses || losses.length < 2) { g.fillText("손실 그래프는 학습이 시작되면 표시됩니다", 12, h / 2); return; }
+  const pad = { l: 44, r: 10, t: 10, b: 22 };
+  const xs = losses.map(l => l[0]), ys = losses.map(l => Math.log10(Math.max(l[1], 1e-4)));
+  const x0 = xs[0], x1 = xs[xs.length - 1] || 1, y0 = Math.floor(Math.min(...ys)), y1 = Math.ceil(Math.max(...ys));
+  const X = (x) => pad.l + (x - x0) / Math.max(x1 - x0, 1) * (w - pad.l - pad.r);
+  const Y = (y) => pad.t + (1 - (y - y0) / Math.max(y1 - y0, 1e-6)) * (h - pad.t - pad.b);
+  g.strokeStyle = col("--line"); g.lineWidth = 1;
+  for (let y = y0; y <= y1; y++) {  // decade grid lines: 0.01, 0.1, 1, 10 ...
+    g.beginPath(); g.moveTo(pad.l, Y(y)); g.lineTo(w - pad.r, Y(y)); g.stroke();
+    g.fillText(String(Number((10 ** y).toPrecision(1))), 4, Y(y) + 4);
+  }
+  g.fillText(String(x0), pad.l, h - 6);
+  const last = String(x1); g.fillText(last, w - pad.r - g.measureText(last).width, h - 6);
+  g.strokeStyle = col("--accent"); g.lineWidth = 1.6; g.beginPath();
+  losses.forEach((l, i) => { const px = X(l[0]), py = Y(ys[i]); i ? g.lineTo(px, py) : g.moveTo(px, py); });
+  g.stroke();
+  const lx = X(x1), ly = Y(ys[ys.length - 1]);
+  g.fillStyle = col("--accent"); g.beginPath(); g.arc(lx, ly, 3.5, 0, 7); g.fill();
+  const label = "loss " + losses[losses.length - 1][1];
+  g.fillStyle = col("--fg"); g.fillText(label, Math.max(pad.l, lx - g.measureText(label).width - 6), Math.max(ly - 6, 12));
+}
+
+async function pollTrain() {
+  if ($("tab-train").hidden) return;
+  let s;
+  try { s = await (await fetch("/api/train/status")).json(); } catch (e) { return; }
+  const st = s.state || {}, running = s.running;
+  const phase = st.phase || "대기";
+  $("trPhase").textContent = phase;
+  $("trPhase").className = "pill " + (running ? "warn" : phase === "완료" ? "ok" : /실패|중단/.test(phase) ? "bad" : "");
+  const job = st.job || {};
+  $("trRun").textContent = st.run_name ? `${st.run_name} · 데이터 ${st.train_dataset || "-"} (${st.episodes || "-"}개) · ${job.policy || ""} 배치 ${job.batch_size || ""}` : (st.error || "");
+  const step = st.step || 0, total = st.total || job.steps || 0;
+  $("trBar").style.width = total ? Math.min(100, step / total * 100) + "%" : "0";
+  $("trStep").textContent = total ? `${step.toLocaleString()} / ${total.toLocaleString()} 스텝` : "";
+  $("trEta").textContent = running && st.eta ? `남은 시간 ${st.eta}${st.rate ? " · " + st.rate + " step/s" : ""}` : (st.duration ? "소요 " + st.duration : "");
+  if (st.error) $("trRun").textContent += " · 오류: " + st.error;
+  drawLossChart(st.losses);
+  const gpu = s.gpu || {};
+  const others = (gpu.trainings || []).filter(t => !running || t.user !== (state && state.user));
+  $("trGpu").textContent = (gpu.util !== null && gpu.util !== undefined ? `GPU 사용률 ${gpu.util}% · 메모리 ${gpu.mem_used}/${gpu.mem_total} MiB` : "GPU 정보 없음")
+    + (others.length ? ` · 다른 학습 실행 중: ${others.map(t => t.user + " (" + t.elapsed + ")").join(", ")}` : "");
+  $("trStart").disabled = running || others.length > 0;
+  $("trStop").disabled = !running;
+  $("trStopNextBox").hidden = !(running && job.queue_item);
+  if (st.log && st.log.length) {
+    const box = $("trLog"), atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+    box.textContent = st.log.slice(-150).join("\n");
+    if (atBottom) box.scrollTop = box.scrollHeight;
+  }
+  if (tr.lastPhase !== null && tr.lastPhase !== phase && !running) {
+    loadRuns(true);
+    if (phase === "완료") say("학습이 끝났습니다");
+  }
+  tr.lastPhase = phase;
+}
+setInterval(pollTrain, 2000);
+
+async function loadRuns(refresh) {
+  let d;
+  try { d = await (await fetch("/api/train/runs" + (refresh ? "?refresh=1" : ""))).json(); } catch (e) { return; }
+  const runs = (d.runs || []).slice().reverse();
+  const sig = JSON.stringify(runs.map(r => [r.number, r.final_loss, r.intermediate]));
+  if (sig === tr.runsSig && !refresh) return;
+  tr.runsSig = sig;
+  const esc = (t) => String(t ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const origin = (o) => Object.entries(o || {}).map(([repo, eps]) => `${esc(repo)} ep${esc(rangeText(eps))}`).join("<br>") || "-";
+  const steps = (r) => r.steps >= 1000 ? r.steps / 1000 + "K" : r.steps;
+  $("trRuns").innerHTML = `<thead><tr><th>#</th><th>끝난 시각</th><th>계정</th><th>모델</th><th>정책</th><th>스텝</th><th>배치</th><th>증강</th>
+      <th>학습 데이터</th><th>에피소드</th><th>원본 녹화</th><th>최종 손실</th><th>소요</th><th>비고</th><th></th></tr></thead><tbody>`
+    + (runs.length ? runs.map(r => `<tr>
+      <td class="num"><b>${r.number}</b></td><td>${esc(r.finished)}</td><td>${esc(r.trainer)}</td>
+      <td><code>${esc(r.id)}</code><br><button type="button" class="copy-path" data-path="${esc(r.model_path)}">경로 복사</button></td>
+      <td>${esc(r.policy)}</td><td class="num">${steps(r)}</td><td class="num">${r.batch_size}</td><td>${r.augmentation ? "켬" : "끔"}</td>
+      <td><code>${esc(r.dataset)}</code></td>
+      <td class="num">${r.dataset_episodes}개${r.dataset_minutes ? "<br>" + r.dataset_minutes + "분" : ""}</td>
+      <td>${origin(r.origin)}</td><td class="num">${r.final_loss ?? "-"}</td><td>${esc(r.duration || "-")}</td>
+      <td class="wrap">${esc(r.note)}</td>
+      <td>${r.own && r.intermediate ? `<button type="button" class="clean-run" data-id="${esc(r.id)}">중간 저장 지우기</button>` : ""}</td></tr>`).join("")
+      : `<tr><td colspan="15" class="muted">아직 학습 기록이 없습니다.</td></tr>`) + "</tbody>";
+  $("trRecent").innerHTML = runs.length ? runs.slice(0, 3).map(r => `<li>
+      <span class="no">#${r.number}</span>
+      <div class="li-main"><code title="${esc(r.id)}">${esc(r.id)}</code>
+      <span class="meta">${esc(r.trainer)} · ${esc((r.finished || "").slice(5))} · ${esc(r.policy)} ${steps(r)} · 에피소드 ${r.dataset_episodes}개 · 손실 ${r.final_loss ?? "-"}</span></div>
+      <div class="li-act"><button type="button" class="copy-path" data-path="${esc(r.model_path)}">경로 복사</button></div></li>`).join("")
+    + (runs.length > 3 ? `<li class="muted">외 ${runs.length - 3}건은 "전체 기록 보기"에서 볼 수 있습니다.</li>` : "")
+    : '<li class="muted">아직 학습 기록이 없습니다.</li>';
+}
+$("trRunsOpen").addEventListener("click", () => { loadRuns(false); $("runsDlg").showModal(); });
+$("runsClose").addEventListener("click", () => $("runsDlg").close());
+$("runsDlg").addEventListener("click", (ev) => { if (ev.target === $("runsDlg")) $("runsDlg").close(); });
+$("trRefresh2").addEventListener("click", () => loadRuns(true));
+function rangeText(nums) {
+  const n = [...nums].sort((a, b) => a - b), out = [];
+  for (let i = 0; i < n.length; i++) {
+    let j = i; while (j + 1 < n.length && n[j + 1] === n[j] + 1) j++;
+    out.push(i === j ? `${n[i]}` : `${n[i]}~${n[j]}`); i = j;
+  }
+  return out.join(", ");
+}
+$("trRefresh").addEventListener("click", () => loadRuns(true));
+$("trRecent").addEventListener("click", async (e) => {
+  const cp = e.target.closest(".copy-path"); if (!cp) return;
+  try { await navigator.clipboard.writeText(cp.dataset.path); toast("모델 경로를 복사했습니다: " + cp.dataset.path, "ok"); } catch (err) { toast(cp.dataset.path, "ok"); }
+});
+setInterval(() => { if (!$("tab-train").hidden) loadRuns(false); }, 30000);
+$("trRuns").addEventListener("click", async (ev) => {
+  const cp = ev.target.closest(".copy-path");
+  if (cp) {
+    try { await navigator.clipboard.writeText(cp.dataset.path); toast("모델 경로를 복사했습니다: " + cp.dataset.path, "ok"); }
+    catch (e) { toast(cp.dataset.path, "ok"); }
+    return;
+  }
+  const cl = ev.target.closest(".clean-run");
+  if (cl) {
+    if (cl.dataset.armed !== "1") { cl.dataset.armed = "1"; cl.textContent = "한 번 더 누르면 삭제"; setTimeout(() => { cl.dataset.armed = ""; cl.textContent = "중간 저장 지우기"; }, 4000); return; }
+    act(() => api("/api/train/clean", { id: cl.dataset.id }), "중간 저장을 지웠습니다. 최종 모델은 그대로 있습니다.").then(() => loadRuns(true));
+  }
+});
+
+// Two-step buttons: first click arms the button for 4 s, second click runs the action
+function armed(btn, label, run) {
+  let timer = null;
+  const original = btn.textContent;
+  btn.addEventListener("click", async () => {
+    if (!timer) {
+      btn.textContent = label;
+      timer = setTimeout(() => { btn.textContent = original; timer = null; }, 4000);
+      return;
+    }
+    clearTimeout(timer); timer = null; btn.textContent = original;
+    btn.disabled = true;
+    try { await run(); } catch (e) { toast(e.message, "err"); }
+    btn.disabled = false;
+    poll();
+  });
+}
+armed($("killBtn"), "한 번 더 누르면 강제 종료", async () => {
+  const r = await api("/api/kill");
+  const items = [`<li><span class="pill ok">완료</span>${r.killed.length ? "종료한 프로세스: " + r.killed.join(", ") : "실행 중인 로봇 프로그램이 없었습니다"}</li>`];
+  if (r.others.length) items.push(`<li><span class="pill bad">남음</span>다른 계정의 프로그램은 종료할 수 없습니다: ${r.others.join(", ")}</li>`);
+  $("recoverResult").innerHTML = items.join("");
+  toast("강제 종료했습니다. 다시 시작할 수 있습니다.", "ok");
+});
+armed($("resetBtn"), "팔을 내려뒀나요? 한 번 더 = 실행", async () => {
+  $("recoverResult").innerHTML = '<li class="muted">모터 재부팅 중...</li>';
+  const r = await api("/api/reset_motors");
+  $("recoverResult").innerHTML = Object.entries(r.motors).map(([n, m]) =>
+    `<li><span class="pill ${m.ok ? "ok" : "bad"}">${m.ok ? "정상" : "문제"}</span>${n === "follower" ? "팔로워" : "리더"}: ${m.msg}</li>`).join("");
+  toast("모터 초기화를 마쳤습니다.", "ok");
+});
+
+armed($("evKill"), "한 번 더 = 즉시 중단", async () => {
+  await api("/api/kill");
+  toast("평가를 즉시 중단했습니다. 팔로워는 그 자세로 멈춰 있습니다.", "ok");
+});
+armed($("trStop"), "한 번 더 누르면 학습 중지", async () => {
+  await api("/api/train/stop", { continue: $("trStopNext").checked });
+  toast("학습을 멈추는 중입니다. 중간 저장은 남아 있습니다.", "ok");
+  pollTrain();
+});
+showTab(["#train", "#eval"].includes(location.hash) ? location.hash.slice(1) : store.get("omx.tab", "collect"));
+updateTrainSummary();
+
+$("nextBtn").addEventListener("click", () => act(() => api("/api/control", { cmd: "next" }), "다음 단계로 넘어갑니다."));
+$("rerecBtn").addEventListener("click", () => act(() => api("/api/control", { cmd: "rerecord" }), "이번 에피소드를 버리고 다시 찍습니다."));
+$("recStop").addEventListener("click", () => act(() => api("/api/control", { cmd: "stop" }), "녹화를 끝내고 저장합니다."));
+</script>
+</body>
+</html>
