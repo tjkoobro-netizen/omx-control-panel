@@ -21,13 +21,13 @@ import statistics
 from pathlib import Path
 
 GiB = 1024 ** 3
-OBS_STEPS = {"act": 1, "diffusion": 2}
+OBS_STEPS = {"act": 1, "diffusion": 2, "smolvla": 1}
 
 # ---- calibration: least-squares fit to the probe runs (within ±0.5GB), plus a margin ----
 # The peak comes when the workers first fill their prefetch queue, and again around each epoch end.
-A = {"act": 0.395 * GiB, "diffusion": 1.401 * GiB}   # main process: model, CUDA context, dataset index
+A = {"act": 0.395 * GiB, "diffusion": 1.401 * GiB, "smolvla": 0.2 * GiB}   # main process: model, CUDA context, dataset index
 B = 8.64                                             # batches held by the main process (training + pinned)
-PW = {"act": 0.388 * GiB, "diffusion": 0.762 * GiB}  # a worker's own dataset copy and video decoders
+PW = {"act": 0.388 * GiB, "diffusion": 0.762 * GiB, "smolvla": 0.8 * GiB}  # a worker's own dataset copy and video decoders
 K = 0.849                                            # shared-memory batches per worker
 MARGIN = 0.8 * GiB  # fit error, plus ~0.5GB extra around the end of each epoch (1,750-step run)
 # measured peak RAM in GB (MemAvailable drop) and s/step, 2 cameras 640x480, augmentation on,
@@ -43,6 +43,15 @@ CALIBRATION = [
     {"policy": "diffusion", "batch": 32, "workers": 4, "ram_gb": 9.3, "sec": 0.95},
     {"policy": "diffusion", "batch": 32, "workers": 8, "ram_gb": None, "over": 9.7, "sec": None},
 ]
+CALIBRATION += [  # 2026-10-23, 150-step probes; SmolVLA = lerobot/smolvla_base fine-tuning
+    {"policy": "smolvla", "batch": 8, "workers": 4, "ram_gb": 4.1, "sec": 0.23},
+    {"policy": "smolvla", "batch": 16, "workers": 4, "ram_gb": 5.0, "sec": 0.45},
+    {"policy": "smolvla", "batch": 32, "workers": 4, "ram_gb": 6.8, "sec": 0.94},
+    {"policy": "smolvla", "batch": 32, "workers": 8, "ram_gb": None, "over": 10.6, "sec": 0.92},
+]
+# GPU memory of the training itself (GiB) = V0 + V1 * batch, from the same probes (nvidia-smi peak minus
+# what was already in use). SmolVLA batch 64 ran out of the 16GB.
+VRAM = {"act": (0.95, 0.475), "diffusion": (4.1, 0.256), "smolvla": (1.61, 0.216)}
 PROBE_RATES = {(c["policy"], c["batch"], c["workers"]): c["sec"] for c in CALIBRATION if c["sec"]}
 
 YELLOW, RED = 0.70, 0.90                             # share of available RAM
@@ -80,6 +89,24 @@ def ram_bytes(policy: str, batch: int, workers: int, shapes: list[tuple[int, int
     bb = batch_bytes(policy, batch, shapes)
     p = policy if policy in A else "act"
     return A[p] + B * bb + workers * (PW[p] + K * bb) + MARGIN
+
+
+def vram_bytes(policy: str, batch: int) -> float:
+    v0, v1 = VRAM.get(policy, VRAM["act"])
+    return (v0 + v1 * batch) * GiB
+
+
+def gpu_memory() -> tuple[float, float] | None:
+    """(used by others right now, total) GPU memory in bytes, or None without nvidia-smi."""
+    import subprocess
+
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+                             capture_output=True, text=True, timeout=5).stdout
+        used, total = (float(x) * 2**20 for x in out.strip().splitlines()[0].split(","))
+        return used, total
+    except Exception:
+        return None
 
 
 def suggest(policy: str, batch: int, workers: int, shapes, limit: float) -> dict | None:
@@ -146,7 +173,19 @@ def estimate(policy: str, batch: int, workers: int, steps: int, dataset_roots: l
     ratio = ram / avail if avail else 9
     level = "bad" if ratio > RED else "warn" if ratio > YELLOW else "ok"
     sec, src = step_seconds(policy, batch, workers, ckpt_home)
-    return {
+    gpu = gpu_memory()
+    vram = vram_bytes(policy, batch)
+    vram_info = {}
+    if gpu:
+        used, gtotal = gpu
+        vratio = (vram + used) / gtotal
+        vram_info = {"vram_gb": round(vram / GiB, 1), "vram_used_gb": round(used / GiB, 1),
+                     "vram_total_gb": round(gtotal / GiB, 1), "vram_ratio": round(vratio, 2),
+                     "vram_level": "bad" if vratio > 0.95 else "warn" if vratio > 0.85 else "ok"}
+        order = {"ok": 0, "warn": 1, "bad": 2}
+        if order[vram_info["vram_level"]] > order[level]:
+            level = vram_info["vram_level"]
+    return {**vram_info,
         "ram_gb": round(ram / GiB, 1), "avail_gb": round(avail / GiB, 1), "total_gb": round(total / GiB, 1),
         "ratio": round(ratio, 2), "level": level, "cameras": len(shapes),
         "resolution": f"{shapes[0][1]}x{shapes[0][0]}" if shapes else "",

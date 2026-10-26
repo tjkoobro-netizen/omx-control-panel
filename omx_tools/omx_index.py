@@ -274,15 +274,19 @@ def build_index() -> list[dict]:
         "",
         "학습이 끝날 때마다 omx_index.py가 갱신합니다. 직접 고치지 말고, 비고는 각 모델 폴더의 summary.json `note`에 적으세요.",
         "",
-        "| # | 끝난 시각 | 계정 | 모델 폴더 (`--policy.path`) | 정책·설정 | 학습 데이터 | 원본 녹화 | 최종 손실 | 소요 | 평가 (성공/시도) | 비고 |",
+        "| # | 끝난 시각 | 계정 | 모델 (표시 이름 · 폴더 `--policy.path`) | 정책·설정 | 학습 데이터 | 원본 녹화 | 최종 손실 | 소요 | 평가 (성공/시도) | 비고 |",
         "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
+    import omx_names
+
+    aliases = omx_names.load_aliases()
     for r in runs:
+        shown = omx_names.display_name(r["id"], aliases)
         steps = f"{r['steps'] // 1000}K" if r["steps"] >= 1000 else str(r["steps"])
         setting = f"{r['policy']} · {steps}스텝 · 배치{r['batch_size']} · 로딩{r.get('num_workers') if r.get('num_workers') is not None else '-'} · 증강{'O' if r['augmentation'] else 'X'}"
         data = f"`{r['dataset']}`<br>{r['dataset_episodes']}개" + (f", {r['dataset_minutes']}분" if r["dataset_minutes"] else "")
         md.append(
-            f"| {r['number']} | {r['finished']} | {r['trainer']} | `{r['model_path']}` | {setting} | {data} | "
+            f"| {r['number']} | {r['finished']} | {r['trainer']} | **{shown}**<br>`{r['model_path']}` | {setting} | {data} | "
             f"{origin_text(r['origin'])} | {r['final_loss'] if r['final_loss'] is not None else '-'} | "
             f"{r['duration'] or '-'} | {eval_text(r['evals'])} | {r['note'] or ''} |"
         )

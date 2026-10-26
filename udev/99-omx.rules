@@ -1,0 +1,12 @@
+# OMX 로봇팔 세트 (2026-10-26 번호 변경)
+# 세트마다 고유 이름 omx_follower_N / omx_leader_N, 그리고 공용 이름 omx_follower / omx_leader
+# (공용 이름은 한 세트만 연결했을 때만 정확합니다. 여러 세트를 같이 쓸 때는 고유 이름을 씁니다)
+# OMX 1 (예전 세트 2)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2f5d", ATTRS{serial}=="830772F850323952582E3120FF070323", SYMLINK+="omx_follower omx_follower_1"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2f5d", ATTRS{serial}=="786CBB2650323952582E3120FF06162D", SYMLINK+="omx_leader omx_leader_1"
+# OMX 2 (예전 세트 1, 지금까지 데이터와 모델을 만든 팔)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2f5d", ATTRS{serial}=="843A5F7C50323952582E3120FF05061C", SYMLINK+="omx_follower omx_follower_2"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2f5d", ATTRS{serial}=="5B95670950323952582E3120FF06292A", SYMLINK+="omx_leader omx_leader_2"
+# OMX 3
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2f5d", ATTRS{serial}=="8792B1EB50323952582E3120FF071D37", SYMLINK+="omx_follower omx_follower_3"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2f5d", ATTRS{serial}=="8C6E40F350323952582E3120FF071F29", SYMLINK+="omx_leader omx_leader_3"

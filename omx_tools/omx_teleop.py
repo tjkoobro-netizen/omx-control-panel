@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import omx_safe_start  # noqa: E402
 
 omx_safe_start.install()
+import omx_bimanual  # noqa: E402,F401  (registers the cooperative robot: --robot.type=bi_omx_follower)
 
 from lerobot.scripts import lerobot_teleoperate  # noqa: E402
 

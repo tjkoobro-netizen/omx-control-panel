@@ -4,7 +4,7 @@
   python omx_train.py job.json
 
 job.json:
-  {"policy": "act" | "diffusion", "steps": 40000, "batch_size": 8, "num_workers": 8, "augmentation": true, "note": "...",
+  {"policy": "act" | "diffusion" | "smolvla", "steps": 40000, "batch_size": 8, "num_workers": 8, "augmentation": true, "note": "...",
    "datasets": [{"repo": "tkoo/1013_2203", "exclude": [0]}, {"repo": "tkoo/1013_2211", "exclude": []}]}
 
 Steps
@@ -125,6 +125,22 @@ def run_logged(cmd: list[str], progress: bool = False) -> int:
     return child.wait()
 
 
+SMOLVLA_BASE = "lerobot/smolvla_base"
+
+
+def smolvla_rename_map(dataset_root: Path) -> dict:
+    """Our camera names -> smolvla_base's inputs (camera1..camera3): front first, then wrist.
+
+    The pretrained model was trained on community low-cost arm data with up to three cameras named
+    camera1..3; a camera it does not get is simply left out (no padding image needed).
+    """
+    feats = json.loads((dataset_root / "meta/info.json").read_text())["features"]
+    cams = [k for k, f in feats.items() if k.startswith("observation.images.") and f.get("dtype") in ("video", "image")]
+    order = {"front": 0, "wrist": 1}
+    cams.sort(key=lambda k: (order.get(k.rsplit(".", 1)[-1], 9), k))
+    return {k: f"observation.images.camera{i + 1}" for i, k in enumerate(cams[:3])}
+
+
 def find_reusable(datasets: list[dict]) -> str | None:
     """An earlier merged training dataset of this account with exactly the same source episodes."""
     want = []
@@ -182,18 +198,22 @@ def main() -> int:
         note_file = DATA_HOME / datasets[0]["repo"].split("/")[0] / ".omx_notes" / f"{datasets[0]['repo'].split('/')[1]}.json"
         rec_note = json.loads(note_file.read_text()).get("description", "") if note_file.exists() else ""
         keyword = (derive_keywords(tasks, rec_note) or ["task"])[0]
-        run_name = f"{job['policy']}_{keyword}_{stamp}"
+        # the name from the training tab (team rule, see omx_names.py), else the older automatic name
+        run_name = job.get("name") or f"{job['policy']}_{keyword}_{stamp}"
         run_dir = CKPT_HOME / USER / run_name
         if run_dir.exists():
-            raise RuntimeError(f"{run_dir} 가 이미 있습니다. 1분 뒤 다시 시작하세요.")
+            raise RuntimeError(f"{run_dir} 가 이미 있습니다. " + ("이름을 바꿔 다시 넣으세요." if job.get("name") else "1분 뒤 다시 시작하세요."))
         save_state(run_name=run_name, run_dir=str(run_dir))
 
         # 1) training data. Excluded episodes are removed into a new dataset rather than skipped with
         #    --dataset.episodes: in LeRobot v0.4.4 that option breaks multi-frame policies (diffusion
         #    indexes past the end of the subset).
         edit = str(VENV_BIN / "lerobot-edit-dataset")
+        has_eval = any(d.get("eval") for d in datasets)
         reuse = None if len(datasets) == 1 and not datasets[0].get("exclude") else find_reusable(datasets)
-        if len(datasets) == 1 and not datasets[0].get("exclude"):
+        if has_eval:
+            reuse = None  # the candidate counts are recorded per training dataset
+        if len(datasets) == 1 and not datasets[0].get("exclude") and not has_eval:
             train_repo = datasets[0]["repo"]  # an original recording, used as is
         elif reuse:
             train_repo = reuse  # same recordings and episodes were merged before: use that data again
@@ -231,6 +251,14 @@ def main() -> int:
             for t in temps:
                 shutil.rmtree(DATA_HOME / t, ignore_errors=True)
             omx_index.write_sources(train_repo, parts)
+            if has_eval:
+                # which evaluation attempts went in, by kind, to compare models trained with / without them
+                src = omx_index.sources_path(DATA_HOME / train_repo)
+                meta = json.loads(src.read_text())
+                evs = [dict(d["eval"], repo=d["repo"]) for d in datasets if d.get("eval")]
+                meta["eval_sources"] = evs
+                meta["eval_totals"] = {k: sum(e[k] for e in evs) for k in ("one_shot", "recovery", "wandering_by_user")}
+                src.write_text(json.dumps(meta, indent=2, ensure_ascii=False))
             share_with_team(DATA_HOME / train_repo)
         train_root = DATA_HOME / train_repo
         used = [e["index"] for e in omx_index.episode_table(train_root)]
@@ -241,8 +269,11 @@ def main() -> int:
 
         # 2) lerobot-train
         (CKPT_HOME / USER).mkdir(parents=True, exist_ok=True)
+        # SmolVLA is fine-tuned from the community-pretrained lerobot/smolvla_base (downloaded once,
+        # training runs offline); ACT and Diffusion start from scratch
+        policy_arg = f"--policy.path={SMOLVLA_BASE}" if job["policy"] == "smolvla" else f"--policy.type={job['policy']}"
         cmd = [str(VENV_BIN / "lerobot-train"), f"--dataset.repo_id={train_repo}",
-               f"--policy.type={job['policy']}", "--policy.device=cuda", "--policy.push_to_hub=false",
+               policy_arg, "--policy.device=cuda", "--policy.push_to_hub=false",
                f"--output_dir={run_dir}", f"--job_name={run_name}",
                f"--steps={int(job['steps'])}", f"--batch_size={int(job['batch_size'])}", f"--num_workers={int(job.get('num_workers', 8))}",
                "--log_freq=100", f"--save_freq={max(int(job['steps']) // 4, 1000)}", "--eval_freq=0",
@@ -251,6 +282,8 @@ def main() -> int:
             cmd.append("--dataset.image_transforms.enable=true")
         if job["policy"] == "diffusion":
             cmd += ["--policy.resize_shape=[240, 320]", "--policy.crop_ratio=0.95"]
+        if job["policy"] == "smolvla":
+            cmd.append("--rename_map=" + json.dumps(smolvla_rename_map(train_root)))
         save_state(phase="학습 중", train_started=time.time())
         rc = run_logged(cmd, progress=True)
 
@@ -261,7 +294,9 @@ def main() -> int:
         status = "완료" if rc == 0 and not stop_requested else ("중단" if stop_requested else "실패")
         summary = {"trainer": USER, "started": state["started"], "finished": finished.strftime("%Y-%m-%d %H:%M"),
                    "duration": duration, "final_loss": final_loss, "dataset_fingerprint": fingerprint,
-                   "train_dataset": train_repo, "episodes": used, "status": status, "note": job.get("note", ""),
+                   "train_dataset": train_repo, "episodes": used, "status": status,
+                   "note": (job.get("note", "") + (f" · 평가 시도 {sum(len(d['eval']['episodes']) for d in datasets if d.get('eval'))}개 포함"
+                                                   if any(d.get("eval") for d in datasets) else "")).strip(" ·"),
                    "policy": job["policy"], "steps": int(job["steps"]), "batch_size": int(job["batch_size"]),
                    "num_workers": int(job.get("num_workers", 8)), "augmentation": bool(job.get("augmentation"))}
 

@@ -15,7 +15,7 @@ import socket
 import subprocess
 from pathlib import Path
 
-VERSION = "1.6.1"
+VERSION = "2.1.0"
 
 DEFAULTS: dict = {
     # shown in the panel header
@@ -48,6 +48,14 @@ DEFAULTS: dict = {
     # one panel server per account: port = port_base + uid - uid_base
     "port_base": 8765,
     "uid_base": 1001,
+    # v2: "gpu" = the GPU laptop (training, inference server, shared data; robots may be attached too),
+    # "control" = a team member's PC with the robot (teleop, recording, eval) that uses the GPU laptop
+    # for training and inference through an SSH tunnel (see omx_remote.py)
+    "role": "gpu",
+    "gpu_host": "omx-gpu",          # control: SSH alias of the GPU laptop (key login, set up by the installer)
+    "gpu_user": "",                 # control: this person's account on the GPU laptop (dataset owner names)
+    "gpu_panel_port": 8765,         # control: that account's panel port on the GPU laptop
+    "gpu_data_home": "/srv/il/lerobot_data",  # control: shared data folder on the GPU laptop
 }
 
 
@@ -91,6 +99,10 @@ def port(uid: int | None = None) -> int:
     return int(CFG["port_base"]) + max(0, uid - int(CFG["uid_base"]))
 
 
+def is_control() -> bool:
+    return CFG.get("role") == "control"
+
+
 def lock_dir() -> Path:
     """Shared folder for the robot/training locks; falls back to /tmp when it is missing or read-only."""
     root = path("shared_root")
@@ -114,12 +126,12 @@ def share_with_team(target: Path) -> None:
     subprocess.run(["setfacl", "-R", "-m", f"g::rwX,g:{group}:rwX,m::rwX", str(target)], capture_output=True)
 
 
-def cameras_arg(warmup_s: int = 3) -> str:
-    """--robot.cameras value for lerobot scripts."""
+def cameras_arg(warmup_s: int = 3, cameras: dict | None = None) -> str:
+    """--robot.cameras value for lerobot scripts (the configured cameras, or the given name -> device)."""
     w, h, fps = CFG["camera_width"], CFG["camera_height"], CFG["camera_fps"]
     return "{" + ", ".join(
         f"{name}: {{type: opencv, index_or_path: '{dev}', width: {w}, height: {h}, fps: {fps}, fourcc: MJPG, warmup_s: {warmup_s}}}"
-        for name, dev in CFG["cameras"].items()
+        for name, dev in (CFG["cameras"] if cameras is None else cameras).items()
     ) + "}"
 
 

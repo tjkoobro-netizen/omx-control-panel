@@ -18,6 +18,7 @@ import os
 import re
 import shutil
 import signal
+import statistics
 import subprocess
 import threading
 import time
@@ -26,12 +27,23 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 from lerobot.cameras.opencv import OpenCVCamera, OpenCVCameraConfig
 
 import omx_config  # noqa: E402  (per-machine settings written by install_gpu.sh)
 import omx_train_queue as tq  # noqa: E402  (training plan file and runner)
 import omx_ram  # noqa: E402  (RAM and time estimates)
+import omx_protocol as proto  # noqa: E402  (evaluation protocol v2: position presets, attempts)
+import omx_names as names  # noqa: E402  (team naming rule, display names of models)
+import omx_home  # noqa: E402  (standard home pose from the training data; config "home_pose")
+import omx_camstats  # noqa: E402  (measured camera fps and brightness)
+
+omx_camstats.install()
+
+CONTROL = omx_config.is_control()  # v2: this PC holds the robot; training and inference on the GPU laptop
+if CONTROL:
+    import omx_remote as remote  # noqa: E402
 
 CFG = omx_config.CFG
 VERSION = omx_config.VERSION
@@ -39,12 +51,13 @@ VERSION = omx_config.VERSION
 # omx-control.sh and omx-panel-server.sh ask omx_config for the same number.
 HOST, PORT = "127.0.0.1", omx_config.port()
 HOME = Path.home()
-USER = getpass.getuser()
+USER = (omx_config.CFG.get("gpu_user") if omx_config.is_control() else "") or getpass.getuser()
 VENV_BIN = omx_config.venv_bin()
 # Working directory for LeRobot commands: the lecture layout, or the team guide's ~/dev/lerobot
 LEROBOT_DIR = next((p for p in (HOME / "il_ws/src/lerobot", HOME / "dev/lerobot") if p.is_dir()), HOME)
 TOOLS_DIR = Path(__file__).resolve().parent
 LOG_DIR = HOME / "il_ws/omx_logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)  # a new control PC has none yet
 # Team shared LeRobot home: calibration and datasets live here (child processes inherit it)
 os.environ["HF_LEROBOT_HOME"] = str(omx_config.path("data_home"))
 DATA_HOME = Path(os.environ["HF_LEROBOT_HOME"])
@@ -61,6 +74,166 @@ CAMS_ARG = omx_config.cameras_arg(warmup_s=3)
 ROBOT_ARGS = ["--robot.type=omx_follower", f"--robot.port={FOLLOWER}", "--robot.id=omx_follower_arm"]
 TELEOP_ARGS = ["--teleop.type=omx_leader", f"--teleop.port={LEADER}", "--teleop.id=omx_leader_arm"]
 VIEWER_PORT = 9876
+
+# ---- Robot setup (v2.1): one arm, or two arms as one cooperative robot, chosen in the panel ----
+# ~/.config/omx/robot.json: {"mode": "single" | "bimanual", "single": {"set": "OMX 2"},
+#   "bimanual": {"left": "OMX 2", "right": "OMX 3"},
+#   "cameras": {"single": [{"name": "front", "path": "/dev/v4l/by-path/...", "label": "..."}, ...], "bimanual": [...]}}
+# Without the file (e.g. the GPU laptop) the configured follower/leader/cameras are used as before.
+SETUP_FILE = Path(os.environ.get("OMX_ROBOT_SETUP") or "~/.config/omx/robot.json").expanduser()
+ROBOT_SETS = CFG.get("robot_sets") or {f"OMX {n}": {"follower": f"/dev/omx_follower_{n}", "leader": f"/dev/omx_leader_{n}"}
+                                       for n in (1, 2, 3)}
+CAMERA_ROLES = {"single": ["front", "front_2", "wrist"], "bimanual": ["front", "front_2", "wrist_left", "wrist_right"]}
+ROBOT_MODE = "single"
+FOLLOWERS: list = []   # [(label, port)]
+LEADERS: list = []
+CAMERA_LABELS: dict = {}
+
+
+def camera_label(mode: str, name: str, setup: dict) -> str:
+    """Which robot's which camera, e.g. "OMX 2 · 왼팔 wrist" or "OMX 2+3 · 글로벌 front"."""
+    if mode == "bimanual":
+        left, right = setup["bimanual"]["left"], setup["bimanual"]["right"]
+        pair = f"{left.replace('OMX ', 'OMX ')}+{right.removeprefix('OMX ')}"
+        return {"front": f"{pair} · 글로벌 front", "front_2": f"{pair} · 글로벌 front 2",
+                "wrist_left": f"{left} · 왼팔 wrist", "wrist_right": f"{right} · 오른팔 wrist"}.get(name, name)
+    robot = setup["single"]["set"]
+    return {"front": f"{robot} · 글로벌 front", "front_2": f"{robot} · 글로벌 front 2", "wrist": f"{robot} · 팔로워 wrist"}.get(name, name)
+
+
+def load_setup() -> dict | None:
+    try:
+        return json.loads(SETUP_FILE.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def apply_setup(setup: dict | None) -> None:
+    """Ports, cameras and the lerobot arguments of the chosen robot setup."""
+    global FOLLOWER, LEADER, CAMERAS, CAMS_ARG, ROBOT_ARGS, TELEOP_ARGS, ROBOT_MODE, FOLLOWERS, LEADERS, CAMERA_LABELS
+    if not setup:
+        ROBOT_MODE = "single"
+        FOLLOWERS, LEADERS = [("팔로워", CFG["follower_port"])], [("리더", CFG["leader_port"])]
+        CAMERAS = dict(CFG["cameras"])
+        CAMERA_LABELS = {n: {"front": "글로벌 카메라", "wrist": "팔로워 장착"}.get(n, n) for n in CAMERAS}
+    else:
+        ROBOT_MODE = setup.get("mode", "single")
+        cams = (setup.get("cameras") or {}).get(ROBOT_MODE) or []
+        CAMERAS = {c["name"]: c["path"] for c in cams}
+        CAMERA_LABELS = {c["name"]: c.get("label") or camera_label(ROBOT_MODE, c["name"], setup) for c in cams}
+        if ROBOT_MODE == "bimanual":
+            left, right = (ROBOT_SETS[setup["bimanual"][s]] for s in ("left", "right"))
+            FOLLOWERS = [(f"왼팔 팔로워 ({setup['bimanual']['left']})", left["follower"]),
+                         (f"오른팔 팔로워 ({setup['bimanual']['right']})", right["follower"])]
+            LEADERS = [(f"왼팔 리더 ({setup['bimanual']['left']})", left["leader"]),
+                       (f"오른팔 리더 ({setup['bimanual']['right']})", right["leader"])]
+        else:
+            one = ROBOT_SETS[setup["single"]["set"]]
+            FOLLOWERS = [(f"팔로워 ({setup['single']['set']})", one["follower"])]
+            LEADERS = [(f"리더 ({setup['single']['set']})", one["leader"])]
+    FOLLOWER, LEADER = FOLLOWERS[0][1], LEADERS[0][1]
+    CAMS_ARG = omx_config.cameras_arg(warmup_s=3, cameras=CAMERAS)
+    if ROBOT_MODE == "bimanual":
+        ROBOT_ARGS = ["--robot.type=bi_omx_follower", f"--robot.left_port={FOLLOWERS[0][1]}",
+                      f"--robot.right_port={FOLLOWERS[1][1]}", "--robot.id=bi_omx_follower"]
+        TELEOP_ARGS = ["--teleop.type=bi_omx_leader", f"--teleop.left_port={LEADERS[0][1]}",
+                       f"--teleop.right_port={LEADERS[1][1]}", "--teleop.id=bi_omx_leader"]
+    else:
+        ROBOT_ARGS = ["--robot.type=omx_follower", f"--robot.port={FOLLOWER}", "--robot.id=omx_follower_arm"]
+        TELEOP_ARGS = ["--teleop.type=omx_leader", f"--teleop.port={LEADER}", "--teleop.id=omx_leader_arm"]
+
+
+apply_setup(load_setup())
+
+
+def list_cameras() -> list[dict]:
+    """Every camera plugged into this PC, by USB port (identical cameras share serials, so the port is the id)."""
+    out = []
+    for p in sorted(Path("/dev/v4l/by-path").glob("*-video-index0")):
+        if "usbv2" in p.name:  # the same device under an older path alias
+            continue
+        dev = p.resolve().name
+        try:
+            model = Path(f"/sys/class/video4linux/{dev}/name").read_text().split(":")[0].strip()
+        except OSError:
+            model = ""
+        port = re.search(r"usb-\d+:([\d.]+):", p.name)
+        used = next((n for n, path in CAMERAS.items() if path == str(p)), None)
+        out.append({"path": str(p), "device": f"/dev/{dev}", "model": model, "usb_port": port.group(1) if port else "",
+                    "role": used, "label": CAMERA_LABELS.get(used) if used else None})
+    return out
+
+
+def camera_probe(path: str) -> bytes:
+    """One JPEG from a camera (for choosing roles); only when nothing else holds the cameras."""
+    if PREVIEW.running or JOB.running():
+        raise RuntimeError("카메라 보기나 작업이 켜져 있어 따로 읽을 수 없습니다. 끈 뒤 다시 누르세요.")
+    if not path.startswith("/dev/v4l/by-path/") or not Path(path).exists():
+        raise RuntimeError("카메라를 찾을 수 없습니다.")
+    cap = cv2.VideoCapture(path, cv2.CAP_V4L2)
+    try:
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        cap.set(3, 640)
+        cap.set(4, 480)
+        ok, frame = False, None
+        for _ in range(8):  # the first frames are often dark (auto exposure)
+            ok, frame = cap.read()
+        if not ok:
+            raise RuntimeError("영상을 읽지 못했습니다.")
+        return cv2.imencode(".jpg", cv2.resize(frame, (320, 240)), [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
+    finally:
+        cap.release()
+
+
+def setup_status() -> dict:
+    setup = load_setup()
+    return {"setup": setup, "mode": ROBOT_MODE, "sets": {n: {k: {"port": v, "present": Path(v).exists()} for k, v in s.items()}
+                                                          for n, s in ROBOT_SETS.items()},
+            "roles": CAMERA_ROLES, "cameras": list_cameras(),
+            "followers": [{"label": l, "port": p, "present": Path(p).exists()} for l, p in FOLLOWERS],
+            "leaders": [{"label": l, "port": p, "present": Path(p).exists()} for l, p in LEADERS],
+            "active_cameras": [{"name": n, "path": p, "label": CAMERA_LABELS.get(n, n), "present": Path(p).exists()}
+                               for n, p in CAMERAS.items()]}
+
+
+def save_setup(body: dict) -> dict:
+    """Panel: choose single / cooperative, the robot set(s) and the camera roles (labels follow, or typed)."""
+    if JOB.running() or PREVIEW.running:
+        raise RuntimeError("작업이나 카메라 보기를 끈 뒤 바꾸세요.")
+    mode = body.get("mode")
+    if mode not in ("single", "bimanual"):
+        raise RuntimeError("단일 로봇 또는 협동 로봇을 고르세요.")
+    setup = load_setup() or {}
+    setup["mode"] = mode
+    if mode == "single":
+        if body.get("set") not in ROBOT_SETS:
+            raise RuntimeError("로봇 세트를 고르세요.")
+        setup["single"] = {"set": body["set"]}
+    else:
+        left, right = body.get("left"), body.get("right")
+        if left not in ROBOT_SETS or right not in ROBOT_SETS or left == right:
+            raise RuntimeError("왼팔과 오른팔에 서로 다른 로봇 세트를 고르세요.")
+        setup["bimanual"] = {"left": left, "right": right}
+    cams, seen = [], set()
+    for c in body.get("cameras", []):
+        role = c.get("role")
+        if not role:
+            continue
+        if role not in CAMERA_ROLES[mode] or role in seen:
+            raise RuntimeError(f"카메라 역할 {role}이 잘못됐거나 두 번 쓰였습니다.")
+        if not str(c.get("path", "")).startswith("/dev/v4l/by-path/"):
+            raise RuntimeError("카메라 경로가 잘못됐습니다.")
+        seen.add(role)
+        cams.append({"name": role, "path": c["path"], "label": (c.get("label") or "").strip()[:60]})
+    need = {"front", "wrist"} if mode == "single" else {"front", "wrist_left", "wrist_right"}
+    if not need <= seen:
+        raise RuntimeError("필요한 카메라를 모두 지정하세요: " + ", ".join(sorted(need - seen)))
+    order = CAMERA_ROLES[mode]
+    setup.setdefault("cameras", {})[mode] = sorted(cams, key=lambda c: order.index(c["name"]))
+    SETUP_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SETUP_FILE.write_text(json.dumps(setup, ensure_ascii=False, indent=2))
+    apply_setup(setup)
+    return setup_status()
 
 SLOW_RE = re.compile(r"Record loop is running slower \(([0-9.]+) Hz\)")
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -82,16 +255,26 @@ def other_robot_processes() -> list[str]:
         user, pid, args = (line.split(None, 2) + ["", ""])[:3]
         if pid in mine or "omx_web.py" in args:
             continue
-        if re.search(r"lerobot-(teleoperate|record)|omx_(record|teleop)\.py", args):
+        if re.search(r"lerobot-(teleoperate|record)|omx_(record|teleop|return_home)\.py", args):
             found.append(f"{user} (PID {pid})")
     return found
+
+
+def arms_to_check() -> list:
+    """(name, port, motor ids) of every arm of the current setup; the first follower/leader keep the old keys."""
+    out = []
+    for i, (label, port) in enumerate(FOLLOWERS):
+        out.append(("follower" if i == 0 else f"follower_{i + 1}", port, FOLLOWER_IDS))
+    for i, (label, port) in enumerate(LEADERS):
+        out.append(("leader" if i == 0 else f"leader_{i + 1}", port, LEADER_IDS))
+    return out
 
 
 def ping_motors() -> dict:
     from dynamixel_sdk import PacketHandler, PortHandler
 
     result = {}
-    for name, port, ids in (("follower", FOLLOWER, FOLLOWER_IDS), ("leader", LEADER, LEADER_IDS)):
+    for name, port, ids in arms_to_check():
         if not Path(port).exists():
             result[name] = {"ok": False, "msg": f"{port} 없음 (USB 연결 확인)"}
             continue
@@ -125,7 +308,7 @@ def reset_motors() -> dict:
     from dynamixel_sdk import PacketHandler, PortHandler
 
     result = {}
-    for name, port, ids in (("follower", FOLLOWER, FOLLOWER_IDS), ("leader", LEADER, LEADER_IDS)):
+    for name, port, ids in arms_to_check():
         if not Path(port).exists():
             result[name] = {"ok": False, "msg": f"{port} 없음 (USB 연결 확인)"}
             continue
@@ -163,7 +346,7 @@ def kill_own_robot_processes() -> list[str]:
     killed = []
     for line in out.splitlines():
         pid, pgid, args = (line.split(None, 2) + ["", ""])[:3]
-        if "omx_web.py" in args or not re.search(r"lerobot-(teleoperate|record)|omx_(record|teleop)\.py", args):
+        if "omx_web.py" in args or not re.search(r"lerobot-(teleoperate|record)|omx_(record|teleop|return_home)\.py", args):
             continue
         try:
             os.killpg(int(pgid), signal.SIGKILL)
@@ -176,6 +359,17 @@ def kill_own_robot_processes() -> list[str]:
 
 
 def gpu_status() -> str:
+    if CONTROL:  # this PC has no GPU of its own: show the GPU laptop's (training and inference run there)
+        try:
+            g = remote.gpu_json("/api/train/status", timeout=10).get("gpu") or {}
+            return (f"GPU 노트북({remote.HOST}) · 메모리 {g.get('mem_used')}/{g.get('mem_total')} MiB · 사용률 {g.get('util')}%"
+                    if g.get("mem_total") else f"GPU 노트북({remote.HOST}) GPU 정보를 읽지 못했습니다")
+        except Exception:
+            return f"GPU 노트북({remote.HOST})에 연결되지 않았습니다"
+    return gpu_status_local()
+
+
+def gpu_status_local() -> str:
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,memory.used,memory.total,utilization.gpu",
@@ -186,6 +380,29 @@ def gpu_status() -> str:
         return f"{name} · 메모리 {used}/{total} MiB · 사용률 {util}%"
     except Exception:
         return "GPU 정보를 읽을 수 없음 (nvidia-smi 확인)"
+
+
+def camera_stats() -> dict:
+    """{camera: {"fps", "brightness"}}: from the camera view, or from the running record/eval program."""
+    if PREVIEW.running:
+        return {n: {**v, "brightness": PREVIEW.brightness.get(n, v["brightness"])}
+                for n, v in omx_camstats.stats(PREVIEW.cams).items()}
+    f = Path(f"/dev/shm/omx_live_{os.getuid()}_stats.json")
+    try:
+        if JOB.running() and time.time() - f.stat().st_mtime < 3:
+            return json.loads(f.read_text())
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
+def merged_datasets() -> list[dict]:
+    """Control PC: the team's datasets on the GPU laptop (training uses those), plus the ones recorded here
+    that are not there yet (marked local)."""
+    shared = remote.gpu_datasets()
+    names_there = {d["repo_id"] for d in shared}
+    local = [dict(d, local_only=True) for d in list_datasets() if d["repo_id"] not in names_there]
+    return shared + local
 
 
 def list_datasets() -> list[dict]:
@@ -206,6 +423,7 @@ def list_datasets() -> list[dict]:
             "frames": meta.get("total_frames", 0),
             "minutes": round(meta.get("total_frames", 0) / (meta.get("fps") or 30) / 60, 1),
             "kind": kind,
+            **({"candidates": proto.candidate_episodes(read_notes(f"{repo.parent.name}/{repo.name}"))} if kind == "eval" else {}),
         })
     return items
 
@@ -253,12 +471,13 @@ def train_status() -> dict:
     return {"state": state, "running": running, "gpu": gpu_users()}
 
 
-DEFAULT_WORKERS = {"act": 8, "diffusion": 4}
+DEFAULT_WORKERS = {"act": 8, "diffusion": 4, "smolvla": 4}
+POLICIES = ("act", "diffusion", "smolvla")
 
 
 def train_estimate(body: dict) -> dict:
     """RAM / time estimate for the settings on the training tab (also used before starting)."""
-    policy = body.get("policy") if body.get("policy") in ("act", "diffusion") else "act"
+    policy = body.get("policy") if body.get("policy") in POLICIES else "act"
     roots, frames = [], 0
     for d in body.get("datasets", []):
         try:
@@ -279,8 +498,8 @@ def train_estimate(body: dict) -> dict:
 def make_job(body: dict) -> dict:
     """Validate the training settings from the panel into an omx_train.py job."""
     policy = body.get("policy")
-    if policy not in ("act", "diffusion"):
-        raise RuntimeError("정책은 ACT 또는 Diffusion만 고를 수 있습니다.")
+    if policy not in POLICIES:
+        raise RuntimeError("정책은 ACT, Diffusion, SmolVLA 중에서 고르세요.")
     steps, batch = int(body.get("steps", 0)), int(body.get("batch_size", 0))
     workers = int(body.get("num_workers", DEFAULT_WORKERS[policy]))
     if not 100 <= steps <= 500_000 or not 1 <= batch <= 64:
@@ -289,13 +508,73 @@ def make_job(body: dict) -> dict:
         raise RuntimeError("데이터 로딩 수는 0~16 사이로 정하세요.")
     datasets = []
     for d in body.get("datasets", []):
-        dataset_dir(d["repo"])
-        datasets.append({"repo": d["repo"], "exclude": sorted({int(e) for e in d.get("exclude", [])})})
+        root = dataset_dir(d["repo"])
+        item = {"repo": d["repo"], "exclude": sorted({int(e) for e in d.get("exclude", [])})}
+        if root.name.startswith("eval_"):
+            # evaluation attempts: only the ones checked as training candidates go in
+            note = read_notes(d["repo"])
+            c = proto.candidate_episodes(note)
+            total = json.loads((root / "meta/info.json").read_text()).get("total_episodes", 0)
+            keep = set(c["episodes"]) - set(item["exclude"])
+            if not keep:
+                raise RuntimeError(f"{d['repo']}에 학습 후보로 체크한 시도가 없습니다.")
+            item["exclude"] = sorted(set(range(total)) - keep)
+            item["eval"] = {"one_shot": c["one_shot"], "recovery": c["recovery"],
+                            "wandering_by_user": c["wandering_by_user"], "episodes": sorted(keep),
+                            "preset_id": (note.get("protocol") or {}).get("preset_id"), "model": note.get("run_id")}
+        datasets.append(item)
     if not datasets:
         raise RuntimeError("학습에 쓸 데이터셋을 하나 이상 고르세요.")
-    return {"policy": policy, "steps": steps, "batch_size": batch, "num_workers": workers,
-            "augmentation": bool(body.get("augmentation")),
-            "note": str(body.get("note", "")).strip(), "datasets": datasets}
+    job = {"policy": policy, "steps": steps, "batch_size": batch, "num_workers": workers,
+           "augmentation": bool(body.get("augmentation")),
+           "note": str(body.get("note", "")).strip(), "datasets": datasets}
+    name = names.clean_name(str(body.get("name", "")))
+    if name:
+        if (CKPT_HOME / USER / name).exists():
+            raise RuntimeError(f"모델 이름 {name}은 이미 있습니다. 끝에 -2 같은 특이사항을 붙여 바꾸세요.")
+        job["name"] = name
+    return job
+
+
+def train_name(body: dict) -> dict:
+    """Rule name for the training-tab settings: {task}_{policy}_{data}_{steps}_{MMDD}[-extras]."""
+    import pandas as pd
+
+    import omx_index
+
+    origin: dict = {}
+    tasks: list = []
+    eval_attempts = 0
+    for d in body.get("datasets", []):
+        try:
+            root = dataset_dir(d["repo"])
+        except Exception:
+            continue
+        excl = {int(e) for e in d.get("exclude", [])}
+        if not tasks:
+            try:
+                tasks = list(pd.read_parquet(root / "meta/tasks.parquet").index)
+            except Exception:
+                pass
+        if root.name.startswith("eval_"):
+            eval_attempts += len(set(proto.candidate_episodes(read_notes(d["repo"]))["episodes"]) - excl)
+            continue
+        src = omx_index.sources_path(root)
+        if src.exists():  # a training dataset built earlier: count its original recordings
+            for e in json.loads(src.read_text())["episodes"]:
+                if e["episode"] not in excl:
+                    origin.setdefault(e["source"], []).append(e["source_episode"])
+            continue
+        try:
+            total = json.loads((root / "meta/info.json").read_text()).get("total_episodes", 0)
+        except (OSError, ValueError):
+            total = 0
+        origin.setdefault(d["repo"], []).extend(i for i in range(total) if i not in excl)
+    policy = body.get("policy") if body.get("policy") in POLICIES else "act"
+    out = names.model_name(policy, int(body.get("steps") or 0), dt.datetime.now().strftime("%m%d"), origin, tasks,
+                           bool(body.get("augmentation")), int(body.get("batch_size") or 0) or None, eval_attempts)
+    out["exists"] = (CKPT_HOME / USER / out["name"]).exists()
+    return out
 
 
 def train_start(body: dict) -> dict:
@@ -345,7 +624,10 @@ def queue_action(path: str, body: dict) -> dict:
         items = q["items"]
         find = lambda: next((it for it in items if it["id"] == body.get("id")), None)  # noqa: E731
         if action == "add":
-            items.append(tq.new_item(make_job(body)))
+            job = make_job(body)
+            if job.get("name") and any(x["status"] in (tq.WAITING, tq.RUNNING) and x["job"].get("name") == job["name"] for x in items):
+                raise RuntimeError(f"계획에 같은 이름({job['name']})의 학습이 이미 있습니다. 이름을 바꿔 주세요.")
+            items.append(tq.new_item(job))
         elif action == "cancel":
             it = find()
             if not it or it["status"] != tq.WAITING:
@@ -355,7 +637,13 @@ def queue_action(path: str, body: dict) -> dict:
             it = find()
             if not it or it["status"] not in (tq.FAILED, tq.STOPPED, tq.CANCELLED):
                 raise RuntimeError("실패·중단·취소된 항목만 다시 넣을 수 있습니다.")
-            items.append(tq.new_item(it["job"]))
+            job = dict(it["job"])
+            if job.get("name") and (CKPT_HOME / USER / job["name"]).exists():  # a failed run may have left its folder
+                k = 2
+                while (CKPT_HOME / USER / f"{job['name']}-r{k}").exists():
+                    k += 1
+                job["name"] = f"{job['name']}-r{k}"
+            items.append(tq.new_item(job))
         elif action == "move":
             it = find()
             if not it or it["status"] != tq.WAITING:
@@ -388,11 +676,19 @@ def train_runs(refresh: bool) -> dict:
         index = json.loads((CKPT_HOME / "index.json").read_text())
     except (OSError, ValueError):
         index = {"runs": []}
+    aliases = names.load_aliases()
     for r in index.get("runs", []):
+        r["folder"] = r["id"].rsplit("/", 1)[-1]
+        r["display"] = names.display_name(r["id"], aliases)
         model = Path(r["model_path"])
         rdir = model.parent if model.name == "pretrained_model" else model
         r["own"] = rdir.exists() and rdir.owner() == USER
         r["intermediate"] = (rdir / "checkpoints").is_dir()
+        # intermediate saves that can be evaluated (the final one is the model itself)
+        r["checkpoints"] = sorted(
+            ({"step": int(d.name), "model_path": str(d / "pretrained_model")} for d in (rdir / "checkpoints").glob("[0-9]*")
+             if (d / "pretrained_model/model.safetensors").exists() and int(d.name) != r.get("steps")),
+            key=lambda c: c["step"]) if r["intermediate"] else []
     return index
 
 
@@ -441,6 +737,8 @@ def write_notes(repo_id: str, keywords: str, description: str) -> None:
     path = notes_path(repo_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"keywords": keywords, "description": description}, ensure_ascii=False, indent=2))
+    if CONTROL:
+        push_note_later(path)
 
 
 def dataset_detail(repo_id: str) -> dict:
@@ -543,6 +841,7 @@ class Job:
 
     def __init__(self) -> None:
         self.proc: subprocess.Popen | None = None
+        self.abort_lock = threading.Lock()
         self.kind = ""
         self.started = 0.0
         self.lines: collections.deque[str] = collections.deque(maxlen=400)
@@ -590,7 +889,7 @@ class Job:
         others = other_robot_processes()
         if others:
             raise RuntimeError(f"다른 사람이 로봇을 쓰고 있습니다: {', '.join(others)}")
-        for port in ((FOLLOWER, LEADER) if need_leader else (FOLLOWER,)):
+        for port in [p for _, p in FOLLOWERS] + ([p for _, p in LEADERS] if need_leader else []):
             if not Path(port).exists():
                 raise RuntimeError(f"{port} 가 없습니다. USB 연결을 확인하세요.")
         self._acquire_lock(kind)
@@ -606,7 +905,8 @@ class Job:
             cmd, cwd=LEROBOT_DIR, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True,
         )
-        threading.Thread(target=self._read_output, daemon=True).start()
+        self.reader = threading.Thread(target=self._read_output, daemon=True)
+        self.reader.start()
 
     def _read_output(self) -> None:
         proc = self.proc
@@ -638,6 +938,8 @@ class Job:
             self.log_file.close()
             self.log_file = None
         self._release_lock()
+        if self.kind == "eval" and self.info.get("protocol"):
+            fill_auto_later(self.info["repo_id"], delay=0)
         if self.kind == "eval" and self.info.get("repo_id"):
             # keep the control-rate summary with the eval record
             try:
@@ -650,9 +952,21 @@ class Job:
                 path.write_text(json.dumps(note, ensure_ascii=False, indent=2))
             except (OSError, ValueError):
                 pass
+        if self.kind == "eval" and self.info.get("repo_id") and proc.returncode != 0:
+            remove_unstarted_eval(self.info["repo_id"], self.lines)
         if self.kind in ("record", "eval") and self.info.get("repo_id"):
             # Also covers force-quit runs, where omx_record.py had no chance to do it itself
             share_with_team(DATA_HOME / self.info["repo_id"])
+            if CONTROL and (DATA_HOME / self.info["repo_id"]).exists():
+                # control PC: the recording / evaluation goes to the team's shared folder on the GPU laptop
+                root, note, lines = DATA_HOME / self.info["repo_id"], notes_path(self.info["repo_id"]), self.lines
+
+                def push():
+                    lines.append("[omx] sync: GPU 노트북 공유 폴더로 보내는 중...")
+                    remote.sync_dataset(root, lines)
+                    if note.exists():
+                        remote.sync_note(note)
+                remote.sync_later(push)
             if CFG.get("team_group"):
                 self.lines.append(f"[omx] dataset shared with group {CFG['team_group']} (read/write)")
         # Auto-upload only after a clean recording; a failed or force-quit run is left local
@@ -667,19 +981,51 @@ class Job:
             self.info["phase"] = "실행 중" if self.kind == "eval" else "녹화 중"
             self.info["episode"] = int(m.group(1))
             self.info["phase_started"] = time.time()
+            if self.kind == "eval" and self.info.get("protocol"):
+                protocol_attempt_start(self, int(m.group(1)))
         elif "Reset the environment" in line or "[omx] reset period" in line:
             self.info["phase"] = "원위치 시간"
+            self.info.pop("home_msg", None)
             self.info["phase_started"] = time.time()
+            if self.kind == "eval" and self.info.get("protocol"):
+                protocol_attempt_end(self)
+        elif m := re.search(r"\[omx\] loop: episode (\d+) median ([0-9.]+) p5 ([0-9.]+) min ([0-9.]+)", line):
+            if self.kind == "eval" and self.info.get("protocol"):
+                ep, med, p5, mn = int(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
+                update_note(self.info["repo_id"], lambda n: n.get("attempts", {}).get(str(ep), {}).update(
+                    loop={"median_hz": med, "p5_hz": p5, "min_hz": mn}))
         elif "Re-record episode" in line:
             self.info["phase"] = "다시 찍기"
         elif "Stop recording" in line:
             self.info["phase"] = "저장 중"
+        elif "[omx] safe reset:" in line:
+            self.info["home_msg"] = line.split("safe reset:", 1)[1].strip()
+        elif m := re.search(r"\[omx\] abort: saving the episode in progress as aborted: episode (\d+) at ([0-9.]+)s mode (\w+)", line):
+            self.info["aborting"] = True
+            if self.kind == "eval" and self.info.get("repo_id"):
+                ep, secs, mode = int(m.group(1)), float(m.group(2)), m.group(3)
+                update_note(self.info["repo_id"], lambda n: proto.mark_aborted(n, ep, mode, secs))
+        elif "[omx] abort:" in line:
+            self.info["aborting"] = True
+        elif "[omx] freeze:" in line:
+            self.info["freeze_ack"] = True
+            self.info["phase"] = "비상 정지 · 제자리에서 멈춤 (토크 유지)"
+        elif "[omx] safe freeze:" in line:
+            self.info["safe_start"] = line.split("safe freeze:", 1)[1].strip()
+            if "기다립니다" in line:
+                self.info["phase"] = "비상 정지 · 제자리에서 기다림 ([홈 위치로 이동])"
         elif "[omx] safe stop:" in line:
+            self.info["landing"] = True
             self.info["phase"] = "천천히 내려놓는 중"
             self.info["safe_start"] = line.split("safe stop:", 1)[1].strip()
         elif "[omx] safe start:" in line:
             msg = line.split("safe start:", 1)[1].strip()
             done = msg.startswith("완료") or msg.startswith("시간 초과")
+            if done and self.kind == "eval" and self.info.get("protocol") and self.info.get("episode") == 0 \
+                    and self.info.get("phase") == "실행 중":
+                # frame where the safe start ended inside the first attempt (it is recorded in the episode)
+                frame = int(round((time.time() - self.info.get("phase_started", time.time())) * 30))
+                update_note(self.info["repo_id"], lambda n: n.get("attempts", {}).get("0", {}).update(safe_start_end_frame=frame))
             self.info["safe_start"] = msg
             if self.kind == "teleop":
                 self.info["phase"] = "조작 중" if done else "안전 시작 중"
@@ -714,6 +1060,93 @@ class Job:
         self.info["stopping"] = True
         os.killpg(self.proc.pid, sig)
 
+    def abort(self) -> str:
+        """즉시 중단 (eval): stop the policy now and return the follower to the start pose.
+
+        SIGUSR1 makes omx_record.py leave the loop and land at once. If the safe stop has not
+        started within ABORT_WAIT_S (process stuck), or on a second press, the run is killed and
+        omx_return_home.py brings the arm back from the saved start pose instead.
+        """
+        if not self.running() or self.kind != "eval":
+            raise RuntimeError("실행 중인 평가가 없습니다.")
+        if self.info.get("frozen") and not self.info.get("released"):
+            # after 비상 정지 the run holds the arm and waits: 즉시 중단 now means "go back"
+            self.send("home")
+            self.info["phase"] = "홈 위치로 이동 중"
+            self.info["released"] = True
+            return "release"
+        if self.info.get("abort_sent"):
+            if self.info.get("landing"):
+                # already returning to the start pose and saving: killing now would cut the save
+                # (the joint data of the whole run would be lost) - the return finishes on its own
+                return "landing"
+            threading.Thread(target=self._kill_and_return, args=("두 번째 즉시 중단",), daemon=True).start()
+            return "kill"
+        self.info["abort_sent"] = time.time()
+        self.info["phase"] = "즉시 중단 · 처음 자세로 돌아가는 중"
+        os.kill(self.proc.pid, signal.SIGUSR1)
+        proc = self.proc
+
+        def watchdog() -> None:
+            end = time.time() + ABORT_WAIT_S
+            while time.time() < end and proc.poll() is None and not self.info.get("landing"):
+                time.sleep(0.2)
+            if self.proc is proc and not self.info.get("landing"):
+                self._kill_and_return("응답 없음" if proc.poll() is None else "복귀 없이 종료됨")
+
+        threading.Thread(target=watchdog, daemon=True).start()
+        return "abort"
+
+    def _kill_and_return(self, why: str) -> None:
+        with self.abort_lock:
+            if self.kind != "eval" or self.info.get("return_started"):
+                return
+            self.info["return_started"] = True
+            repo = self.info.get("repo_id", "")
+            gripper = self.info.get("open_gripper", True)
+            self.lines.append(f"[omx] abort: {why} -> 평가를 강제로 끝내고 복귀 프로그램으로 처음 자세로 돌아갑니다")
+            self.kill()
+            if getattr(self, "reader", None):
+                self.reader.join(timeout=10)  # let the killed run release the robot lock first
+            if not EVAL_HOME_FILE.exists():
+                self.lines.append("[omx] abort: 처음 자세 파일이 없어(팔로워가 아직 움직이기 전) 복귀하지 않습니다")
+                return
+            try:
+                self.start("home", [str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_return_home.py"),
+                                    str(EVAL_HOME_FILE), repo],
+                           {"phase": "즉시 중단 · 처음 자세로 돌아가는 중", "repo_id": repo},
+                           need_leader=False, env_extra={"OMX_HOME_GRIPPER": "open" if gripper else "keep"})
+            except Exception as exc:
+                self.lines.append(f"[omx] abort: 복귀 프로그램을 시작하지 못했습니다 ({exc})")
+
+    def freeze(self) -> str:
+        """비상 정지: an eval holds the arm where it is (torque on), keeps its records and waits for
+        [홈 위치로 이동]. Anything else, or an eval that does not answer within FREEZE_WAIT_S, is
+        force-quit as before (the follower also stays where it is with the torque on)."""
+        if not self.running():
+            return "none"
+        if self.kind != "eval":
+            self.kill()
+            return "kill"
+        if self.info.get("frozen"):
+            return "frozen"
+        self.info["frozen"] = time.time()
+        self.info["phase"] = "비상 정지 · 멈추는 중"
+        os.kill(self.proc.pid, signal.SIGUSR2)
+        proc = self.proc
+
+        def watchdog() -> None:
+            end = time.time() + FREEZE_WAIT_S
+            while time.time() < end and proc.poll() is None and not self.info.get("freeze_ack"):
+                time.sleep(0.1)
+            if self.proc is proc and proc.poll() is None and not self.info.get("freeze_ack"):
+                self.lines.append("[omx] freeze: 응답이 없어 강제로 끝냅니다 (팔로워는 토크를 켠 채 제자리)")
+                self.kill()
+                self.info["frozen"] = time.time()  # [홈 위치로 이동] then runs omx_return_home.py
+
+        threading.Thread(target=watchdog, daemon=True).start()
+        return "freeze"
+
     def kill(self) -> list[str]:
         """Force-quit: SIGKILL the job's whole process group plus any leftover robot processes."""
         killed = []
@@ -745,6 +1178,28 @@ class Job:
             "elapsed": round(time.time() - self.started),
             "info": info,
         }
+
+
+_DISPLAY: dict = {}  # camera -> (frame key, small jpeg), shared by all viewers
+_DISPLAY_LOCK = threading.Lock()
+
+
+def display_jpeg(name: str, key, frame: bytes) -> bytes:
+    """The picture for the browser: 480x360, quality 60 (~4x smaller). Detection uses the full frame."""
+    with _DISPLAY_LOCK:
+        hit = _DISPLAY.get(name)
+        if hit and hit[0] == key:
+            return hit[1]
+    try:
+        img = cv2.imdecode(np.frombuffer(frame, np.uint8), cv2.IMREAD_COLOR)
+        img = cv2.resize(img, (480, 360), interpolation=cv2.INTER_AREA)
+        ok, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 60])
+        small = jpg.tobytes() if ok else frame
+    except Exception:
+        small = frame
+    with _DISPLAY_LOCK:
+        _DISPLAY[name] = (key, small)
+    return small
 
 
 class Uploader:
@@ -840,7 +1295,11 @@ def start_teleop(body: dict) -> dict:
         fix_wrist_fps()
         cmd.insert(5, f"--robot.cameras={CAMS_ARG}")
         cmd += display_args(viewer_ip)
-    JOB.start("teleop", cmd, {"phase": "연결 중", "with_cameras": bool(viewer_ip)})
+    info = {"phase": "연결 중", "with_cameras": bool(viewer_ip)}
+    env = task_home_env(None, info)
+    if env:  # the kill-and-return path also needs the home file
+        env |= {"OMX_HOME_FILE": str(EVAL_HOME_FILE), "OMX_REPO_ID": ""}
+    JOB.start("teleop", cmd, info, env_extra=env)
     return {"ok": True}
 
 
@@ -877,21 +1336,92 @@ def start_record(body: dict) -> dict:
     ]
     if resume:
         cmd.append("--resume=true")
-    JOB.start("record", cmd, {
-        "phase": "연결 중", "repo_id": repo_id, "target": episodes, "resume": resume,
-        "episode_s": episode_s, "reset_s": reset_s, "upload": bool(body.get("upload")),
-    })
+    info = {"phase": "연결 중", "repo_id": repo_id, "target": episodes, "resume": resume,
+            "episode_s": episode_s, "reset_s": reset_s, "upload": bool(body.get("upload"))}
+    env = task_home_env(task, info)
+    if env:
+        env |= {"OMX_HOME_FILE": str(EVAL_HOME_FILE), "OMX_REPO_ID": repo_id}
+    JOB.start("record", cmd, info, env_extra=env)
     return {"ok": True, "repo_id": repo_id, "resume": resume}
+
+
+def find_model_remote(model_path: str) -> dict:
+    """Control PC: a policy of the GPU laptop's training index (final model or an intermediate save)."""
+    for r in remote.gpu_json("/api/train/runs").get("runs", []):
+        if r["model_path"] == model_path:
+            return r
+        for c in r.get("checkpoints") or []:
+            if c["model_path"] == model_path:
+                return dict(r, model_path=model_path, step=c["step"])
+    raise RuntimeError("GPU 노트북의 학습 기록에 있는 모델을 고르세요.")
+
+
+def remote_preset(pid: str) -> dict:
+    for p in remote.gpu_json("/api/presets").get("presets", []):
+        if p.get("id") == pid:
+            return p
+    raise RuntimeError(f"평가 방식 {pid}을 GPU 노트북에서 찾지 못했습니다.")
+
+
+def remote_eval_settings(local_model: Path, gpu_model: str, extra_args: list, async_env: dict, opts: dict, body: dict) -> dict:
+    """Control PC: the inference settings for the GPU laptop's server, and the async engine (always on:
+    "sync" = take the next chunk only when the last one is used up)."""
+    if opts.get("smooth"):
+        raise RuntimeError("원격 추론에서는 ACT '부드럽게 실행'(매 스텝 추론)을 쓸 수 없습니다. 출력 필터를 쓰세요.")
+    overrides: dict = {}
+    for a in extra_args:
+        if a.startswith("--dataset.rename_map="):
+            overrides["rename_map"] = json.loads(a.split("=", 1)[1])
+        elif a.startswith("--policy.n_action_steps="):
+            overrides["n_action_steps"] = int(a.split("=", 1)[1])
+    if opts.get("diffusion_steps"):
+        overrides["diffusion_steps"] = int(opts["diffusion_steps"])
+    if opts.get("rtc"):
+        overrides["rtc"] = {"horizon": int(body.get("rtc_horizon") or 10), "weight": float(body.get("rtc_weight") or 10.0)}
+    env = dict(async_env)
+    if not env:  # synchronous: the whole chunk, then the next one
+        cfg = model_config(str(local_model))
+        chunk = int(cfg.get("n_action_steps") or cfg.get("chunk_size") or 50)
+        env = {"OMX_ASYNC": "1", "OMX_ASYNC_CHUNK": str(chunk), "OMX_ASYNC_THRESHOLD": "0", "OMX_ASYNC_AGG": "latest_only",
+               "OMX_FPS": "30", "OMX_RTC": "0"}
+    env.update(OMX_REMOTE_URL=remote.infer_url(), OMX_REMOTE_MODEL=gpu_model, OMX_REMOTE_OVERRIDES=json.dumps(overrides))
+    return env
+
+
+def check_model_fits(cfg: dict) -> None:
+    """A model drives the robot it was trained on: 6 joints = one arm, 12 = a cooperative pair; and the same
+    cameras by name."""
+    shape = ((cfg.get("output_features") or {}).get("action") or {}).get("shape") or [None]
+    want = 12 if ROBOT_MODE == "bimanual" else 6
+    if shape[0] and shape[0] != want:
+        kind = {6: "단일 로봇(팔 1개)", 12: "협동 로봇(팔 2개)"}
+        raise RuntimeError(f"이 모델은 {kind.get(shape[0], f'관절 {shape[0]}개')}용입니다. 지금 구성은 "
+                           f"{kind[want]}입니다. ① 탭 '로봇 구성'을 맞추거나 다른 모델을 고르세요.")
+    cams = {k.split(".")[-1] for k in (cfg.get("input_features") or {}) if k.startswith("observation.images.")}
+    if cams and not any(c.startswith("camera") for c in cams) and not cams <= set(CAMERAS):
+        raise RuntimeError(f"이 모델은 카메라 {', '.join(sorted(cams))}로 학습했습니다. 지금 구성의 카메라: "
+                           f"{', '.join(CAMERAS)}. ① 탭 '로봇 구성'에서 같은 이름으로 지정하세요.")
 
 
 def find_model(model_path: str) -> dict:
     """A trained policy from the team index (or any policy folder under CKPT_HOME)."""
+    if CONTROL:
+        return find_model_remote(model_path)
     path = Path(model_path).resolve()
     if CKPT_HOME.resolve() not in path.parents or not (path / "model.safetensors").exists() or not (path / "config.json").exists():
         raise RuntimeError("학습 기록에 있는 모델을 고르세요.")
-    for r in train_runs(False).get("runs", []):
+    runs = train_runs(False).get("runs", [])
+    for r in runs:
         if Path(r["model_path"]).resolve() == path:
             return r
+    # an intermediate save: <run>/checkpoints/012500/pretrained_model -> that run, at that step
+    step = names.checkpoint_step(str(path))
+    if step is not None:
+        rdir = path.parent.parent.parent
+        for r in runs:
+            m = Path(r["model_path"]).resolve()
+            if (m.parent if m.name == "pretrained_model" else m) == rdir:
+                return dict(r, model_path=str(path), step=step)
     return {"id": path.name, "model_path": str(path), "tasks": []}
 
 
@@ -906,51 +1436,401 @@ def thread_env(threads: int) -> dict:
     return {"OMP_NUM_THREADS": n, "MKL_NUM_THREADS": n, "OPENBLAS_NUM_THREADS": n, "OMX_TORCH_THREADS": n}
 
 
+EVAL_HOME_FILE = LOG_DIR / "eval_home_pose.json"  # start pose of the running eval (for omx_return_home.py)
+FREEZE_WAIT_S = 3.0  # 비상 정지: force-quit when the eval does not confirm the stop by then
+ABORT_WAIT_S = 5.0  # 즉시 중단: kill and use omx_return_home.py if the safe stop has not started by then
+
+
+RUN_HOME_FILE = LOG_DIR / "run_home_pose.json"  # the standard home pose of the run starting now (omx_safe_start)
+
+
+def task_home_env(task: str | None, info: dict) -> dict:
+    """Teleop / recording with the standard home pose on (config "home_pose"): start at the task's home
+    pose and end there (safe stop: home, gripper, fade out, torque off)."""
+    if not omx_home.enabled():
+        return {}
+    code = names.task_code([task], names.load_codes()) if task else None
+    home = omx_home.task_home(code) or omx_home.task_home()
+    if not home:
+        info["home_note"] = "작업 홈 자세가 없어 지금 자세에서 시작합니다 (① 탭에서 [다시 계산])"
+        return {}
+    info["home_pose"] = home
+    omx_home.write_run_file(home, RUN_HOME_FILE)
+    return {"OMX_HOME_POSE": str(RUN_HOME_FILE), "OMX_STOP_POSE": "home", "OMX_HOME_GRIPPER": "open"}
+
+
+def home_status(model_path: str = "") -> dict:
+    """Panel: the standard home pose (of a model, else the task default) and the setting."""
+    out = {"enabled": omx_home.enabled(), "freeze_return_after_s": float(omx_config.CFG.get("freeze_return_after_s") or 0),
+           "tasks": omx_home.load_tasks()}
+    if model_path:
+        try:
+            path = Path(model_path).resolve()
+            if CKPT_HOME.resolve() not in path.parents:
+                raise RuntimeError("학습 기록에 있는 모델이 아닙니다.")
+            out["home"] = omx_home.model_home(path)
+        except Exception as exc:
+            out["error"] = f"홈 자세를 계산하지 못했습니다: {exc}"
+    return out
+
+
+def home_current() -> dict:
+    """Read the follower's position now (bus only, no torque change) to compare with the home pose."""
+    if JOB.running() or other_robot_processes():
+        raise RuntimeError("로봇 프로그램이 실행 중이라 팔 위치를 따로 읽지 않습니다.")
+    current = {}
+    sides = ["left", "right"] if ROBOT_MODE == "bimanual" else [None]
+    for side, (_, port) in zip(sides, FOLLOWERS):
+        r = subprocess.run([str(VENV_BIN / "python"), "-c",
+                            "import json,sys; sys.path.insert(0, sys.argv[1]); import omx_home; print(json.dumps(omx_home.read_follower(sys.argv[2])))",
+                            str(TOOLS_DIR), port], capture_output=True, text=True, timeout=30, cwd=HOME)
+        if r.returncode != 0:
+            raise RuntimeError(f"팔로워({port}) 위치를 읽지 못했습니다. USB 연결을 확인하세요.")
+        pos = json.loads(r.stdout.strip().splitlines()[-1])
+        current.update({f"{side}_{k}": v for k, v in pos.items()} if side else pos)
+    return {"current": current}
+
+
+def home_return() -> dict:
+    """After 비상 정지 (arm frozen in place): the user's [홈 위치로 이동] - back to the run's start pose
+    (the standard home pose when "home_pose" is on), gripper, then the safe stop."""
+    if JOB.running() and JOB.kind == "eval" and JOB.info.get("frozen") and not JOB.info.get("released"):
+        JOB.send("home")  # the run is holding the arm and waiting for this
+        JOB.info["phase"] = "홈 위치로 이동 중"
+        JOB.info["released"] = True
+        return {"ok": True, "mode": "release"}
+    if JOB.running() or other_robot_processes():
+        raise RuntimeError("로봇 프로그램이 아직 실행 중입니다.")
+    if not EVAL_HOME_FILE.exists():
+        raise RuntimeError("돌아갈 홈 자세 기록이 없습니다.")
+    data = json.loads(EVAL_HOME_FILE.read_text())
+    JOB.start("home", [str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_return_home.py"), str(EVAL_HOME_FILE),
+                       data.get("repo_id", "")],
+              {"phase": "홈 위치로 이동 중", "repo_id": data.get("repo_id", "")},
+              need_leader=False, env_extra={"OMX_HOME_GRIPPER": "open"})
+    return {"ok": True, "mode": "return_home"}
+
+
+def home_env(reset_home: bool, open_gripper: bool, repo_id: str) -> dict:
+    """Eval only: on stop (and optionally in every reset period) go back to the pose the run started in."""
+    return {"OMX_STOP_POSE": "home", "OMX_RESET_HOME": "1" if reset_home else "0",
+            "OMX_HOME_GRIPPER": "open" if open_gripper else "keep",
+            "OMX_HOME_FILE": str(EVAL_HOME_FILE), "OMX_REPO_ID": repo_id}
+
+
+def model_config(model_path: str) -> dict:
+    try:
+        return json.loads((Path(model_path) / "config.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def policy_eval_options(model_path: str, body: dict) -> tuple[list[str], dict, dict]:
+    """Policy-specific lerobot-record arguments, the async/RTC environment, and what was used.
+
+    - ACT: smooth = temporal ensembling (every step), only without async execution.
+    - Diffusion: inference steps (DDIM with fewer denoising steps, no retraining).
+    - SmolVLA: our camera names -> the model's camera1..3 (as in training), RTC with async.
+    - async (any policy): omx_async.py keeps executing queued actions while the next chunk is inferred.
+    """
+    cfg = model_config(model_path)
+    ptype = cfg.get("type", "")
+    args, env = [], {}
+    use_async = bool(body.get("async_mode"))
+    smooth = bool(body.get("smooth")) and ptype == "act" and not use_async
+    opts = {"policy_type": ptype, "smooth": smooth, "async_mode": use_async}
+    if smooth:
+        # ACT temporal ensembling: predict every step and average overlapping chunks (no jumps every 100 steps)
+        args += ["--policy.n_action_steps=1", "--policy.temporal_ensemble_coeff=0.01"]
+    if ptype == "diffusion" and body.get("diffusion_steps"):
+        steps = int(body["diffusion_steps"])
+        if not 1 <= steps <= int(cfg.get("num_train_timesteps") or 100):
+            raise RuntimeError("추론 단계 수는 1~100 사이로 정하세요.")
+        args += ["--policy.noise_scheduler_type=DDIM", f"--policy.num_inference_steps={steps}"]
+        opts["diffusion_steps"] = steps
+    feats = cfg.get("input_features") or {}
+    cams = [k for k in feats if k.startswith("observation.images.camera")]
+    if cams and not any(k.endswith((".front", ".wrist")) for k in feats):
+        # fine-tuned SmolVLA keeps the pretrained input names: feed our cameras the same way as in training
+        order = sorted(CAMERAS, key=lambda n: ({"front": 0, "wrist": 1, "wrist_left": 1, "wrist_right": 2}.get(n, 9), n))
+        rename = {f"observation.images.{n}": f"observation.images.camera{i + 1}" for i, n in enumerate(order[:3])}
+        args.append("--dataset.rename_map=" + json.dumps(rename))
+    if use_async:
+        chunk = int(body.get("actions_per_chunk") or 0)
+        limit = int(cfg.get("chunk_size") or cfg.get("horizon") or 100)
+        if ptype == "diffusion":
+            # Diffusion returns n_action_steps actions per inference; allow up to what its horizon covers
+            limit = int(cfg.get("horizon", 16)) - int(cfg.get("n_obs_steps", 2)) + 1
+            chunk = min(chunk or limit, limit)
+            args.append(f"--policy.n_action_steps={chunk}")
+        chunk = min(chunk or limit, limit)
+        threshold = float(body.get("chunk_size_threshold", 0.5))
+        agg = body.get("aggregate_fn") or "weighted_average"
+        if not 0 <= threshold <= 1 or agg not in ("weighted_average", "average", "latest_only"):
+            raise RuntimeError("chunk_size_threshold는 0~1, 합치는 방법은 weighted_average·average·latest_only 중 하나입니다.")
+        rtc = bool(body.get("rtc")) and ptype in ("smolvla", "pi0", "pi05")
+        env = {"OMX_ASYNC": "1", "OMX_ASYNC_CHUNK": str(chunk), "OMX_ASYNC_THRESHOLD": str(threshold),
+               "OMX_ASYNC_AGG": agg, "OMX_FPS": "30", "OMX_RTC": "1" if rtc else "0",
+               "OMX_RTC_HORIZON": str(int(body.get("rtc_horizon") or 10)),
+               "OMX_RTC_WEIGHT": str(float(body.get("rtc_weight") or 10.0))}
+        opts.update(actions_per_chunk=chunk, chunk_size_threshold=threshold, aggregate_fn=agg, rtc=rtc)
+    # output filter (any policy): low-pass on the joint targets before they are sent and recorded
+    level = body.get("output_filter") or ""
+    if level:
+        if level not in FILTER_ALPHA:
+            raise RuntimeError("출력 부드럽게 세기는 약·중·강 중 하나입니다.")
+        env.update(OMX_FILTER_ALPHA=str(FILTER_ALPHA[level]), OMX_FILTER_GRIPPER="light" if body.get("filter_gripper") else "off")
+        opts.update(output_filter=level, filter_alpha=FILTER_ALPHA[level], filter_gripper=bool(body.get("filter_gripper")))
+    return args, env, opts
+
+
+# output filter strength -> moving-average weight of the new target (lag about 0.05 / 0.1 / 0.2 s at 30 Hz)
+FILTER_ALPHA = {"약": 0.4, "중": 0.25, "강": 0.14}
+
+
+# ---- Evaluation protocol v2 (position presets, per-attempt records); see omx_protocol.py ----
+def update_note(repo_id: str, fn) -> dict:
+    """Read-modify-write the eval notes under the protocol lock (the reader thread and API share it)."""
+    with proto.LOCK:
+        path = notes_path(repo_id)
+        try:
+            note = json.loads(path.read_text())
+        except (OSError, ValueError):
+            note = {}
+        fn(note)
+        path.write_text(json.dumps(note, ensure_ascii=False, indent=2))
+    if CONTROL:
+        push_note_later(path)
+    return note
+
+
+_PUSH: dict = {}
+
+
+def push_note_later(path: Path) -> None:
+    """Control PC: copy an edited note to the GPU laptop a moment later (several marks in a row: one copy)."""
+    _PUSH[str(path)] = time.time()
+
+    def run(key=str(path)):
+        time.sleep(2)
+        if time.time() - _PUSH.get(key, 0) >= 1.9:
+            remote.sync_note(Path(key))
+    threading.Thread(target=run, daemon=True).start()
+
+
+def protocol_target(job) -> None:
+    """What the panel draws: the current attempt's target while running, otherwise the next free one."""
+    note = read_notes(job.info["repo_id"])
+    if job.info.get("phase") == "실행 중":
+        a = note.get("attempts", {}).get(str(job.info.get("episode")))
+        if a:
+            job.info["proto_target"] = {"id": a["position_id"], "x": a["target_px"][0], "y": a["target_px"][1], "now": True}
+            return
+    free = proto.free_positions(note)
+    # not "target": that key is the number of attempts the panel shows ("시도 3 / 10")
+    job.info["proto_target"] = {"id": free[0]["id"], "x": free[0]["x"], "y": free[0]["y"], "now": False} if free else None
+    job.info["proto_left"] = len(free)
+
+
+def protocol_attempt_start(job, episode: int) -> None:
+    started = time.time()
+    note = update_note(job.info["repo_id"], lambda n: proto.begin_attempt(n, episode, None))
+    a = note.get("attempts", {}).get(str(episode))
+    if a:
+        job.info.setdefault("attempt_map", {})[str(episode)] = a["position_id"]
+
+    def capture():
+        # the start position from a picture taken after this attempt began (not a frame left over
+        # from before); replaced later by the saved episode's first frame (omx_protocol.fill_auto)
+        for _ in range(30):
+            d = job.info.get("detect") or {}
+            if d.get("t", 0) > started + 0.3:
+                px = d.get("px")
+                update_note(job.info["repo_id"], lambda n: proto.set_start(n, episode, px, "live"))
+                return
+            time.sleep(0.1)
+    if job.info.get("protocol", {}).get("detector", "none") != "none":
+        threading.Thread(target=capture, daemon=True).start()
+    if str(episode) not in note.get("attempts", {}):
+        job.lines.append("[omx] protocol: 남은 위치가 없어 평가를 끝냅니다")
+        threading.Thread(target=lambda: job.send("stop"), daemon=True).start()
+    protocol_target(job)
+    fill_auto_later(job.info["repo_id"])  # the previous episode is saved by now
+
+
+def protocol_attempt_end(job) -> None:
+    protocol_target(job)
+    if job.info.get("proto_left") == 0 and not job.info.get("protocol_done"):
+        # every position has an attempt (void ones were given back): end after this one is saved
+        job.info["protocol_done"] = True
+        job.lines.append("[omx] protocol: 모든 위치를 시도했습니다. 저장하고 끝냅니다 (무효로 표시하면 그 위치를 다시 할 수 있게 다음 평가에서 남음)")
+        threading.Thread(target=lambda: job.send("stop"), daemon=True).start()
+
+
+def fill_auto_later(repo_id: str, delay: float = 2.0) -> None:
+    """Estimate failure stages for attempts whose episode is saved (in the background)."""
+    def run():
+        time.sleep(delay)
+        try:
+            note = read_notes(repo_id)
+            if proto.fill_auto(note, DATA_HOME, repo_id):
+                def merge(n):
+                    for ep, a in note.get("attempts", {}).items():
+                        cur = n.setdefault("attempts", {}).setdefault(ep, {})
+                        for k in ("grasp", "fail_stage_auto", "train_rec", "train_rec_priority", "train_rec_reason",
+                                  "train_rec_thresholds", "start_px", "start_offset_px", "start_px_source"):
+                            if k in a:
+                                cur[k] = a.get(k)
+                        cur.setdefault("train_candidate", False)
+                        if cur.get("result") == "fail" and cur.get("fail_stage_source") != "user":
+                            cur["fail_stage"], cur["fail_stage_source"] = a.get("fail_stage_auto"), "auto"
+                update_note(repo_id, merge)
+        except Exception as exc:  # estimates are optional
+            print(f"[omx] protocol: 실패 단계 추정 건너뜀 ({exc})", flush=True)
+    threading.Thread(target=run, daemon=True).start()
+
+
+def detect_loop(job, proc, detector: str, camera: str, roi: list | None = None) -> None:
+    """Where the object is in the live view (0.5 s), for the target overlay and the attempt start."""
+    import omx_vision
+
+    live = Path(f"/dev/shm/omx_live_{os.getuid()}_{camera}.jpg")
+    recent: collections.deque = collections.deque(maxlen=3)  # median of the last 3 readings: steady display
+    while job.proc is proc and proc.poll() is None:
+        try:
+            if live.exists() and time.time() - live.stat().st_mtime < 2:
+                px = omx_vision.detect_jpeg(detector, live.read_bytes(), roi)
+                recent.append(px)
+                found = [p for p in recent if p]
+                med = [int(statistics.median(p[0] for p in found)), int(statistics.median(p[1] for p in found))] \
+                    if len(found) * 2 > len(recent) else None
+                job.info["detect"] = {"px": med, "t": time.time()}
+        except Exception:
+            pass
+        time.sleep(0.25)
+
+
+def remove_unstarted_eval(repo_id: str, lines: list | None = None) -> bool:
+    """A run that failed before its first episode (model loading, cameras) leaves an eval folder with no
+    data in it: move that folder to ~/il_ws/omx_trash/<date>/, keep the note marked start_failed."""
+    root = DATA_HOME / repo_id
+    if root.is_symlink() or not root.is_dir() or not root.name.startswith("eval_") or DATA_HOME.resolve() not in root.resolve().parents:
+        return False
+    if any(p.is_file() for sub in ("data", "videos", "images") for p in (root / sub).rglob("*")):
+        return False  # something was recorded: keep it
+    # team rule: nothing under the data folders is deleted by the panel; it goes to the trash, where a
+    # person deletes it after checking
+    trash = HOME / "il_ws" / "omx_trash" / dt.datetime.now().strftime("%Y%m%d") / repo_id
+    trash.parent.mkdir(parents=True, exist_ok=True)
+    if trash.exists():
+        trash = trash.with_name(f"{trash.name}_{dt.datetime.now():%H%M%S}")
+    shutil.move(str(root), str(trash))
+    try:
+        update_note(repo_id, lambda n: n.update(start_failed=True))
+    except Exception:
+        pass
+    if lines is not None:
+        lines.append(f"[omx] 첫 시도 전에 끝나 빈 평가 폴더를 휴지통으로 옮겼습니다: {trash}")
+    return True
+
+
 def start_eval(body: dict) -> dict:
     run = find_model(body.get("model_path", ""))
     task = str(body.get("task") or (run.get("tasks") or [""])[0]).strip()
     if not task:
         raise RuntimeError("작업 문장을 입력하세요. 학습 데이터와 같은 문장을 씁니다.")
-    episodes = int(body.get("episodes", 5))
+    if CONTROL:
+        preset = remote_preset(body["preset_id"]) if body.get("preset_id") else None
+    else:
+        preset = proto.load_preset(body["preset_id"]) if body.get("preset_id") else None
+    episodes = int(body.get("episodes") or (len(proto.eval_positions(preset)) if preset else 10))
     episode_s = float(body.get("episode_s", 30))
     reset_s = float(body.get("reset_s", 15))
     if not 1 <= episodes <= 100 or not 3 <= episode_s <= 600 or not 0 <= reset_s <= 300:
         raise RuntimeError("에피소드 1~100개, 시도 3~600초, 원위치 0~300초 사이로 정하세요.")
     threads = int(body.get("threads") or EVAL_THREADS)
+    reset_home, open_gripper = bool(body.get("reset_home", True)), bool(body.get("open_gripper", True))
     if not 1 <= threads <= (os.cpu_count() or 24):
         raise RuntimeError(f"CPU 스레드 수는 1~{os.cpu_count() or 24} 사이로 정하세요.")
-    slug = re.sub(r"[^a-z0-9_]+", "_", run["id"].replace("/", "_").lower()).strip("_")[:60]
-    repo_id = f"{USER}/eval_{slug}_{dt.datetime.now():%m%d_%H%M}"
+    local_model = remote.fetch_model(run["model_path"]) if CONTROL else Path(run["model_path"])
+    check_model_fits(model_config(str(local_model)))
+    extra_args, async_env, opts = policy_eval_options(str(local_model), body)
+    if CONTROL:
+        async_env = remote_eval_settings(local_model, run["model_path"], extra_args, async_env, opts, body)
+        extra_args = [a for a in extra_args if a.startswith("--dataset.")] + ["--policy.device=cpu"]
+        opts["remote_inference"] = remote.HOST
+    home = None
+    if omx_home.enabled():  # first move to the model's home pose (median of its training data's first frames)
+        try:
+            if CONTROL:
+                home = remote.gpu_json("/api/home?model=" + urllib.parse.quote(run["model_path"])).get("home")
+                if not home:
+                    raise RuntimeError("GPU 노트북이 홈 자세를 보내지 않았습니다")
+            else:
+                home = omx_home.model_home(run["model_path"])
+        except Exception as exc:
+            raise RuntimeError(f"모델의 홈 자세를 계산하지 못했습니다({exc}). 설정 home_pose를 끄면 지금처럼 시작합니다.")
+    # eval_{model display name}__{p10 | free}_{run settings}_{MMDD_HHMM}; _2, _3 ... when the name is taken
+    # (a second start in the same minute, or a folder left by a run that failed to start)
+    step = run.get("step")  # set when an intermediate save was chosen
+    base = names.eval_name(run.get("display") or names.display_name(run["id"]), preset, opts,
+                           f"{dt.datetime.now():%m%d_%H%M}", step)
+    repo_id, k = f"{USER}/{base}", 2
+    while (DATA_HOME / repo_id).exists() or notes_path(repo_id).exists():
+        repo_id, k = f"{USER}/{base}_{k}", k + 1
     path = notes_path(repo_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"kind": "eval", "model": run["model_path"], "run_id": run["id"],
+                                "model_display": names.model_label(run.get("display") or names.display_name(run["id"]), step, run.get("steps")),
                                 "run_number": run.get("number"), "task": task, "results": {},
+                                "train_step": step or run.get("steps"), "final_steps": run.get("steps"),
                                 "smooth": bool(body.get("smooth")), "threads": threads,
+                                "reset_home": reset_home, "open_gripper": open_gripper,
                                 "started": dt.datetime.now().strftime("%Y-%m-%d %H:%M")}, ensure_ascii=False, indent=2))
     PREVIEW.stop()  # the policy run needs the cameras itself
     fix_wrist_fps()
+    EVAL_HOME_FILE.unlink(missing_ok=True)  # written again by this run before its first move
     cmd = [
         str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_record.py"),
         *ROBOT_ARGS, f"--robot.cameras={CAMS_ARG}",
-        f"--policy.path={run['model_path']}",
+        f"--policy.path={local_model}",
         f"--dataset.repo_id={repo_id}", f"--dataset.single_task={task}",
         f"--dataset.num_episodes={episodes}", f"--dataset.episode_time_s={episode_s}",
         f"--dataset.reset_time_s={reset_s}", "--dataset.push_to_hub=false",
         *display_args(body.get("viewer_ip", "").strip()),
     ]
-    if body.get("smooth"):
-        # ACT temporal ensembling: predict every step and average overlapping chunks (no jumps every 100 steps)
-        cmd += ["--policy.n_action_steps=1", "--policy.temporal_ensemble_coeff=0.01"]
+    cmd += extra_args
+    note = json.loads(path.read_text())
+    note.update(opts)
+    if home:
+        note["home_pose"] = home
+    if preset:
+        note["protocol"] = proto.protocol_snapshot(preset)
+        note["attempts"] = {}
+        # a few spare episodes so void attempts can be retried; the run stops once every position is done
+        spare = min(max(int(body.get("spare", 3)), 0), 10)
+        cmd = [a if not a.startswith("--dataset.num_episodes=") else f"--dataset.num_episodes={episodes + spare}" for a in cmd]
+    path.write_text(json.dumps(note, ensure_ascii=False, indent=2))
     JOB.start("eval", cmd, {"phase": "모델 불러오는 중", "repo_id": repo_id, "target": episodes,
                             "episode_s": episode_s, "reset_s": reset_s, "model": run["id"],
-                            "smooth": bool(body.get("smooth")), "threads": threads}, need_leader=False,
-              env_extra=thread_env(threads))
+                            "smooth": opts["smooth"], "threads": threads, "reset_home": reset_home,
+                            "open_gripper": open_gripper, **opts,
+                            "protocol": note.get("protocol")},
+              need_leader=False, env_extra=thread_env(threads) | home_env(reset_home, open_gripper, repo_id) | async_env
+              | ({"OMX_HOME_POSE": str(omx_home.write_run_file(home, RUN_HOME_FILE))} if home else {}))
+    if preset:
+        protocol_target(JOB)
+        if preset["detector"] != "none":
+            threading.Thread(target=detect_loop, args=(JOB, JOB.proc, preset["detector"], preset.get("camera", "front"),
+                                                       preset.get("detect_roi")), daemon=True).start()
     return {"ok": True, "repo_id": repo_id}
 
 
 def eval_list() -> list[dict]:
     """Policy runs (eval_ datasets) of every account, newest first, with marked results."""
     items = []
+    aliases = names.load_aliases()
+    steps = names.run_steps()
     for note in DATA_HOME.glob("*/.omx_notes/eval_*.json"):
         try:
             n = json.loads(note.read_text())
@@ -961,7 +1841,18 @@ def eval_list() -> list[dict]:
         total = json.loads(info.read_text()).get("total_episodes", 0) if info.exists() else 0
         res = n.get("results", {})
         items.append({"repo_id": repo, "model": n.get("model"), "run_id": n.get("run_id"), "run_number": n.get("run_number"),
+                      "model_display": names.model_label(names.display_name(n.get("run_id"), aliases), names.train_amount(n, steps),
+                                                         n.get("final_steps") or steps.get(n.get("run_id"))) if n.get("run_id") else "",
+                      "start_failed": bool(n.get("start_failed")),
+                      "train_step": names.train_amount(n, steps), "final_steps": n.get("final_steps") or steps.get(n.get("run_id")),
                       "threads": n.get("threads"), "smooth": n.get("smooth"), "loop": n.get("loop"),
+                      "policy_type": n.get("policy_type"), "async_mode": n.get("async_mode"), "rtc": n.get("rtc"),
+                      "diffusion_steps": n.get("diffusion_steps"),
+                      "protocol": n.get("protocol"), "attempts": n.get("attempts"),
+                      "voids": sum(1 for a in (n.get("attempts") or {}).values() if a.get("result") == "void"),
+                      "aborted": sum(1 for v in res.values() if v == "aborted"),
+                      "aborted_info": n.get("aborted") or {}, "output_filter": n.get("output_filter"),
+                      "chunk_size_threshold": n.get("chunk_size_threshold"),
                       "task": n.get("task"), "started": n.get("started"), "episodes": total, "results": res,
                       "success": sum(1 for v in res.values() if v == "success"),
                       "marked": sum(1 for v in res.values() if v in ("success", "fail"))})
@@ -970,20 +1861,21 @@ def eval_list() -> list[dict]:
 
 def eval_mark(body: dict) -> None:
     repo = body.get("repo_id", "")
-    path = notes_path(repo)
-    if not path.exists():
+    if not notes_path(repo).exists():
         raise RuntimeError("평가 기록을 찾을 수 없습니다.")
-    n = json.loads(path.read_text())
-    ep, result = str(int(body.get("episode"))), body.get("result")
-    if result in ("success", "fail"):
-        n.setdefault("results", {})[ep] = result
-    else:
-        n.setdefault("results", {}).pop(ep, None)
-    path.write_text(json.dumps(n, ensure_ascii=False, indent=2))
-    # refresh the team table in the background so the "평가" column follows the marks
-    subprocess.Popen([str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_index.py")], cwd=HOME,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
-                     env=dict(os.environ, HF_LEROBOT_HOME=str(DATA_HOME)))
+    kwargs = {k: body[k] for k in ("result", "fail_stage", "train_candidate") if k in body}
+    if "note" in body:
+        kwargs["text"] = body["note"]
+    note = update_note(repo, lambda n: proto.mark(n, int(body.get("episode")), **kwargs))
+    if JOB.running() and JOB.kind == "eval" and JOB.info.get("repo_id") == repo and note.get("protocol"):
+        protocol_target(JOB)  # a void attempt gives its position back
+    if "result" in body:
+        # refresh the team table in the background so the "평가" column follows the marks
+        subprocess.Popen([str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_index.py")], cwd=HOME,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+                         env=dict(os.environ, HF_LEROBOT_HOME=str(DATA_HOME)))
+        if body.get("result") == "fail":
+            fill_auto_later(repo, delay=0)
 
 
 REPORTS: dict = {}  # repo -> Popen of omx_eval_report.py
@@ -1101,8 +1993,11 @@ def save_start_pose(kind: str = "start") -> dict:
 
 def run_check() -> dict:
     result = {
-        "ports": {p: Path(p).exists() for p in (FOLLOWER, LEADER)},
+        "ports": {p: Path(p).exists() for _, p in FOLLOWERS + LEADERS},
         "cameras": {n: Path(p).exists() for n, p in CAMERAS.items()},
+        "mode": ROBOT_MODE,
+        "arm_labels": {n: l for (n, _, _), l in zip(arms_to_check(), [l for l, _ in FOLLOWERS + LEADERS])},
+        "camera_labels": CAMERA_LABELS,
         "gpu": gpu_status(),
         "others": other_robot_processes(),
     }
@@ -1125,7 +2020,50 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _forward(self, method: str, raw: bytes | None = None) -> None:
+        """Control PC: pass the request to the GPU laptop's panel and its answer back."""
+        try:
+            status, ctype, body = remote.gpu_request(method, self.path, raw, timeout=120)
+        except Exception as exc:
+            return self._json({"error": str(exc)}, 502)
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self) -> None:
+        if CONTROL:
+            if remote.proxied("GET", self.path):
+                return self._forward("GET")
+            if self.path.startswith(("/api/dataset?", "/api/reference?", "/api/align?")):
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                repo = q.get("repo", [""])[0]
+                if repo and not (DATA_HOME / repo).exists():  # a dataset that is only on the GPU laptop
+                    return self._forward("GET")
+            if self.path.startswith("/api/home?") and "model=" in self.path:
+                # the model's home pose is computed there (training data); whether to use it is this PC's setting
+                try:
+                    out = remote.gpu_json(self.path)
+                except Exception as exc:
+                    out = {"error": str(exc)}
+                return self._json(home_status() | {k: v for k, v in out.items() if k in ("home", "error")})
+        if self.path == "/api/datasets":
+            return self._json({"datasets": list_datasets()})
+        if self.path == "/api/robot_setup":
+            return self._json(setup_status())
+        if self.path.startswith("/api/camera_probe?"):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            try:
+                body = camera_probe(q.get("path", [""])[0])
+            except Exception as exc:
+                return self._json({"error": str(exc)}, 400)
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return self.wfile.write(body)
         if self.path == "/":
             body = (TOOLS_DIR / "omx_panel.html").read_bytes()
             self.send_response(200)
@@ -1142,10 +2080,15 @@ class Handler(BaseHTTPRequestHandler):
                 "preview": PREVIEW.running,
                 "live": JOB.running() and JOB.kind in ("record", "eval"),
                 "brightness": PREVIEW.brightness,
+                "cam_stats": camera_stats(),
+                "robot_mode": ROBOT_MODE,
+                "cameras": [{"name": n, "label": CAMERA_LABELS.get(n, n)} for n in CAMERAS],
                 "job": JOB.status(),
                 "log": list(JOB.lines)[-120:],
-                "datasets": list_datasets(),
+                "datasets": merged_datasets() if CONTROL else list_datasets(),
                 "data_home": str(DATA_HOME),
+                "role": "control" if CONTROL else "gpu",
+                "gpu_link": remote.TUNNEL.status() if CONTROL else None,
                 "hf_user": UPLOADER.hf_login(),
                 "upload": UPLOADER.status(),
             })
@@ -1169,6 +2112,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(alignment(q.get("repo", [""])[0]))
             except Exception as exc:
                 self._json({"error": str(exc)}, 400)
+        elif self.path.startswith("/api/home?") or self.path == "/api/home":
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            self._json(home_status(q.get("model", [""])[0]))
         elif self.path.startswith("/api/eval/report?"):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             self._json(report_status(q.get("repo", [""])[0]))
@@ -1186,6 +2132,29 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         elif self.path == "/api/start_pose":
             self._json(start_pose())
+        elif self.path == "/api/presets":
+            self._json({"presets": proto.list_presets(), "stages": proto.STAGE_KO})
+        elif self.path.startswith("/api/eval/compare?"):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            try:
+                import omx_compare
+                self._json(omx_compare.compare(q.get("preset", [""])[0], data_home=DATA_HOME))
+            except Exception as exc:
+                self._json({"error": str(exc)}, 400)
+        elif self.path.startswith("/api/detect?"):
+            # object position in the camera view before an evaluation starts (placing the first object)
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            try:
+                import omx_vision
+                preset = proto.load_preset(q.get("preset", [""])[0])
+                cam = preset.get("camera", "front")
+                frame = PREVIEW.frames.get(cam) if PREVIEW.running else None
+                px = omx_vision.detect_jpeg(preset["detector"], frame, preset.get("detect_roi")) if frame else None
+                self._json({"px": list(px) if px else None, "camera_on": bool(frame), "detector": preset["detector"]})
+            except Exception as exc:
+                self._json({"error": str(exc)}, 400)
+        elif self.path.startswith("/api/snapshot/"):
+            self._snapshot(self.path.rsplit("/", 1)[-1].split("?", 1)[0])
         elif self.path == "/api/eval/list":
             self._json({"evals": eval_list()})
         elif self.path == "/api/train/status":
@@ -1247,6 +2216,22 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
+    def _snapshot(self, name: str) -> None:
+        """One camera frame for the position editor: camera view, or the running program's live frame."""
+        frame = PREVIEW.frames.get(name) if PREVIEW.running else None
+        live = Path(f"/dev/shm/omx_live_{os.getuid()}_{name}.jpg")
+        if frame is None and live.exists() and time.time() - live.stat().st_mtime < 5:
+            frame = live.read_bytes()
+        if not frame or name not in CAMERAS:
+            self._json({"error": "영상이 없습니다. ① 탭에서 카메라 보기를 켜면 배경에 나옵니다."}, 404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(frame)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(frame)
+
     def _stream(self, name: str) -> None:
         if name not in CAMERAS:
             self._json({"error": "unknown camera"}, 404)
@@ -1258,6 +2243,7 @@ class Handler(BaseHTTPRequestHandler):
         live = Path(f"/dev/shm/omx_live_{os.getuid()}_{name}.jpg")
         # keep the connection through short gaps (preview stops just before a record/eval job starts)
         idle_since = None
+        last_key = None
         try:
             while True:
                 if PREVIEW.running or JOB.running():
@@ -1266,25 +2252,40 @@ class Handler(BaseHTTPRequestHandler):
                     idle_since = time.time()
                 elif time.time() - idle_since > 5:
                     break
-                frame = PREVIEW.frames.get(name) if PREVIEW.running else None
-                if frame is None and JOB.running() and live.exists() and time.time() - live.stat().st_mtime < 2:
-                    frame = live.read_bytes()
-                if frame:
+                frame, key = (PREVIEW.frames.get(name), None) if PREVIEW.running else (None, None)
+                if frame is not None:
+                    key = ("p", id(frame))
+                elif JOB.running() and live.exists():
+                    st = live.stat()
+                    if time.time() - st.st_mtime < 2:
+                        key = ("l", st.st_mtime_ns)
+                        if key != last_key:
+                            frame = live.read_bytes()
+                # only new pictures, at display size: the remote link (Tailscale) carries ~0.6 MB/s, and
+                # two full-size 640x480 streams with repeated frames did not fit (slow, laggy view)
+                if frame and key != last_key:
+                    small = display_jpeg(name, key, frame)
                     self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n")
-                    self.wfile.write(f"Content-Length: {len(frame)}\r\n\r\n".encode())
-                    self.wfile.write(frame + b"\r\n")
-                time.sleep(1 / 15)
+                    self.wfile.write(f"Content-Length: {len(small)}\r\n\r\n".encode())
+                    self.wfile.write(small + b"\r\n")
+                    last_key = key
+                time.sleep(1 / 30)
         except (BrokenPipeError, ConnectionResetError):
             pass
 
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length) or b"{}")
+        raw = self.rfile.read(length)
+        if CONTROL and remote.proxied("POST", self.path):
+            return self._forward("POST", raw)
+        body = json.loads(raw or b"{}")
         try:
             if self.path in ("/api/teleop", "/api/record", "/api/eval/start") and not body.get("confirm"):
                 raise RuntimeError("로봇 옆에 사람이 있는지 확인하고 체크해주세요.")
             if self.path == "/api/check":
                 self._json(run_check())
+            elif self.path == "/api/robot_setup":
+                self._json(save_setup(body))
             elif self.path == "/api/preview":
                 if body.get("on"):
                     if JOB.running() and JOB.kind in ("record", "eval"):
@@ -1312,11 +2313,26 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/eval/report":
                 start_report(body.get("repo_id", ""))
                 self._json({"ok": True})
+            elif self.path == "/api/presets/save":
+                self._json({"ok": True, "preset": proto.save_preset(body, USER)})
+            elif self.path == "/api/presets/delete":
+                proto.delete_preset(body.get("id", ""))
+                self._json({"ok": True})
+            elif self.path == "/api/eval/compare_exclude":
+                update_note(body.get("repo_id", ""), lambda n: n.update(compare_exclude=bool(body.get("exclude"))))
+                self._json({"ok": True})
+            elif self.path == "/api/eval/candidates":
+                if body.get("mode") not in ("rec_all", "rec1", "clear"):
+                    raise RuntimeError("알 수 없는 선택입니다.")
+                update_note(body.get("repo_id", ""), lambda n: proto.select_candidates(n, body["mode"]))
+                self._json({"ok": True})
             elif self.path == "/api/eval/mark":
                 eval_mark(body)
                 self._json({"ok": True})
             elif self.path == "/api/train/start":
                 self._json(train_start(body))
+            elif self.path == "/api/train/name":
+                self._json(train_name(body))
             elif self.path == "/api/train/estimate":
                 self._json(train_estimate(body))
             elif self.path.startswith("/api/train/queue/"):
@@ -1330,9 +2346,23 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/upload":
                 UPLOADER.start(body.get("repo_id", ""), body.get("keywords"), body.get("description"))
                 self._json({"ok": True})
+            elif self.path == "/api/home/current":
+                self._json(home_current())
+            elif self.path == "/api/home/task":
+                if JOB.running() and body.get("apply"):
+                    raise RuntimeError("작업이 실행 중일 때는 홈 자세를 바꾸지 않습니다.")
+                self._json({"home": omx_home.compute_task(str(body.get("task") or "straw"), bool(body.get("apply"))),
+                            "tasks": omx_home.load_tasks()})
+            elif self.path == "/api/home/return":
+                self._json(home_return())
             elif self.path == "/api/kill":
-                killed = JOB.kill()
-                self._json({"ok": True, "killed": killed, "others": other_robot_processes()})
+                if body.get("mode") == "home":  # 즉시 중단 (eval): stop and return to the start pose
+                    self._json({"ok": True, "result": JOB.abort()})
+                elif body.get("mode") == "freeze":  # 비상 정지: hold in place, keep the records, wait for [홈 위치로 이동]
+                    self._json({"ok": True, "result": JOB.freeze()})
+                else:  # 비상 정지 / 강제 종료: SIGKILL, the follower stays where it is with the torque on
+                    killed = JOB.kill()
+                    self._json({"ok": True, "killed": killed, "others": other_robot_processes()})
             elif self.path == "/api/reset_motors":
                 if JOB.running() or other_robot_processes():
                     raise RuntimeError("로봇 프로그램이 아직 실행 중입니다. 강제 종료를 먼저 누르세요.")
@@ -1347,18 +2377,53 @@ def _raise_interrupt(signum, frame) -> None:
     raise KeyboardInterrupt
 
 
+def start_inference_server() -> None:
+    """GPU laptop (v2): this account's inference server for control PCs (omx_infer.py, 127.0.0.1 only),
+    restarted if it ends; loads a model only when a control PC asks."""
+    import omx_infer
+
+    port = omx_infer.default_port()
+
+    def keep():
+        while True:
+            if not _port_in_use(port):
+                log = open(LOG_DIR / "infer_server.log", "a")
+                p = subprocess.Popen([str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_infer.py"), "serve", "--port", str(port)],
+                                     cwd=HOME, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+                p.wait()
+            time.sleep(5)
+    threading.Thread(target=keep, daemon=True).start()
+
+
+def _port_in_use(port: int) -> bool:
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
 def main() -> None:
     # Started in the background, so SIGINT may be ignored; make INT and TERM both shut down cleanly.
     signal.signal(signal.SIGINT, _raise_interrupt)
     signal.signal(signal.SIGTERM, _raise_interrupt)
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     server.daemon_threads = True
+    if CONTROL:
+        remote.TUNNEL.start()
+        print(f"[omx] control PC: training and inference on {remote.HOST} (SSH tunnel)", flush=True)
+    else:
+        start_inference_server()
     print(f"OMX panel {VERSION} on http://{HOST}:{PORT} (user {USER}, settings: {CFG['_source']})", flush=True)
     try:
         server.serve_forever()
     finally:
         JOB.stop()
         PREVIEW.stop()
+        if CONTROL:
+            remote.TUNNEL.stop()
 
 
 if __name__ == "__main__":

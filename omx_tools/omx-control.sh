@@ -9,16 +9,35 @@ set -uo pipefail
 
 [ -f ~/.config/omx/laptop.env ] && . ~/.config/omx/laptop.env
 HOST="${OMX_GPU_HOST:-omx-gpu}"
+
+open_url() {  # a new window, so the panel is not hidden as a tab behind other windows
+  if command -v google-chrome >/dev/null; then setsid google-chrome --new-window "$1" >/dev/null 2>&1 &
+  elif command -v firefox >/dev/null; then setsid firefox --new-window "$1" >/dev/null 2>&1 &
+  else setsid xdg-open "$1" >/dev/null 2>&1 &
+  fi
+}
+
+# v2 control PC (the robot is on this PC; training and inference on the GPU laptop): run the panel here
+if grep -q '"role": *"control"' ~/.config/omx/config.json 2>/dev/null; then
+  notify-send -t 4000 "OMX Control Panel" "이 PC의 제어판을 켜는 중..." 2>/dev/null
+  # an SSH tunnel left by the old way of opening (laptop -> GPU panel) would hold the local port
+  P0=$(~/venv/il/bin/python -c "import sys; sys.path.insert(0, '$HOME/il_ws/src/omx_tools'); import omx_config; print(omx_config.port())" 2>/dev/null)
+  for pid in $(ss -ltnpH 2>/dev/null | grep "127.0.0.1:${P0} " | grep '"ssh"' | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u); do kill "$pid"; done
+  PORT=$(bash ~/il_ws/src/omx_tools/omx-panel-server.sh --port-only) || {
+    notify-send -u critical "OMX Control Panel" "제어판 서버를 켜지 못했습니다. ~/il_ws/omx_logs/web.log 를 확인하세요." 2>/dev/null; exit 1; }
+  open_url "http://127.0.0.1:${PORT}"
+  exit 0
+fi
 # Path of the tools on the GPU laptop, relative to your home there
 TOOLS="${OMX_TOOLS:-il_ws/src/omx_tools}"
 
 fail() {
-  notify-send -u critical "OMX 제어판" "$1" 2>/dev/null
+  notify-send -u critical "OMX Control Panel" "$1" 2>/dev/null
   echo "[실패] $1" >&2
   exit 1
 }
 
-notify-send -t 4000 "OMX 제어판" "GPU 노트북($HOST)에 연결하는 중..." 2>/dev/null
+notify-send -t 4000 "OMX Control Panel" "GPU 노트북($HOST)에 연결하는 중..." 2>/dev/null
 
 if command -v tailscale >/dev/null && ! tailscale status >/dev/null 2>&1; then
   fail "Tailscale이 연결되어 있지 않습니다. 터미널에서 'sudo tailscale up' 후 다시 시도하세요."

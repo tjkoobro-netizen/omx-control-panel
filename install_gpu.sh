@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OMX 제어판 v1.6.1 - GPU 노트북 설치 (로봇과 카메라가 연결된 노트북에서, 제어판을 쓸 각 계정으로 실행)
+# OMX Control Panel v2.1.0 - GPU 노트북 설치 (로봇과 카메라가 연결된 노트북에서, 제어판을 쓸 각 계정으로 실행)
 #
 #   bash install_gpu.sh            질문에 답하며 설치
 #   bash install_gpu.sh --yes      감지한 값/기본값으로 자동 설치
@@ -15,7 +15,7 @@
 # sudo가 필요한 일은 직접 하지 않고, 실행할 명령을 안내합니다.
 set -uo pipefail
 
-VERSION=1.6.1
+VERSION=2.1.0
 PKG="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 TARGET="$HOME/il_ws/src/omx_tools"
 CONF_DIR="$HOME/.config/omx"
@@ -42,7 +42,7 @@ yesno() {  # yesno "질문" y|n -> 0 if yes
 }
 SUDO_TODO=()
 
-echo "OMX 제어판 v$VERSION - GPU 노트북 설치 ($(hostname), 계정 $USER)"
+echo "OMX Control Panel v$VERSION - GPU 노트북 설치 ($(hostname), 계정 $USER)"
 prev() {  # prev key -> value from the existing config, else the package defaults (empty if none)
   python3 - "$1" "$CONF" "$PKG/omx_tools" <<'PYEOF' 2>/dev/null
 import json, os, sys
@@ -96,13 +96,32 @@ else
     mkdir -p "$(dirname "$VENV")" ~/il_ws/src
     python3.10 -m venv "$VENV" && "$VENV/bin/pip" install -q --upgrade pip
     [ -d ~/il_ws/src/lerobot ] || git clone -q --branch v0.4.4 https://github.com/huggingface/lerobot.git ~/il_ws/src/lerobot
-    (cd ~/il_ws/src/lerobot && "$VENV/bin/pip" install -e ".[dynamixel]") || { err "LeRobot 설치 실패"; exit 1; }
+    (cd ~/il_ws/src/lerobot && "$VENV/bin/pip" install -e ".[dynamixel,smolvla]") || { err "LeRobot 설치 실패"; exit 1; }
     LR_VER="$(check_lerobot || true)"; [ -n "$LR_VER" ] && ok "LeRobot $LR_VER 설치 완료" || { err "설치 확인 실패"; exit 1; }
   else
     err "LeRobot 없이는 제어판을 쓸 수 없습니다. 설치 후 다시 실행하세요."; exit 1
   fi
 fi
 PY="$VENV/bin/python"
+
+# SmolVLA (optional): extra packages (transformers etc., torch unchanged) and the pretrained weights.
+# Training runs offline, so lerobot/smolvla_base and its SmolVLM2 backbone are downloaded here once.
+if "$PY" -c "import transformers, num2words" 2>/dev/null; then
+  ok "SmolVLA 패키지 있음 (transformers $("$PY" -c 'import transformers; print(transformers.__version__)'))"
+elif yesno "SmolVLA 학습·평가용 패키지를 설치할까요? (transformers 등, torch는 그대로)" n; then
+  (cd ~/il_ws/src/lerobot && "$VENV/bin/pip" install -q -e ".[smolvla]") && ok "SmolVLA 패키지 설치" || warn "SmolVLA 패키지 설치 실패 (ACT·Diffusion은 그대로 쓸 수 있음)"
+fi
+if "$PY" -c "import transformers" 2>/dev/null && ! "$PY" -c "
+from huggingface_hub import snapshot_download
+snapshot_download('lerobot/smolvla_base', local_files_only=True)
+snapshot_download('HuggingFaceTB/SmolVLM2-500M-Video-Instruct', local_files_only=True, ignore_patterns=['onnx/*'])" 2>/dev/null; then
+  if yesno "SmolVLA 사전학습 가중치(약 3GB)를 지금 받을까요? (SmolVLA 학습 전에 한 번 필요)" n; then
+    "$PY" -c "
+from huggingface_hub import snapshot_download
+snapshot_download('lerobot/smolvla_base', ignore_patterns=['*.gif', '*.ipynb'])
+snapshot_download('HuggingFaceTB/SmolVLM2-500M-Video-Instruct', ignore_patterns=['onnx/*'])" && ok "SmolVLA 가중치 받음" || warn "다운로드 실패 (네트워크 확인 후 이 스크립트를 다시 실행)"
+  fi
+fi
 
 # ---------------------------------------------------------------- 3. 파일 복사
 bold "3/7 제어판 파일 설치 → $TARGET"
@@ -239,11 +258,19 @@ cfg = {
     "cameras": cams, "fixed_fps_camera": "wrist" if "wrist" in cams else "",
     "venv": os.environ["VENV_IN"],
 }
+# keep the settings this installer does not manage (home_pose, freeze_return_after_s, safe_start, ...)
+try:
+    old = json.load(open(sys.argv[1]))
+    cfg = {**{k: v for k, v in old.items() if k not in cfg}, **cfg}
+except (OSError, ValueError):
+    pass
 open(sys.argv[1], "w").write(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
 PYEOF
 ok "설정: $CONF"
-if pgrep -u "$USER" -f "omx_record.py|omx_teleop.py|omx_train.py|omx_train_queue.py|lerobot-(record|teleoperate|train)" >/dev/null; then
-  warn "녹화·텔레옵·학습이 실행 중이라 서버를 재시작하지 않았습니다. 끝난 뒤 'omx-panel --restart'를 실행하세요."
+# Recording, teleop and evaluation run as children of the panel server (their output goes through it),
+# so a restart would cut them off. Training runs on its own (omx_train.py) and is not affected.
+if pgrep -u "$USER" -f "omx_record.py|omx_teleop.py|omx_return_home.py|lerobot-(record|teleoperate)" >/dev/null; then
+  warn "녹화·텔레옵·평가가 실행 중이라 서버를 재시작하지 않았습니다. 끝난 뒤 'omx-panel --restart'를 실행하세요."
 else
   "$TARGET/omx-panel-server.sh" --restart | sed 's/^/  /'
 fi

@@ -1,0 +1,242 @@
+<meta charset="utf-8">
+<title>OMX Control Panel 설치</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column with a left step rail; commands in copyable blocks; warnings in amber callouts */
+:root {
+  --bg: #f6f7f9; --surface: #ffffff; --ink: #18202b; --muted: #5b6676; --line: #dde2e9;
+  --accent: #1f5fd1; --accent-soft: #e6eefc; --warn: #9a5b00; --warn-soft: #fff4dc; --ok: #1d7a46; --ok-soft: #e3f4ea;
+  --code-bg: #111821; --code-fg: #e4ecf5;
+  --f-body: "IBM Plex Sans KR", "Noto Sans KR", "Apple SD Gothic Neo", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0f141b; --surface: #161d27; --ink: #e5ebf2; --muted: #9aa7b8; --line: #2a3442;
+  --accent: #6ea2ff; --accent-soft: #1b2a44; --warn: #f2b45c; --warn-soft: #2e2414; --ok: #6fd39a; --ok-soft: #15291e;
+  --code-bg: #0a0f15; --code-fg: #dfe8f2; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0f141b; --surface: #161d27; --ink: #e5ebf2; --muted: #9aa7b8; --line: #2a3442;
+  --accent: #6ea2ff; --accent-soft: #1b2a44; --warn: #f2b45c; --warn-soft: #2e2414; --ok: #6fd39a; --ok-soft: #15291e;
+  --code-bg: #0a0f15; --code-fg: #dfe8f2; color-scheme: dark }
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 400 15px/1.7 var(--f-body); margin: 0; }
+.wrap { max-width: 860px; margin: 0 auto; padding-block: 40px 72px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+h1 { font-size: 30px; line-height: 1.25; margin: 0 0 10px; text-wrap: balance; letter-spacing: -.01em; }
+h2 { font-size: 20px; line-height: 1.35; margin: 0; text-wrap: balance; }
+h3 { font-size: 15.5px; margin: 0; }
+p { margin: 0; max-width: 68ch; }
+a { color: var(--accent); }
+.lede { color: var(--muted); font-size: 16px; }
+.eyebrow { font: 500 12px/1 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+header { display: grid; gap: 12px; margin-bottom: 28px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { font: 500 12.5px/1 var(--f-mono); padding: 6px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--muted); }
+section { display: grid; gap: 14px; padding-block: 26px; border-top: 1px solid var(--line); }
+.diagram { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); gap: 12px; align-items: stretch; }
+.box { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; display: grid; gap: 6px; min-width: 0; }
+.box b { font-size: 14.5px; }
+.box ul { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13.5px; }
+.link { display: grid; place-items: center; color: var(--muted); font: 500 12px/1.4 var(--f-mono); text-align: center; }
+.link span { border-top: 2px dashed var(--accent); padding-top: 6px; }
+.check { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.check li { display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px; }
+.check li::before { content: ""; width: 14px; height: 14px; margin-top: 5px; border: 2px solid var(--accent); border-radius: 3px; }
+.steps { counter-reset: step; display: grid; gap: 0; }
+.step { counter-increment: step; display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 0 16px; position: relative; padding-bottom: 30px; }
+.step::before { content: counter(step); width: 34px; height: 34px; border-radius: 50%; background: var(--accent); color: var(--surface);
+  display: grid; place-items: center; font: 700 15px/1 var(--f-mono); }
+.step::after { content: ""; position: absolute; left: 16px; top: 40px; bottom: 6px; width: 2px; background: var(--line); }
+.step:last-child::after { display: none; }
+.step > div { display: grid; gap: 12px; min-width: 0; padding-top: 4px; }
+.cmd { position: relative; background: var(--code-bg); color: var(--code-fg); border-radius: 6px; padding: 14px 16px; padding-right: 76px; overflow-x: auto; }
+.cmd pre { margin: 0; font: 400 13.5px/1.6 var(--f-mono); white-space: pre; }
+.cmd button { position: absolute; top: 9px; right: 9px; font: 500 12px/1 var(--f-body); padding: 7px 10px; border-radius: 4px; border: 1px solid #3a4656;
+  background: #1c2632; color: #dfe8f2; cursor: pointer; }
+.cmd button:hover { background: #26323f; }
+.cmd button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+code { font: 400 13.5px var(--f-mono); background: var(--accent-soft); padding: 1px 5px; border-radius: 3px; }
+.note { border-left: 4px solid var(--warn); background: var(--warn-soft); padding: 12px 14px; border-radius: 0 6px 6px 0; display: grid; gap: 4px; }
+.note b { color: var(--warn); }
+.good { border-left: 4px solid var(--ok); background: var(--ok-soft); padding: 12px 14px; border-radius: 0 6px 6px 0; }
+.tbl { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font: 500 12px/1.4 var(--f-mono); letter-spacing: .04em; color: var(--muted); background: var(--bg); }
+tr:last-child td { border-bottom: 0; }
+td.n { font-family: var(--f-mono); color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+details { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; }
+details[open] { padding-bottom: 14px; }
+summary { cursor: pointer; font-weight: 500; }
+details > div { display: grid; gap: 8px; margin-top: 10px; color: var(--ink); }
+.faq { display: grid; gap: 8px; }
+footer { color: var(--muted); font-size: 13px; padding-top: 20px; border-top: 1px solid var(--line); }
+@media (max-width: 640px) {
+  h1 { font-size: 25px; }
+  .diagram { grid-template-columns: 1fr; }
+  .link span { border-top: 0; border-left: 2px dashed var(--accent); padding: 0 0 0 8px; }
+  .step { grid-template-columns: 34px minmax(0, 1fr); gap: 0 12px; }
+  .step::after { left: 16px; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+<header>
+  <span class="eyebrow">OMX-AI · 팀원 설치 안내 · v2.1.0</span>
+  <h1>OMX Control Panel 설치</h1>
+  <p class="lede">내 우분투 PC에 로봇팔과 카메라를 연결하고, 학습과 AI 추론은 GPU 노트북에 맡기는 제어판입니다. 아래 순서대로 한 번만 설치하면 바탕화면 아이콘으로 바로 씁니다.</p>
+  <div class="meta">
+    <span class="chip">우분투 22.04 / 24.04</span><span class="chip">약 1시간 (대부분 자동)</span><span class="chip">설치 파일: install_control.sh</span>
+  </div>
+</header>
+
+<section>
+  <h2>이렇게 동작합니다</h2>
+  <div class="diagram">
+    <div class="box"><b>내 제어 PC</b>
+      <ul><li>리더암·팔로워암·카메라 연결</li><li>텔레옵, 데이터 녹화, 평가 실행</li><li>안전 시작·정지, 비상 정지</li></ul></div>
+    <div class="link"><span>Tailscale<br>+ SSH</span></div>
+    <div class="box"><b>GPU 노트북 (team16-PC)</b>
+      <ul><li>모델 학습</li><li>AI 추론 서버 (평가 중 동작 계산)</li><li>팀 공유 데이터·모델 보관</li></ul></div>
+  </div>
+  <p>녹화한 데이터는 끝나면 GPU 노트북 공유 폴더로 자동으로 올라갑니다. 다른 사람이 만든 같은 이름의 데이터는 덮어쓰지 않습니다.</p>
+</section>
+
+<section>
+  <h2>시작 전에 준비할 것</h2>
+  <ul class="check">
+    <li><span><b>우분투 PC</b>와 인터넷 연결 (USB 포트가 많을수록 좋습니다)</span></li>
+    <li><span><b>GPU 노트북 계정</b> 이름과 비밀번호. 없으면 관리자에게 요청하세요.</span></li>
+    <li><span><b>Tailscale 팀 초대</b>. 관리자가 보낸 초대 메일로 팀 Tailscale에 들어갈 수 있어야 합니다.</span></li>
+    <li><span>내 PC의 <b>sudo 비밀번호</b> (패키지·장치 규칙 설치에 필요)</span></li>
+    <li><span>로봇 세트(리더·팔로워, 전원 어댑터)와 카메라. 설치가 끝난 뒤 연결해도 됩니다.</span></li>
+  </ul>
+</section>
+
+<section>
+  <h2>설치 순서</h2>
+  <div class="steps">
+
+    <div class="step"><div>
+      <h3>설치 파일 받기</h3>
+      <p>터미널(Ctrl+Alt+T)을 열고 팀 저장소를 받습니다. 이미 받아 두었다면 두 번째 명령만 실행해 최신으로 맞춥니다.</p>
+      <div class="cmd"><pre>git clone https://github.com/tjkoobro-netizen/OMX-AI_Dev.git ~/OMX-AI_Dev</pre><button type="button" data-copy>복사</button></div>
+      <div class="cmd"><pre>cd ~/OMX-AI_Dev &amp;&amp; git pull</pre><button type="button" data-copy>복사</button></div>
+    </div></div>
+
+    <div class="step"><div>
+      <h3>설치 실행</h3>
+      <div class="cmd"><pre>cd ~/OMX-AI_Dev/omx_panel &amp;&amp; bash install_control.sh</pre><button type="button" data-copy>복사</button></div>
+      <p>8단계가 차례로 진행됩니다. 이미 된 단계는 확인만 하고 넘어가므로, 중간에 멈췄다면 같은 명령을 다시 실행하면 됩니다. 질문이 나오면 대부분 Enter(기본값)로 충분합니다.</p>
+      <div class="tbl"><table>
+        <thead><tr><th>단계</th><th>하는 일</th><th>내가 할 일</th></tr></thead>
+        <tbody>
+          <tr><td class="n">1/8</td><td>git, v4l-utils, python3.10 등 확인</td><td>없으면 sudo 비밀번호 입력</td></tr>
+          <tr><td class="n">2/8</td><td>Tailscale 설치·로그인</td><td>화면에 나온 주소를 브라우저로 열어 팀 계정으로 로그인</td></tr>
+          <tr><td class="n">3/8</td><td>GPU 노트북 선택, SSH 키 등록</td><td>목록에서 <b>team16-pc</b> 번호 선택 → GPU 노트북 계정 이름 → 그 계정 비밀번호 한 번</td></tr>
+          <tr><td class="n">4/8</td><td>GPU 노트북의 내 계정에 학습·추론 서버 설치</td><td>처음이면 Y. GPU 노트북 쪽 질문도 Enter로 진행</td></tr>
+          <tr><td class="n">5/8</td><td>LeRobot 환경(~/venv/il) 설치</td><td>처음이면 Y. 20~40분 걸립니다(약 4GB)</td></tr>
+          <tr><td class="n">6/8</td><td>로봇 장치 이름(OMX 1·2·3)과 USB 권한</td><td>sudo 비밀번호 입력</td></tr>
+          <tr><td class="n">7/8</td><td>제어판 설치, 설정 저장</td><td>없음 (기존 설정은 백업 후 유지)</td></tr>
+          <tr><td class="n">8/8</td><td>바탕화면 아이콘 "OMX Control Panel"</td><td>없음</td></tr>
+        </tbody>
+      </table></div>
+      <div class="good">마지막에 <b>설치 완료 (v2.1.0)</b>가 나오면 끝입니다.</div>
+    </div></div>
+
+    <div class="step"><div>
+      <h3>한 번 로그아웃 후 다시 로그인</h3>
+      <p>6단계에서 USB 직렬 포트 권한(dialout)을 새로 받았다면, 다시 로그인해야 적용됩니다. 설치 마지막에 안내가 나오면 꼭 해 주세요. 하지 않으면 점검에서 "포트를 열 수 없음"이 나옵니다.</p>
+    </div></div>
+
+    <div class="step"><div>
+      <h3>로봇과 카메라 연결</h3>
+      <p>팔로워·리더 모두 <b>전원 어댑터</b>를 연결하고 켠 뒤 USB를 꽂습니다. USB는 통신만 하므로 전원이 없으면 모터가 응답하지 않습니다. 로봇팔은 어느 포트에 꽂아도 자동으로 구분됩니다.</p>
+      <div class="note"><b>카메라는 PC 본체의 서로 다른 USB 포트에 나눠 꽂으세요.</b>
+        <span>우리 카메라는 켜질 때 USB 대역을 크게 잡습니다. 같은 허브나 같은 본체 포트에 카메라 2대를 몰면 한 대가 열리지 않습니다(화면에 0 fps). 허브를 쓰더라도 허브 하나에는 카메라 1대만 두세요. 같은 모델 카메라는 꽂은 포트로 구분하므로, 한 번 정한 뒤에는 포트를 바꾸지 마세요.</span></div>
+      <div class="tbl"><table>
+        <thead><tr><th>로봇</th><th>팔로워</th><th>리더</th></tr></thead>
+        <tbody>
+          <tr><td>OMX 1</td><td class="n">/dev/omx_follower_1</td><td class="n">/dev/omx_leader_1</td></tr>
+          <tr><td>OMX 2</td><td class="n">/dev/omx_follower_2</td><td class="n">/dev/omx_leader_2</td></tr>
+          <tr><td>OMX 3</td><td class="n">/dev/omx_follower_3</td><td class="n">/dev/omx_leader_3</td></tr>
+        </tbody>
+      </table></div>
+    </div></div>
+
+    <div class="step"><div>
+      <h3>제어판 열기, 로봇 구성</h3>
+      <p>바탕화면의 <b>OMX Control Panel</b>을 더블클릭합니다. 처음에는 아이콘을 우클릭해 <b>실행 허용(Allow Launching)</b>을 눌러야 할 수 있습니다. 터미널에서 <code>omx-panel</code>로 열어도 됩니다.</p>
+      <p>① 데이터 수집 탭 오른쪽의 <b>로봇 구성 → [구성 바꾸기]</b>에서 정합니다.</p>
+      <div class="tbl"><table>
+        <thead><tr><th>구성</th><th>로봇 세트</th><th>카메라 역할</th></tr></thead>
+        <tbody>
+          <tr><td><b>단일 로봇</b><br>팔 1개</td><td>예: OMX 3</td><td>front(필수), front_2(선택), wrist(필수)</td></tr>
+          <tr><td><b>협동 로봇</b><br>양팔을 한 로봇으로</td><td>왼팔 예: OMX 1<br>오른팔 예: OMX 2</td><td>front(필수), front_2(선택), wrist_left, wrist_right(필수)</td></tr>
+        </tbody>
+      </table></div>
+      <p>카메라마다 <b>미리보기</b>를 눌러 화면을 보고 역할을 고르면 라벨(예: "OMX 2 · 왼팔 wrist")이 자동으로 붙습니다. <b>[저장하고 점검]</b>을 누르면 팔로워·리더 모터와 카메라를 모두 확인합니다.</p>
+      <div class="good">점검 목록이 모두 초록이고, [카메라 켜기] 후 각 화면 오른쪽 위에 <b>30 fps 근처</b>가 나오면 준비 완료입니다.</div>
+    </div></div>
+
+    <div class="step"><div>
+      <h3>첫 텔레옵</h3>
+      <p>리더암을 팔로워와 비슷한 자세로 두고, 화면 맨 위 안전 확인란을 체크한 뒤 <b>[텔레옵 시작]</b>을 누릅니다. 팔로워가 출력 30%로 천천히 리더 자세까지 다가간 뒤 리더를 따라옵니다. 협동 로봇은 두 팔 모두 이렇게 시작합니다.</p>
+      <p><b>[중지]</b>를 누르면 팔로워가 출력을 3초에 걸쳐 줄이고 토크를 끕니다(팔이 천천히 내려앉음).</p>
+      <div class="note"><b>처음 움직일 때는 팔 주변에서 손을 치우세요.</b>
+        <span>이상하게 움직이면 ① 탭의 [강제 종료](팔이 그 자리에 멈춤)를 누르고, 그래도 움직이면 팔로워 전원을 뽑으세요. 평가 중에는 [비상 정지] 한 번으로 제자리에 멈추고, 같은 버튼 [홈 위치로 이동]으로 천천히 돌아갑니다.</span></div>
+    </div></div>
+
+  </div>
+</section>
+
+<section>
+  <h2>문제가 생기면</h2>
+  <div class="faq">
+    <details><summary>위쪽에 "GPU 노트북(omx-gpu)에 연결되지 않았습니다"</summary><div>
+      <p>Tailscale이 꺼져 있거나 GPU 노트북이 꺼져 있습니다. 아래로 확인하세요. 응답이 오면 제어판을 새로고침합니다.</p>
+      <div class="cmd"><pre>tailscale status &amp;&amp; ssh omx-gpu echo ok</pre><button type="button" data-copy>복사</button></div>
+    </div></details>
+    <details><summary>점검에서 "/dev/omx_follower_N 없음"</summary><div>
+      <p>전원과 USB를 확인합니다. 그래도 없으면 연결된 장치 이름을 보고, 목록이 비어 있으면 관리자에게 그 로봇의 일련번호 등록을 요청하세요.</p>
+      <div class="cmd"><pre>ls -l /dev/omx_*</pre><button type="button" data-copy>복사</button></div>
+    </div></details>
+    <details><summary>"포트를 열 수 없음"</summary><div>
+      <p>USB 권한(dialout)이 아직 적용되지 않았습니다. 로그아웃 후 다시 로그인하세요. 다른 프로그램이 같은 로봇을 쓰고 있어도 이렇게 나옵니다.</p>
+    </div></details>
+    <details><summary>카메라 하나가 0 fps이거나 열리지 않음</summary><div>
+      <p>USB 대역 부족입니다. 그 카메라를 PC 본체의 다른 포트(다른 허브)로 옮긴 뒤 로봇 구성에서 다시 지정하세요. 화면이 검으면(밝기 5 미만) 렌즈 덮개와 조명을 확인합니다.</p>
+    </div></details>
+    <details><summary>아이콘을 눌러도 제어판이 열리지 않음</summary><div>
+      <p>서버 기록의 마지막 줄을 확인해 관리자에게 보내 주세요.</p>
+      <div class="cmd"><pre>tail -20 ~/il_ws/omx_logs/web.log</pre><button type="button" data-copy>복사</button></div>
+    </div></details>
+    <details><summary>새 버전으로 업데이트하려면</summary><div>
+      <p>저장소를 최신으로 받고 설치를 다시 실행합니다. 설정과 로봇 구성은 그대로 유지됩니다.</p>
+      <div class="cmd"><pre>cd ~/OMX-AI_Dev &amp;&amp; git pull &amp;&amp; cd omx_panel &amp;&amp; bash install_control.sh</pre><button type="button" data-copy>복사</button></div>
+    </div></details>
+  </div>
+</section>
+
+<footer>OMX Control Panel v2.1.0 · 제어 PC 설치 안내 · 설치 파일 omx_panel/install_control.sh · 문의: 제어판 관리자</footer>
+</div>
+
+<script>
+for (const btn of document.querySelectorAll("[data-copy]")) {
+  btn.addEventListener("click", async () => {
+    const text = btn.parentElement.querySelector("pre").textContent;
+    try {
+      await navigator.clipboard.writeText(text);
+      btn.textContent = "복사됨";
+    } catch (e) {
+      const r = document.createRange(); r.selectNodeContents(btn.parentElement.querySelector("pre"));
+      const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+      btn.textContent = "선택됨 · Ctrl+C";
+    }
+    setTimeout(() => { btn.textContent = "복사"; }, 1800);
+  });
+}
+</script>

@@ -17,9 +17,17 @@ PY="$VENV/python"
 PORT=$("$PY" -c "import sys; sys.path.insert(0, '$TOOLS'); import omx_config; print(omx_config.port())")
 listening() { ss -ltn | grep -q "127.0.0.1:${PORT} "; }
 
+if [ "${1:-}" = "--restart" ]; then
+  # the inference server for control PCs (v2) is started by the panel: restart it with the new code too
+  pkill -TERM -u "$(id -u)" -f "omx_infer.py serve" || true
+fi
 if [ "${1:-}" = "--restart" ] && listening; then
   pkill -TERM -u "$(id -u)" -f "python omx_web.py" || true
   for _ in $(seq 1 20); do listening || break; sleep 0.5; done
+  if listening; then  # still serving (e.g. held by an open video stream): an update must not keep the old code
+    pkill -KILL -u "$(id -u)" -f "python omx_web.py" || true
+    for _ in $(seq 1 10); do listening || break; sleep 0.5; done
+  fi
 fi
 
 if ! listening; then
@@ -37,5 +45,5 @@ fi
 [ -n "${started:-}" ] && echo "제어판 서버를 켰습니다 (포트 ${PORT})." || echo "제어판 서버가 이미 실행 중입니다 (포트 ${PORT})."
 echo
 echo "열기:"
-echo "  내 노트북            : 바탕화면의 'OMX 제어판' 아이콘 또는 터미널에서  omx-panel"
+echo "  내 노트북            : 바탕화면의 'OMX Control Panel' 아이콘 또는 터미널에서  omx-panel"
 echo "  VS Code Remote-SSH  : 아래 패널의 [포트(Ports)] 탭 -> ${PORT} -> 브라우저에서 열기(지구본 아이콘)"

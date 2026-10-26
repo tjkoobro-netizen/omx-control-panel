@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OMX 제어판 v1.6.1 - 개인 PC(노트북) 설치. 내가 들고 다니는 PC에서 실행합니다.
+# OMX Control Panel v2.1.0 - 개인 PC(노트북) 설치. 내가 들고 다니는 PC에서 실행합니다.
 #
 #   bash install_laptop.sh
 #
@@ -13,7 +13,7 @@
 #   7. (선택) Rerun 뷰어 설치
 set -uo pipefail
 
-VERSION=1.6.1
+VERSION=2.1.0
 PKG="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 ALIAS=omx-gpu
 APP_DIR="$HOME/.local/share/omx"
@@ -26,7 +26,7 @@ err()  { printf '  \033[31m✗\033[0m %s\n' "$*"; }
 ask()  { local q="$1" d="${2:-}"; read -r -p "  $q${d:+ [$d]}: " REPLY; REPLY="${REPLY:-$d}"; }
 yesno() { read -r -p "  $1 [$( [ "$2" = y ] && echo Y/n || echo y/N )]: " REPLY; REPLY="${REPLY:-$2}"; [[ "$REPLY" =~ ^[Yy] ]]; }
 
-echo "OMX 제어판 v$VERSION - 개인 PC 설치 ($(hostname), 계정 $USER)"
+echo "OMX Control Panel v$VERSION - 개인 PC 설치 ($(hostname), 계정 $USER)"
 
 # ---------------------------------------------------------------- 1. Tailscale
 bold "1/7 Tailscale"
@@ -124,7 +124,7 @@ ln -sf "$APP_DIR/omx-control.sh" ~/.local/bin/omx-panel
 cat > ~/.local/share/applications/omx-control.desktop <<EOF
 [Desktop Entry]
 Type=Application
-Name=OMX 제어판
+Name=OMX Control Panel
 Comment=GPU 노트북($GPU_NAME)의 OMX 로봇 수집·학습·평가
 Exec=$APP_DIR/omx-control.sh
 Icon=applications-science
@@ -135,7 +135,7 @@ DESK=$(xdg-user-dir DESKTOP 2>/dev/null || echo ~/Desktop)
 if [ -d "$DESK" ]; then
   cp ~/.local/share/applications/omx-control.desktop "$DESK/" && chmod +x "$DESK/omx-control.desktop"
   gio set "$DESK/omx-control.desktop" metadata::trusted true 2>/dev/null
-  ok "바탕화면 아이콘 'OMX 제어판'"
+  ok "바탕화면 아이콘 'OMX Control Panel'"
 fi
 ok "명령 omx-panel (새 터미널부터)"
 
@@ -147,5 +147,5 @@ elif yesno "녹화·평가 중 관절 그래프를 내 PC에서 보는 Rerun 뷰
 fi
 
 bold "설치 완료 (v$VERSION)"
-echo "  바탕화면의 'OMX 제어판'을 더블클릭하거나 터미널에서 omx-panel 을 실행하세요."
+echo "  바탕화면의 'OMX Control Panel'을 더블클릭하거나 터미널에서 omx-panel 을 실행하세요."
 echo "  처음엔 아이콘을 우클릭해 '실행 허용(Allow Launching)'을 눌러야 할 수 있습니다."

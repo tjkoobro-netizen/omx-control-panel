@@ -19,10 +19,15 @@ import json
 import os
 from pathlib import Path
 
+import sys
+
 import av
 import cv2
 import numpy as np
 import pandas as pd
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import omx_vision  # noqa: E402
 
 import sys  # noqa: E402
 
@@ -73,7 +78,75 @@ def joint_data(root: Path) -> pd.DataFrame | None:
     try:
         return pd.concat([pd.read_parquet(f) for f in sorted(glob.glob(str(root / "data/*/*.parquet")))])
     except Exception:
-        return None  # e.g. the parquet footer is missing after a force-quit
+        # e.g. the parquet footer is missing after a force-quit: use the per-episode backups
+        return backup_joint_data(root)
+
+
+def backup_joint_data(root: Path) -> pd.DataFrame | None:
+    """Joint data from omx_record.py's backups (<owner>/.omx_backup/<dataset>/episode_*.npz)."""
+    files = sorted((root.parent / ".omx_backup" / root.name).glob("episode_*.npz"))
+    frames = []
+    for f in files:
+        try:
+            z = np.load(f, allow_pickle=False)
+            meta = json.loads(str(z["meta"]))
+            n = len(z["observation__state"])
+            frames.append(pd.DataFrame({
+                "episode_index": [meta["episode_index"]] * n,
+                "frame_index": z["frame_index"] if "frame_index" in z else np.arange(n),
+                "observation.state": list(z["observation__state"]), "action": list(z["action"])}))
+        except Exception:
+            continue
+    return pd.concat(frames, ignore_index=True) if frames else None
+
+
+# Smoothness of an attempt (Validation Leader's measures). Active span = first to last arm motion.
+MOVE_SPEED = 3.0    # units/s summed over the 5 arm joints: "moving"
+STOP_SPEED = 1.0    # units/s: a frame inside the active span slower than this counts as a stop
+
+
+def smoothness(state: np.ndarray, action: np.ndarray | None, fps: float) -> dict | None:
+    """stop_frac: share of stopped frames inside the active span; accel: mean |second difference of
+    the state| x fps^2 summed over the arm joints (units/s^2); cmd_jump: share of command steps larger
+    than 4 x their median + 1 (target jumps, e.g. at chunk changes)."""
+    s = np.asarray(state, dtype=float)[:, :5]
+    v = np.abs(np.diff(s, axis=0)).sum(1) * fps
+    idx = np.where(v > MOVE_SPEED)[0]
+    if len(idx) < 10:
+        return None
+    span = slice(idx[0], idx[-1])
+    out = {"stop_frac": round(float((v[span] < STOP_SPEED).mean()), 3),
+           "accel": round(float(np.abs(np.diff(s[span], 2, axis=0)).sum(1).mean() * fps * fps), 1)}
+    if action is not None:
+        a = np.asarray(action, dtype=float)[:, :5]
+        step = np.abs(np.diff(a[span], axis=0)).sum(1)
+        out["cmd_jump"] = round(float((step > 4 * np.median(step) + 1).mean()), 3) if len(step) else None
+    return out
+
+
+def mean_smoothness(items: list[dict]) -> dict | None:
+    items = [i for i in items if i]
+    if not items:
+        return None
+    return {k: round(float(np.mean([i[k] for i in items if i.get(k) is not None])), 3 if k != "accel" else 1)
+            for k in ("stop_frac", "accel", "cmd_jump") if any(i.get(k) is not None for i in items)}
+
+
+def eval_smoothness(root: Path) -> dict | None:
+    """Mean smoothness over the saved attempts of one evaluation (with the per-attempt values)."""
+    data = joint_data(root)
+    if data is None or not len(data):
+        return None
+    try:
+        fps = json.loads((root / "meta/info.json").read_text()).get("fps", 30)
+    except (OSError, ValueError):
+        fps = 30
+    per = {}
+    for ep, d in data.groupby("episode_index"):
+        d = d.sort_values("frame_index")
+        per[int(ep)] = smoothness(np.stack(d["observation.state"].to_numpy()),
+                                  np.stack(d["action"].to_numpy()) if "action" in d else None, fps)
+    return {"mean": mean_smoothness(list(per.values())), "attempts": per}
 
 
 def episode_frames(root: Path, row: dict, cam: str, times: list[float]) -> list[np.ndarray]:
@@ -100,15 +173,8 @@ def episode_frames(root: Path, row: dict, cam: str, times: list[float]) -> list[
 
 
 def strawberry_xy(img: np.ndarray) -> tuple[int, int] | None:
-    """Centre of the largest saturated red blob (strawberry, possibly merged with the red tape under it)."""
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, (0, 120, 60), (8, 255, 255)) | cv2.inRange(hsv, (170, 120, 60), (180, 255, 255))
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-    n, _, stats, cents = cv2.connectedComponentsWithStats(mask)
-    if n <= 1:
-        return None
-    k = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-    return (int(cents[k][0]), int(cents[k][1])) if stats[k, cv2.CC_STAT_AREA] > 150 else None
+    """Centre of the largest saturated red blob (see omx_vision.red_hsv)."""
+    return omx_vision.red_hsv(img)
 
 
 def label(img, text, org=(6, 20), scale=0.55):
@@ -154,15 +220,149 @@ def plot_joints(demo_tracks: list[np.ndarray], attempts: list[tuple[str, np.ndar
     return np.vstack([legend, grid])
 
 
+# Follower gripper values (0..100) seen on this robot: open 57-61 (the leader trigger stops at
+# gripper_open_pos=60), closed on a strawberry 52-54, closed on nothing 49-51. A state machine with a
+# gap between the two thresholds ignores the small wobble while holding.
+GRIP_OPEN, GRIP_CLOSED, GRIP_EMPTY = 57.0, 55.0, 51.5
+
+
 def grasp_info(track: np.ndarray, fps: int) -> dict:
-    """Gripper closing = largest drop of the gripper value; idle = time with almost no joint motion."""
-    g = track[:, 5]
-    smooth = np.convolve(g, np.ones(5) / 5, mode="same")
-    close_i = int(np.argmin(np.diff(smooth))) if len(smooth) > 2 else 0
+    """Grasp events from the follower gripper value.
+
+    close   = first open -> closed transition (gripper_close_s, pose_at_close)
+    release = first closed -> open transition after it (gripper_release_s, e.g. put in the bowl)
+    closed_value = median gripper value while closed the first time (on a strawberry ~52-54,
+                   on nothing ~49-51 -> holding_guess false)
+    grasp_count  = number of open -> closed transitions (more than 1 = it tried again)
+    idle = time with almost no arm motion.
+    """
+    g = track[:, 5].astype(float)
+    k = 5  # smoothing window; pad with the edge values so the ends do not sag towards 0
+    smooth = np.convolve(np.pad(g, (k // 2, k // 2), mode="edge"), np.ones(k) / k, mode="valid")
+    state = "open" if smooth[0] >= GRIP_OPEN else "closed" if smooth[0] <= GRIP_CLOSED else None
+    closes, releases = [], []
+    for i, v in enumerate(smooth):
+        if v >= GRIP_OPEN:
+            if state == "closed" and closes:
+                releases.append(i)
+            state = "open"
+        elif v <= GRIP_CLOSED:
+            if state == "open":
+                closes.append(i)
+            state = "closed"
+    close_i = closes[0] if closes else None
+    release_i = next((r for r in releases if close_i is not None and r > close_i), None)
+    closed_value = None
+    if close_i is not None:
+        seg = g[close_i:release_i] if release_i else g[close_i:]
+        closed_value = round(float(np.median(seg)), 1) if len(seg) else None
     speed = np.abs(np.diff(track[:, :5], axis=0)).sum(1) * fps
-    return {"gripper_close_s": round(close_i / fps, 1), "pose_at_close": [round(float(v), 1) for v in track[close_i, :5]],
+    # longest stop between the first arm motion and the end of the task (the release, else the last
+    # motion): waiting before the start and after the strawberry is in the bowl are left out
+    moving = np.flatnonzero(speed >= 1.0)
+    if release_i is not None:
+        moving = moving[moving <= release_i]
+    max_pause = 0
+    if len(moving) > 1:
+        gaps = np.diff(moving) - 1
+        max_pause = int(gaps.max()) if len(gaps) else 0
+    return {"max_pause_s": round(max_pause / fps, 1),
+            "gripper_close_s": round(close_i / fps, 1) if close_i is not None else None,
+            "gripper_release_s": round(release_i / fps, 1) if release_i is not None else None,
+            "pose_at_close": [round(float(v), 1) for v in track[close_i, :5]] if close_i is not None else None,
+            "pose_at_release": [round(float(v), 1) for v in track[release_i, :5]] if release_i is not None else None,
+            "pose_at_start": [round(float(v), 1) for v in track[0, :5]],
+            "closed_value": closed_value,
+            "holding_guess": closed_value >= GRIP_EMPTY if closed_value is not None else None,
+            "grasp_count": len(closes),
             "gripper_min": round(float(g.min()), 1), "gripper_max": round(float(g.max()), 1),
             "idle_s": round(float((speed < 1.0).sum() / fps), 1), "length_s": round(len(track) / fps, 1)}
+
+
+# Failure stages of an attempt (evaluation protocol v2). Estimated from the gripper metrics; the user
+# can correct them in the panel. Thresholds in joint units (-100..100, 1 unit ~ 1.8 deg).
+FAIL_STAGES = ("approach", "grasp", "carry", "release", "start_misbehavior", "other")
+START_MOVE = 5.0     # mean |joint - start pose| below this = the arm had not really left its start pose
+CARRY_FAR = 25.0     # mean |release pose - demos' mean release pose| above this = dropped on the way
+                     # (demos themselves spread up to ~35 at most, p90 ~14)
+REGRASP = 3          # closed this many times = kept missing the object
+
+
+def fail_stage(g: dict, demo_release_pose: list | None = None) -> str:
+    """Rules, first match wins:
+    start_misbehavior  closed within 1 s while still at the start pose (e.g. Diffusion 10/23 #1)
+    approach           never closed the gripper
+    grasp              closed on nothing (closed_value below the "holding" level), or closed 3+ times
+    release            held it and never let go
+    carry              let go far from where the demos let go (dropped on the way)
+    release            otherwise (let go near the bowl but missed)
+    """
+    pose = lambda key: np.array(g[key], dtype=float) if g.get(key) is not None else None  # noqa: E731
+    close, start = pose("pose_at_close"), pose("pose_at_start")
+    if (g.get("gripper_close_s") is not None and g["gripper_close_s"] <= 1.0 and close is not None
+            and start is not None and float(np.mean(np.abs(close[:4] - start[:4]))) < START_MOVE):
+        return "start_misbehavior"
+    if g.get("gripper_close_s") is None:
+        return "approach"
+    if g.get("holding_guess") is False or (g.get("grasp_count") or 0) >= REGRASP:
+        return "grasp"
+    if g.get("gripper_release_s") is None:
+        return "release"
+    release = pose("pose_at_release")
+    if demo_release_pose is not None and release is not None:
+        if float(np.mean(np.abs(release[:4] - np.array(demo_release_pose[:4], dtype=float)))) > CARRY_FAR:
+            return "carry"
+    return "release"
+
+
+# Training-candidate recommendation for successful attempts (evaluation protocol v2). Recovery
+# (a second grasp) is worth learning; wandering (many grasps, long stops, very long attempts) is not.
+PAUSE_SIGMA, PAUSE_MIN_S, LENGTH_FACTOR = 2.0, 1.0, 1.5
+
+
+def demo_stats(demo_grasps: list[dict]) -> dict:
+    """What "normal" looks like in the demos: release pose, longest stop, attempt length."""
+    pauses = [g["max_pause_s"] for g in demo_grasps if g.get("max_pause_s") is not None]
+    # task time = until the strawberry is let go (an eval episode keeps running to its time limit)
+    lengths = [g["gripper_release_s"] for g in demo_grasps if g.get("gripper_release_s") is not None]
+    p_mean, p_std = (float(np.mean(pauses)), float(np.std(pauses))) if pauses else (0.0, 0.0)
+    return {"release_pose": demo_release_pose(demo_grasps),
+            "pause_mean_s": round(p_mean, 2), "pause_std_s": round(p_std, 2),
+            "long_pause_s": round(max(PAUSE_MIN_S, p_mean + PAUSE_SIGMA * p_std), 1),
+            "length_mean_s": round(float(np.mean(lengths)), 1) if lengths else None,
+            "long_length_s": round(float(np.mean(lengths)) * LENGTH_FACTOR, 1) if lengths else None}
+
+
+def train_recommendation(g: dict, stats: dict | None, first_episode: bool = False) -> dict:
+    """one_shot (priority 1): one grasp, no long stop, normal task time
+    recovery (priority 2): two grasps, no long stop, normal task time
+    wandering (not recommended): 3+ grasps, a long stop, or a task time (until the release) longer
+    than LENGTH_FACTOR x the demos' mean"""
+    stats = stats or {}
+    n = g.get("grasp_count") or 0
+    pause = g.get("max_pause_s") or 0.0
+    length = g["gripper_release_s"] if g.get("gripper_release_s") is not None else (g.get("length_s") or 0.0)
+    long_pause = pause > (stats.get("long_pause_s") or 1e9)
+    long_len = stats.get("long_length_s") is not None and length > stats["long_length_s"]
+    if n >= 3 or long_pause or long_len or n == 0:
+        rec, prio = "wandering", None
+    elif n == 1:
+        rec, prio = "one_shot", 1
+    else:
+        rec, prio = "recovery", 2
+    reason = f"잡기 {n}회 · 멈춤 {pause:.1f}s · 놓기까지 {length:.1f}s"
+    if first_episode:
+        # the first attempt of a run starts with the safe start (slow, 30% output approach), which no
+        # human demo contains: at most priority 2
+        reason += " · 안전 시작 포함"
+        if prio == 1:
+            prio = 2
+    return {"train_rec": rec, "train_rec_priority": prio, "train_rec_reason": reason}
+
+
+def demo_release_pose(demo_grasps: list[dict]) -> list | None:
+    poses = [g["pose_at_release"] for g in demo_grasps if g.get("pose_at_release") is not None]
+    return [round(float(v), 1) for v in np.mean(poses, axis=0)] if poses else None
 
 
 def main() -> None:
@@ -191,6 +391,15 @@ def main() -> None:
             demo_starts.append(xy)
 
     report = {"demos": args.demos, "demo_episodes": len(dmeta), "attempts": []}
+    try:  # which model, by its folder (run id) and the team display name
+        import omx_names
+
+        first = args.evals[0]
+        note = json.loads((DATA_HOME / first.split("/")[0] / ".omx_notes" / f"{first.split('/')[1]}.json").read_text())
+        report["model"] = note.get("run_id")
+        report["model_display"] = omx_names.display_name(note.get("run_id"))
+    except Exception:
+        pass
     attempts_tracks, base_img, k = [], None, 0
     for repo in args.evals:
         root = DATA_HOME / repo
@@ -222,8 +431,10 @@ def main() -> None:
                 d = np.linalg.norm(np.array(demo_starts) - np.array(start_xy), axis=1)
                 item["start_offset_from_nearest_demo_px"] = round(float(d.min()), 1)
             if data is not None and not row.get("unfinished"):
-                track = np.stack(data[data.episode_index == ep]["observation.state"].to_numpy())
+                rows_ep = data[data.episode_index == ep]
+                track = np.stack(rows_ep["observation.state"].to_numpy())
                 item.update(grasp_info(track, fps))
+                item["smoothness"] = smoothness(track, np.stack(rows_ep["action"].to_numpy()) if "action" in rows_ep else None, fps)
                 attempts_tracks.append((f"#{k} {Path(repo).name} ep{ep}", track))
             else:
                 item["joint_data"] = "missing (dataset was not finalized)"
@@ -243,12 +454,26 @@ def main() -> None:
         cv2.imwrite(str(out / "start_map.jpg"), m, [cv2.IMWRITE_JPEG_QUALITY, 85])
 
     demo_grasps = [grasp_info(t, fps) for t in demo_tracks]
+    closed = [g for g in demo_grasps if g["gripper_close_s"] is not None]
+
+    def mean(key, items):
+        vals = [g[key] for g in items if g[key] is not None]
+        return round(float(np.mean(vals)), 1) if vals else None
+
+    report["smoothness_mean"] = mean_smoothness([a.get("smoothness") for a in report["attempts"]])
+    report["smoothness_note"] = ("stop_frac: 활성 구간(첫~마지막 움직임)에서 속도 <1u/s 프레임 비율, accel: 평균 |가속도| "
+                                 "(상태 2차 차분 x fps², 팔 5축 합, u/s²), cmd_jump: 명령 1차 차분이 중앙값x4+1보다 큰 비율")
     report["demo_summary"] = {
-        "length_s_mean": round(float(np.mean([g["length_s"] for g in demo_grasps])), 1),
-        "gripper_close_s_mean": round(float(np.mean([g["gripper_close_s"] for g in demo_grasps])), 1),
-        "pose_at_close_mean": [round(float(v), 1) for v in np.mean([g["pose_at_close"] for g in demo_grasps], axis=0)],
-        "pose_at_close_std": [round(float(v), 1) for v in np.std([g["pose_at_close"] for g in demo_grasps], axis=0)],
-        "idle_s_mean": round(float(np.mean([g["idle_s"] for g in demo_grasps])), 1),
+        "length_s_mean": mean("length_s", demo_grasps),
+        "gripper_close_s_mean": mean("gripper_close_s", closed),
+        "gripper_release_s_mean": mean("gripper_release_s", closed),
+        "closed_value_mean": mean("closed_value", closed),
+        "grasp_count_mean": mean("grasp_count", demo_grasps),
+        "demos_without_close": len(demo_grasps) - len(closed),
+        "pose_at_close_mean": [round(float(v), 1) for v in np.mean([g["pose_at_close"] for g in closed], axis=0)] if closed else None,
+        "pose_at_close_std": [round(float(v), 1) for v in np.std([g["pose_at_close"] for g in closed], axis=0)] if closed else None,
+        "idle_s_mean": mean("idle_s", demo_grasps),
+        "grasp_thresholds": {"open": GRIP_OPEN, "closed": GRIP_CLOSED, "empty_below": GRIP_EMPTY},
         "strawberry_starts_px": demo_starts,
     }
     if attempts_tracks:
