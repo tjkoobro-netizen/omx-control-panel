@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OMX Control Panel v2.1.0 - GPU 노트북 설치 (로봇과 카메라가 연결된 노트북에서, 제어판을 쓸 각 계정으로 실행)
+# OMX Control Panel v2.2.0 - GPU 노트북 설치 (로봇과 카메라가 연결된 노트북에서, 제어판을 쓸 각 계정으로 실행)
 #
 #   bash install_gpu.sh            질문에 답하며 설치
 #   bash install_gpu.sh --yes      감지한 값/기본값으로 자동 설치
@@ -15,7 +15,7 @@
 # sudo가 필요한 일은 직접 하지 않고, 실행할 명령을 안내합니다.
 set -uo pipefail
 
-VERSION=2.1.0
+VERSION=2.2.0
 PKG="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 TARGET="$HOME/il_ws/src/omx_tools"
 CONF_DIR="$HOME/.config/omx"

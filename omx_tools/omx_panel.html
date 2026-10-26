@@ -442,7 +442,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v2.1.0</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v2.2.0</span></div>
       </div>
     </div>
     <div class="status">
@@ -584,6 +584,16 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <div id="setupCams" style="display:grid;gap:6px"></div>
         <div class="row"><button class="primary" type="button" id="setupSave">저장하고 점검</button><button type="button" id="setupCancel">취소</button></div>
       </div>
+    </section>
+
+    <section class="panel" id="syncPanel" hidden>
+      <div class="panel-head">
+        <h2>GPU 전송</h2>
+        <div class="row" style="gap:6px"><span class="pill" id="syncState">확인 중</span>
+          <button type="button" id="syncAll" hidden>모두 다시 보내기</button></div>
+      </div>
+      <p class="meta-line muted" style="margin:0">녹화·평가 데이터는 이 PC에 먼저 저장되고, 끝나면 GPU 노트북 공유 폴더로 보냅니다. 못 보낸 것은 연결되면 1분 안에 자동으로 다시 보냅니다.</p>
+      <ul class="checks" id="syncList"></ul>
     </section>
 
     <section class="panel">
@@ -1769,6 +1779,7 @@ function render(s) {
 
   // only the visible tab streams (two cameras = two of the browser's six connections)
   if (s.cameras) buildCamFrames(s.cameras);
+  renderSync(s);
   setStreams($("tab-collect").hidden ? false : s.preview ? "preview" : s.live ? "live" : false);
   renderEval(s);
   $("camState").textContent = s.preview ? "켜짐" : "꺼짐";
@@ -1926,6 +1937,35 @@ $("checkBtn").addEventListener("click", async () => {
   } catch (e) { $("checks").innerHTML = `<li class="muted">${e.message}</li>`; }
   $("checkBtn").disabled = false;
 });
+
+// ---- control PC: copies to the GPU laptop that are still to go ----
+let syncSig = "";
+function renderSync(s) {
+  const panel = $("syncPanel");
+  if (s.role !== "control" || !s.sync) { panel.hidden = true; return; }
+  panel.hidden = false;
+  const y = s.sync, sig = JSON.stringify(y);
+  if (sig === syncSig) return;
+  syncSig = sig;
+  const esc = (t) => String(t ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const KO = { new: ["warn", "아직 안 보냄"], failed: ["bad", "전송 실패"], blocked: ["bad", "같은 이름 있음"], ok: ["warn", "바뀐 부분 있음"] };
+  const n = y.pending.length;
+  $("syncState").textContent = !y.link ? "GPU 연결 안 됨" : y.busy.length ? "보내는 중" : n ? `${n}개 남음` : "모두 전송됨";
+  $("syncState").className = "pill " + (!y.link || y.pending.some(p => p.status === "failed" || p.status === "blocked") ? "bad" : n || y.busy.length ? "warn" : "ok");
+  $("syncAll").hidden = !n;
+  const rows = y.busy.map(r => `<li><span class="pill warn">보내는 중</span><span class="mono">${esc(r)}</span></li>`)
+    .concat(y.pending.filter(p => !y.busy.includes(p.repo_id)).map(p => {
+      const [cls, label] = KO[p.status] || ["warn", p.status];
+      return `<li><span class="pill ${cls}">${label}</span><span><span class="mono">${esc(p.repo_id)}</span>${p.error ? `<br><span class="muted" style="font-size:12px">${esc(p.error)}</span>` : ""}</span>
+        <button type="button" data-sync="${esc(p.repo_id)}" style="height:26px;font-size:12px;margin-left:auto">다시 보내기</button></li>`;
+    }));
+  $("syncList").innerHTML = rows.join("") || `<li class="muted">${y.last_auto ? "최근: " + esc(y.last_auto) : "모든 데이터가 GPU 노트북에 있습니다."}</li>`;
+}
+$("syncList").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-sync]");
+  if (b) act(() => api("/api/sync", { repo_id: b.dataset.sync }), "GPU 노트북으로 다시 보냅니다.");
+});
+$("syncAll").addEventListener("click", () => act(() => api("/api/sync", {}), "남은 데이터를 모두 GPU 노트북으로 보냅니다."));
 
 // ---- robot setup: one arm or a cooperative pair, robot sets and camera roles with labels ----
 const setup = { data: null };

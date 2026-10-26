@@ -396,6 +396,84 @@ def camera_stats() -> dict:
     return {}
 
 
+# ---- Control PC: copies to the GPU laptop that did not go through (network down at the end of a run) ----
+SYNC = {"busy": set(), "lock": threading.Lock(), "cache": (0.0, []), "last_auto": ""}
+
+
+def sync_one(root: Path, note: Path | None, lines: list | None = None) -> bool:
+    """One dataset at a time (the end of a run, the retry loop and the button never copy it twice at once)."""
+    key = str(root)
+    with SYNC["lock"]:
+        if key in SYNC["busy"]:
+            return False
+        SYNC["busy"].add(key)
+    try:
+        return remote.sync_with_state(root, note, lines)
+    finally:
+        SYNC["busy"].discard(key)
+        SYNC["cache"] = (0.0, [])
+
+
+def local_runs() -> list[Path]:
+    """Recordings and evaluations made on this PC (they all belong on the GPU laptop)."""
+    base = DATA_HOME / USER
+    return sorted(p for p in base.iterdir() if p.is_dir() and not p.name.startswith(".")) if base.exists() else []
+
+
+def running_repo_root() -> Path | None:
+    return DATA_HOME / JOB.info["repo_id"] if JOB.running() and JOB.info.get("repo_id") else None
+
+
+def sync_status() -> dict:
+    """What is not on the GPU laptop yet (cached 10 s for the status poll)."""
+    t, items = SYNC["cache"]
+    if time.time() - t > 10:
+        items, now_root = [], running_repo_root()
+        for root in local_runs():
+            if root == now_root or not remote.needs_sync(root):
+                continue
+            st = remote.sync_state(root)
+            items.append({"repo_id": f"{USER}/{root.name}", "status": st.get("status") or "new",
+                          "error": st.get("error", ""), "at": st.get("at", "")})
+        SYNC["cache"] = (time.time(), items)
+    busy = [f"{USER}/{Path(k).name}" for k in SYNC["busy"]]
+    return {"pending": items, "busy": busy, "link": remote.TUNNEL.status()["ok"], "last_auto": SYNC["last_auto"]}
+
+
+def sync_retry(repo: str = "") -> dict:
+    """[다시 보내기]: one dataset, or every one that is not there yet (blocked ones too, on request)."""
+    if not remote.TUNNEL.status()["ok"]:
+        raise RuntimeError("GPU 노트북에 연결되지 않아 보낼 수 없습니다. Tailscale 연결을 확인하세요.")
+    roots = [DATA_HOME / repo] if repo else [r for r in local_runs() if remote.needs_sync(r)]
+    now_root = running_repo_root()
+    roots = [r for r in roots if r.exists() and r != now_root and r.is_relative_to(DATA_HOME / USER)]
+    if not roots:
+        raise RuntimeError("보낼 데이터가 없습니다.")
+    for root in roots:
+        remote.sync_later(sync_one, root, notes_path(f"{USER}/{root.name}"))
+    SYNC["cache"] = (0.0, [])
+    return {"ok": True, "started": [f"{USER}/{r.name}" for r in roots]}
+
+
+def sync_loop() -> None:
+    """Every minute, while the GPU laptop is reachable: send what is new or failed (not 'blocked': a dataset
+    of the same name from somewhere else is there, that needs a person)."""
+    while True:
+        time.sleep(60)
+        try:
+            if not remote.TUNNEL.status()["ok"]:
+                continue
+            now_root = running_repo_root()
+            for root in local_runs():
+                if root == now_root or not remote.needs_sync(root) or remote.sync_state(root).get("status") == "blocked":
+                    continue
+                if sync_one(root, notes_path(f"{USER}/{root.name}")):
+                    SYNC["last_auto"] = f"{dt.datetime.now():%H:%M} {USER}/{root.name} 자동 전송"
+                    print(f"[omx] sync: {USER}/{root.name} 자동 전송 완료", flush=True)
+        except Exception as exc:
+            print(f"[omx] sync: 자동 전송 중 오류 ({exc})", flush=True)
+
+
 def merged_datasets() -> list[dict]:
     """Control PC: the team's datasets on the GPU laptop (training uses those), plus the ones recorded here
     that are not there yet (marked local)."""
@@ -963,9 +1041,7 @@ class Job:
 
                 def push():
                     lines.append("[omx] sync: GPU 노트북 공유 폴더로 보내는 중...")
-                    remote.sync_dataset(root, lines)
-                    if note.exists():
-                        remote.sync_note(note)
+                    sync_one(root, note, lines)
                 remote.sync_later(push)
             if CFG.get("team_group"):
                 self.lines.append(f"[omx] dataset shared with group {CFG['team_group']} (read/write)")
@@ -2088,6 +2164,7 @@ class Handler(BaseHTTPRequestHandler):
                 "datasets": merged_datasets() if CONTROL else list_datasets(),
                 "data_home": str(DATA_HOME),
                 "role": "control" if CONTROL else "gpu",
+                "sync": sync_status() if CONTROL else None,
                 "gpu_link": remote.TUNNEL.status() if CONTROL else None,
                 "hf_user": UPLOADER.hf_login(),
                 "upload": UPLOADER.status(),
@@ -2286,6 +2363,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(run_check())
             elif self.path == "/api/robot_setup":
                 self._json(save_setup(body))
+            elif self.path == "/api/sync" and CONTROL:
+                self._json(sync_retry(str(body.get("repo_id") or "")))
             elif self.path == "/api/preview":
                 if body.get("on"):
                     if JOB.running() and JOB.kind in ("record", "eval"):
@@ -2413,6 +2492,7 @@ def main() -> None:
     server.daemon_threads = True
     if CONTROL:
         remote.TUNNEL.start()
+        threading.Thread(target=sync_loop, daemon=True).start()
         print(f"[omx] control PC: training and inference on {remote.HOST} (SSH tunnel)", flush=True)
     else:
         start_inference_server()

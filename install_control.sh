@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OMX Control Panel v2.1.0 - 제어 PC 설치 (팀원 각자의 우분투 PC, 로봇팔·카메라를 연결하는 PC)
+# OMX Control Panel v2.2.0 - 제어 PC 설치 (팀원 각자의 우분투 PC, 로봇팔·카메라를 연결하는 PC)
 #
 #   bash install_control.sh
 #
@@ -17,7 +17,7 @@
 # 다시 실행해도 됩니다: 이미 된 단계는 확인만 하고 넘어갑니다. 설정은 백업 후 유지합니다.
 set -uo pipefail
 
-VERSION=2.1.0
+VERSION=2.2.0
 LEROBOT_COMMIT=8fff0fde7c79f23a93d845d1a50e985de01f8b8a  # the team's LeRobot 0.4.4 (same as the GPU laptop)
 PKG="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 ALIAS=omx-gpu

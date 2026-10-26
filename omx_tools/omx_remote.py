@@ -198,12 +198,66 @@ def sync_dataset(local_root: Path, lines: list | None = None) -> bool:
             lines.append(f"[omx] sync: {msg}")
         raise RuntimeError(msg)
     (local_root / ".omx_origin").write_text(origin_tag())
-    r = subprocess.run(["rsync", "-a", "--chmod=Dug+rwx,Fug+rw", "-e", "ssh " + " ".join(SSH_OPTS),
+    r = subprocess.run(["rsync", "-a", "--chmod=Dug+rwx,Fug+rw", f"--exclude={SYNC_STATE}", "-e", "ssh " + " ".join(SSH_OPTS),
                         f"{local_root}/", f"{HOST}:{remote}/"], capture_output=True, text=True, timeout=3600)
     if r.returncode != 0:
         raise RuntimeError(f"데이터 전송 실패: {r.stderr.strip()[-200:]}")
     if lines is not None:
         lines.append(f"[omx] sync: GPU 노트북 공유 폴더로 보냈습니다 ({user}/{name})")
+    return True
+
+
+# ---------------------------------------------------------------- what is not on the GPU laptop yet
+SYNC_STATE = ".omx_sync.json"  # in each local dataset folder (never copied over)
+
+
+def data_mtime(root: Path) -> float:
+    """Latest change of a dataset (episodes are added to data/, videos/ and meta/)."""
+    latest = 0.0
+    for sub in ("meta", "data", "videos"):
+        for p in (root / sub).rglob("*"):
+            try:
+                latest = max(latest, p.stat().st_mtime)
+            except OSError:
+                pass
+    return latest
+
+
+def sync_state(root: Path) -> dict:
+    try:
+        return json.loads((root / SYNC_STATE).read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def needs_sync(root: Path) -> bool:
+    if not (root / "meta/info.json").exists():  # not a dataset (yet)
+        return False
+    st = sync_state(root)
+    return st.get("status") != "ok" or data_mtime(root) > st.get("data_mtime", 0)
+
+
+def mark_sync(root: Path, status: str, error: str = "", mtime: float | None = None) -> None:
+    import datetime as dt
+
+    (root / SYNC_STATE).write_text(json.dumps({"status": status, "error": error[:300], "data_mtime": mtime or 0.0,
+                                                "at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}, ensure_ascii=False))
+
+
+def sync_with_state(root: Path, note: Path | None, lines: list | None = None) -> bool:
+    """Copy a dataset (and its notes) and remember how it went: ok, failed (tried again later) or
+    blocked (a dataset of the same name from somewhere else is there: only on request)."""
+    mtime = data_mtime(root)
+    try:
+        sync_dataset(root, lines)
+        if note is not None and note.exists():
+            sync_note(note)
+    except RuntimeError as exc:
+        mark_sync(root, "blocked" if "이미 있어" in str(exc) else "failed", str(exc), mtime)
+        if lines is not None and "이미 있어" not in str(exc):
+            lines.append(f"[omx] sync: 보내지 못했습니다 ({exc}). 연결되면 자동으로 다시 보냅니다.")
+        return False
+    mark_sync(root, "ok", "", mtime)
     return True
 
 

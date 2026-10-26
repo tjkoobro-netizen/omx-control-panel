@@ -1,4 +1,4 @@
-# OMX Control Panel v2.1.0 설치 매뉴얼
+# OMX Control Panel v2.2.0 설치 매뉴얼
 
 > **팀원 제어 PC(로봇팔·카메라를 내 PC에 연결)는 [docs/install_control.html](docs/install_control.html)을 따라 `bash install_control.sh` 하나로 설치합니다.** 아래는 GPU 노트북 관리자용 설치와 예전 방식(GPU 노트북에 로봇 연결) 안내입니다.
 
@@ -34,7 +34,7 @@ OMX-AI 로봇팔(리더·팔로워)이 연결된 **GPU 노트북**을, 각자 �
 
 **관리자**는 GPU 노트북에 sudo 권한이 있는 사람(보통 노트북 주인)입니다. 팀원은 GPU 노트북에 **자기 계정**이 있어야 합니다.
 
-### 패키지 구성 (`omx_panel_v2.1.0.zip`)
+### 패키지 구성 (`omx_panel_v2.2.0.zip`)
 
 | 파일 | 어디서 쓰나 | 역할 |
 |---|---|---|
@@ -166,9 +166,9 @@ sudo reboot
 GPU 노트북에서 zip을 받아 풀거나, 개인 PC에서 복사합니다.
 ```bash
 # 개인 PC에서 (Tailscale 연결 후)
-scp omx_panel_v2.1.0.zip <내계정>@<GPU 노트북 100.x 주소>:~
+scp omx_panel_v2.2.0.zip <내계정>@<GPU 노트북 100.x 주소>:~
 # GPU 노트북에서
-unzip -o ~/omx_panel_v2.1.0.zip -d ~ && cd ~/omx_panel_v2.1.0
+unzip -o ~/omx_panel_v2.2.0.zip -d ~ && cd ~/omx_panel_v2.2.0
 ```
 
 ### 3-2. 설치 실행
@@ -220,7 +220,7 @@ nano ~/.config/omx/config.json                              # 직접 고친 뒤:
 > **[개인 PC · 내 계정]** Ubuntu 개인 PC 기준입니다. Windows·macOS는 [부록 A](#부록-a-windows--macos-개인-pc에서-연결)를 보세요.
 
 ```bash
-unzip -o omx_panel_v2.1.0.zip && cd omx_panel_v2.1.0
+unzip -o omx_panel_v2.2.0.zip && cd omx_panel_v2.2.0
 bash install_laptop.sh
 ```
 
