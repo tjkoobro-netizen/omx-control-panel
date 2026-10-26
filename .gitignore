@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# ROS2 colcon build output
+build/
+install/
+log/
+
+# LeRobot datasets, checkpoints, logs (too large for git; use Hugging Face Hub)
+outputs/
+datasets/
+checkpoints/
+omx_logs/
+*.pt
+*.pth
+*.safetensors
+
+# Release archives (use git tags instead)
+*.zip
+
+# Secrets
+.env
+*.token
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
