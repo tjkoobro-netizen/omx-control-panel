@@ -4,7 +4,7 @@
 
 OMX-AI 로봇팔(리더·팔로워)이 연결된 **GPU 노트북**을, 각자 들고 다니는 **개인 PC**의 브라우저에서 클릭으로 다루는 도구입니다. 데이터 수집(텔레옵·녹화·다시보기), 학습(ACT·Diffusion), 평가(모델로 로봇 실행·분석)를 한 화면에서 합니다. 학원 밖에서도 **Tailscale**로 GPU 노트북에 접속합니다.
 
-- 대상: Ubuntu 22.04/24.04, LeRobot v0.4.4, OMX-AI (OpenRB-150 보드, 팔로워 모터 ID 11~16, 리더 1~6)
+- 대상: Ubuntu 24.04(22.04는 Python 3.12 추가 설치), LeRobot v0.6.1 + Python 3.12, OMX-AI (OpenRB-150 보드, 팔로워 모터 ID 11~16, 리더 1~6)
 - 걸리는 시간: Tailscale·SSH 20분, GPU 노트북 설치 10분 (LeRobot이 없으면 +30분), 개인 PC 설치 5분
 
 ---
@@ -108,9 +108,9 @@ sudo usermod -aG dialout,video <팀원계정>     # dialout = 로봇 포트, vid
 
 ### 2-3. 패키지
 ```bash
-sudo apt install -y git v4l-utils acl curl python3.10 python3.10-venv python3.10-dev
+sudo apt install -y git v4l-utils acl curl python3.12 python3.12-venv python3.12-dev
 ```
-Ubuntu 24.04에 `python3.10`이 없으면 먼저 저장소를 추가합니다: `sudo add-apt-repository ppa:deadsnakes/ppa -y && sudo apt update`
+Ubuntu 22.04에는 `python3.12`가 없어 먼저 저장소를 추가합니다: `sudo add-apt-repository ppa:deadsnakes/ppa -y && sudo apt update` (24.04는 기본 포함)
 
 ### 2-4. GPU 드라이버 확인
 ```bash
@@ -352,26 +352,27 @@ rm -rf ~/.local/share/omx ~/.config/omx ~/.local/bin/omx-panel ~/.local/share/ap
    브라우저에서 `http://127.0.0.1:8766`을 엽니다.
 4. **VS Code Remote-SSH**를 쓰면 더 간단합니다. GPU 노트북에 접속한 뒤 터미널에서 `omx-panel`을 실행하고, **포트(Ports)** 탭에서 지구본 아이콘을 누릅니다.
 
-## 부록 B. 이 도구가 대신 처리하는 LeRobot v0.4.4 문제
-| 문제 | 처리 |
+## 부록 B. 제어판이 LeRobot 위에 더하는 것 (v3, LeRobot 0.6.1)
+v3는 텔레옵·녹화·평가 루프를 `omx_run.py`가 직접 돌립니다. LeRobot에서는 로봇·리더 클래스, 카메라, 데이터셋(표준 v3.0 형식), 정책만 가져다 씁니다. 0.6.1의 `lerobot-record`는 리더로 녹화만 하고, 정책 실행은 `lerobot-rollout`으로 옮겨졌기 때문입니다.
+| 필요한 것 | 처리 |
 |---|---|
-| 녹화가 끝날 때 영상 저장 단계에서 멈춤 (카메라 2대 동시 인코딩) | 녹화 래퍼가 안전한 방식(spawn)으로 인코딩 |
-| 리더 없이 정책을 평가할 때 원위치 시간이 끝나지 않음 | 래퍼가 원위치 시간을 직접 계산 |
-| 원위치 시간에 녹화를 끝내면 빈 에피소드 저장 에러 | 빈 에피소드는 건너뜀 |
-| 텔레옵·녹화를 시작하면 팔로워가 리더 자세로 전속력·최대 힘으로 이동 (손목 링크 파손 사례) | 안전 시작: 시작 자세로 들기 → 그리퍼 닫기 → 출력 40%로 천천히 접근 |
+| 텔레옵·녹화를 시작하면 팔로워가 리더 자세로 전속력·최대 힘으로 이동 (손목 링크 파손 사례) | 안전 시작: 시작 자세로 들기 → 그리퍼 닫기 → 출력을 줄여 천천히 접근. 녹화는 따라잡은 뒤 시작 |
 | 정지하면 토크가 바로 꺼져 팔이 떨어짐 | 안전 정지: 끝 자세로 이동 → 출력을 서서히 줄인 뒤 토크 끄기 |
-| `--dataset.episodes`로 일부만 학습하면 Diffusion이 깨짐 | 뺄 에피소드를 지운 학습용 데이터셋을 새로 만들어 학습 |
+| 평가 중 위험할 때 | 즉시 중단(처음 자세로 복귀), 비상 정지(제자리 유지 → [홈 위치로 이동]), 중단된 시도도 기록 |
+| 에피소드마다 영상 저장으로 원위치 시간이 길어짐 | 녹화하면서 영상 압축(streaming encoding, 카메라당 스레드 2개) |
+| GPU가 없는 제어 PC에서 평가 | GPU 노트북 추론 서버(원격 추론) + 비동기 실행 |
+| 0.6.1 키보드 단축키가 다른 창의 글자(n·r·q)까지 받음 | 쓰지 않음. 제어판 버튼, 또는 터미널에 `next`/`rerecord`/`stop` 입력 |
+| `--dataset.episodes`로 일부만 학습하면 Diffusion이 깨지던 문제(0.4.4) | 뺄 에피소드를 지운 학습용 데이터셋을 새로 만들어 학습 |
 | 녹화 영상이 600 권한이라 다른 계정이 못 읽음 | 녹화 후 팀 그룹 읽기·쓰기 권한 설정 |
-| SSH·원격 실행에서 방향키 단축키가 안 됨 | 제어판 버튼, 또는 터미널에 `next`/`rerecord`/`stop` 입력 |
 
-## 부록 C. 터미널에서 직접 평가할 때 (제어판 없이)
+## 부록 C. 터미널에서 직접 평가할 때 (제어판 없이, 이 PC의 GPU로)
 ```bash
-source ~/venv/il/bin/activate && cd ~/il_ws/src/lerobot
-python ~/il_ws/src/omx_tools/omx_record.py \
+cd ~/il_ws/src/lerobot_v0.6.1
+~/venv/il3/bin/python ~/il_ws/src/omx_tools/omx_run.py \
   --robot.type=omx_follower --robot.port=<팔로워 포트> --robot.id=omx_follower_arm \
-  --robot.cameras="$(~/venv/il/bin/python -c 'import sys; sys.path.insert(0, "'$HOME'/il_ws/src/omx_tools"); import omx_config; print(omx_config.cameras_arg())')" \
+  --robot.cameras="$(~/venv/il3/bin/python -c 'import sys; sys.path.insert(0, "'$HOME'/il_ws/src/omx_tools"); import omx_config; print(omx_config.cameras_arg())')" \
   --policy.path=<모델 폴더>/pretrained_model \
   --dataset.repo_id=$USER/eval_test_$(date +%m%d_%H%M) --dataset.single_task="<학습 때 작업 문장>" \
-  --dataset.num_episodes=5 --dataset.episode_time_s=30 --dataset.reset_time_s=15 --dataset.push_to_hub=false
+  --dataset.num_episodes=5 --dataset.episode_time_s=30 --dataset.reset_time_s=15
 ```
 실행 중에는 `next`, `rerecord`, `stop`을 입력하고 Enter를 누릅니다.

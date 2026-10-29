@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Per-machine settings of the OMX panel, shared by every tool in this folder.
 
-The installer (install_gpu.sh) writes them to ~/.config/omx/config.json for each account on the
-GPU laptop. Lookup order: $OMX_CONFIG, ~/.config/omx/config.json, /etc/omx/config.json; missing
-keys fall back to DEFAULTS. Print the effective settings with:  python omx_config.py
+The installers write them to ~/.config/omx/v3/config.json for each account. v3 keeps its own
+settings, port, logs and folder (~/il_ws/omx_control_panel_v3) so it runs beside a v2 panel
+(~/.config/omx/config.json, ~/il_ws/src/omx_tools); both share the data folders and the robot lock.
+Lookup order: $OMX_CONFIG, ~/.config/omx/v3/config.json, /etc/omx/v3/config.json; missing keys fall
+back to DEFAULTS. Print the effective settings with:  python omx_config.py
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import socket
 import subprocess
 from pathlib import Path
 
-VERSION = "2.2.3"
+VERSION = "3.0.0"
 
 DEFAULTS: dict = {
     # shown in the panel header
@@ -43,10 +45,10 @@ DEFAULTS: dict = {
     "camera_width": 640,
     "camera_height": 480,
     "camera_fps": 30,
-    # Python environment with LeRobot v0.4.4
-    "venv": "~/venv/il",
-    # one panel server per account: port = port_base + uid - uid_base
-    "port_base": 8765,
+    # Python environment with LeRobot v0.6.1 (Python 3.12)
+    "venv": "~/venv/il3",
+    # one panel server per account: port = port_base + uid - uid_base (v2 uses 8765, so both can run)
+    "port_base": 8865,
     "uid_base": 1001,
     # v2: "gpu" = the GPU laptop (training, inference server, shared data; robots may be attached too),
     # "control" = a team member's PC with the robot (teleop, recording, eval) that uses the GPU laptop
@@ -54,16 +56,20 @@ DEFAULTS: dict = {
     "role": "gpu",
     "gpu_host": "omx-gpu",          # control: SSH alias of the GPU laptop (key login, set up by the installer)
     "gpu_user": "",                 # control: this person's account on the GPU laptop (dataset owner names)
-    "gpu_panel_port": 8765,         # control: that account's panel port on the GPU laptop
+    "gpu_panel_port": 8865,         # control: that account's v3 panel port on the GPU laptop
     "gpu_data_home": "/srv/il/lerobot_data",  # control: shared data folder on the GPU laptop
+    # server, run and training logs (v2 writes to ~/il_ws/omx_logs)
+    "log_dir": "~/il_ws/omx_control_panel_v3/logs",
 }
+
+CONF_DIR = Path("~/.config/omx/v3").expanduser()
 
 
 def config_paths() -> list[Path]:
     paths = []
     if os.environ.get("OMX_CONFIG"):
         paths.append(Path(os.environ["OMX_CONFIG"]).expanduser())
-    paths += [Path("~/.config/omx/config.json").expanduser(), Path("/etc/omx/config.json")]
+    paths += [CONF_DIR / "config.json", Path("/etc/omx/v3/config.json")]
     return paths
 
 
@@ -90,6 +96,19 @@ def path(key: str) -> Path:
 
 def venv_bin() -> Path:
     return path("venv") / "bin"
+
+
+def log_dir() -> Path:
+    return path("log_dir")
+
+
+def lerobot_dir() -> Path:
+    """LeRobot source checkout (the working directory of the robot and training runs)."""
+    home = Path.home()
+    for p in (home / "il_ws/src/lerobot_v0.6.1", home / "il_ws/src/lerobot", home / "dev/lerobot"):
+        if p.is_dir():
+            return p
+    return home
 
 
 def port(uid: int | None = None) -> int:

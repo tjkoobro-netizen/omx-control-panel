@@ -30,7 +30,7 @@ dropping. A force-quit (SIGKILL) skips this and leaves the torque on.
 Return home (policy evaluation, enabled by the panel with environment variables): the follower's
 pose when the run starts (read just before the first move, after the multi-turn fixes) is kept as
 "home". With OMX_STOP_POSE=home the safe stop goes back to that pose instead of the rest pose, and
-with OMX_RESET_HOME=1 omx_record.py also returns home at the start of every reset period between
+with OMX_RESET_HOME=1 omx_run.py also returns home at the start of every reset period between
 episodes. The arm moves first at capped output; with OMX_HOME_GRIPPER=open the gripper then opens
 slowly back to its starting value (only after the arm has arrived, so a held object is not
 dropped on the way). If a joint reads out of range (multi-turn misread) or is further than
@@ -55,7 +55,7 @@ import omx_config  # noqa: E402
 import threading  # noqa: E402
 
 ARM = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
-# 비상 정지 (omx_record.py, SIGUSR2): FREEZE stops any slow move and makes disconnect wait, holding the
+# 비상 정지 (omx_run.py, SIGUSR2): FREEZE stops any slow move and makes disconnect wait, holding the
 # arm (torque on), until RELEASE ([홈 위치로 이동] in the panel); then the usual return and safe stop.
 FREEZE, RELEASE = threading.Event(), threading.Event()
 PWM_MAX = 885  # X-series Goal_PWM full scale
@@ -136,7 +136,8 @@ def wrap(value: float) -> float:
 
 
 def _say(msg: str, what: str = "start") -> None:
-    print(f"[omx] safe {what}: {msg}", flush=True)
+    sys.stdout.write(f"[omx] safe {what}: {msg}\n")  # one write: lines from two threads stay apart
+    sys.stdout.flush()
 
 
 def _step(current: float, target: float, max_delta: float) -> float:
@@ -157,7 +158,7 @@ def go_home(robot, what: str = "stop", events: dict | None = None) -> bool:
     """Move the follower slowly back to the pose it had when the run started (see module doc).
 
     Returns True when it got there. The output stays capped (pwm_ratio); the caller restores it.
-    `events` (lerobot-record's dict) lets the panel's 다음으로/끝내기 cut the move short.
+    `events` (omx_run.py's dict) lets the panel's 다음으로/끝내기 cut the move short.
     what="start": the move to the standard home pose before a run (OMX_HOME_POSE); the gripper is
     then set to the home value (open or closed, as the training data started). On reset/stop the
     gripper only opens (OMX_HOME_GRIPPER=open), never closes, so a held object is not squeezed.
@@ -290,7 +291,7 @@ def set_pwm_all(robot, ratio: float) -> None:
 def _go_standard_home(robot) -> bool:
     """OMX_HOME_POSE=<json>: move to the standard home pose right after connecting (see omx_home.py).
 
-    Runs before lerobot-record starts the first episode, so the move is not in the recorded data.
+    Runs before omx_run.py starts the first episode, so the move is not in the recorded data.
     Same safeguards as the return home: range check (multi-turn misreads), home_max_gap, capped
     output, gripper only after the arm has arrived. If it cannot go, the run starts as before
     (from where the arm is) and says so.
@@ -475,7 +476,7 @@ def install() -> None:
     land_lock = threading.Lock()
 
     def disconnect(self, *args, **kwargs):
-        # 즉시 중단 may land the arm from another thread while lerobot-record is still saving;
+        # 즉시 중단 may land the arm from another thread while omx_run.py is still saving;
         # whoever comes second just finds the robot already disconnected.
         with land_lock:
             if not self.bus.is_connected:

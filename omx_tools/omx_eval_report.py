@@ -83,7 +83,7 @@ def joint_data(root: Path) -> pd.DataFrame | None:
 
 
 def backup_joint_data(root: Path) -> pd.DataFrame | None:
-    """Joint data from omx_record.py's backups (<owner>/.omx_backup/<dataset>/episode_*.npz)."""
+    """Joint data from omx_run.py's backups (<owner>/.omx_backup/<dataset>/episode_*.npz)."""
     files = sorted((root.parent / ".omx_backup" / root.name).glob("episode_*.npz"))
     frames = []
     for f in files:

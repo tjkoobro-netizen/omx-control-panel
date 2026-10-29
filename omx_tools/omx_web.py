@@ -3,7 +3,7 @@
 
 Runs on the GPU laptop and listens on 127.0.0.1 only. Laptops reach it through
 an SSH tunnel (see omx-control.sh), so the panel is never exposed on the Wi-Fi.
-Uses only the LeRobot v0.4.4 environment and the Python stdlib. Machine-specific settings
+Uses only the LeRobot environment (v3: 0.6.1) and the Python stdlib. Machine-specific settings
 (ports, cameras, shared folders) come from omx_config.py / ~/.config/omx/config.json.
 """
 
@@ -54,9 +54,9 @@ HOME = Path.home()
 USER = (omx_config.CFG.get("gpu_user") if omx_config.is_control() else "") or getpass.getuser()
 VENV_BIN = omx_config.venv_bin()
 # Working directory for LeRobot commands: the lecture layout, or the team guide's ~/dev/lerobot
-LEROBOT_DIR = next((p for p in (HOME / "il_ws/src/lerobot", HOME / "dev/lerobot") if p.is_dir()), HOME)
+LEROBOT_DIR = omx_config.lerobot_dir()
 TOOLS_DIR = Path(__file__).resolve().parent
-LOG_DIR = HOME / "il_ws/omx_logs"
+LOG_DIR = omx_config.log_dir()
 LOG_DIR.mkdir(parents=True, exist_ok=True)  # a new control PC has none yet
 # Team shared LeRobot home: calibration and datasets live here (child processes inherit it)
 os.environ["HF_LEROBOT_HOME"] = str(omx_config.path("data_home"))
@@ -76,11 +76,11 @@ TELEOP_ARGS = ["--teleop.type=omx_leader", f"--teleop.port={LEADER}", "--teleop.
 VIEWER_PORT = 9876
 
 # ---- Robot setup (v2.1): one arm, or two arms as one cooperative robot, chosen in the panel ----
-# ~/.config/omx/robot.json: {"mode": "single" | "bimanual", "single": {"set": "OMX 2"},
+# ~/.config/omx/v3/robot.json: {"mode": "single" | "bimanual", "single": {"set": "OMX 2"},
 #   "bimanual": {"left": "OMX 2", "right": "OMX 3"},
 #   "cameras": {"single": [{"name": "front", "path": "/dev/v4l/by-path/...", "label": "..."}, ...], "bimanual": [...]}}
 # Without the file (e.g. the GPU laptop) the configured follower/leader/cameras are used as before.
-SETUP_FILE = Path(os.environ.get("OMX_ROBOT_SETUP") or "~/.config/omx/robot.json").expanduser()
+SETUP_FILE = Path(os.environ.get("OMX_ROBOT_SETUP") or omx_config.CONF_DIR / "robot.json").expanduser()
 ROBOT_SETS = CFG.get("robot_sets") or {f"OMX {n}": {"follower": f"/dev/omx_follower_{n}", "leader": f"/dev/omx_leader_{n}"}
                                        for n in (1, 2, 3)}
 CAMERA_ROLES = {"single": ["front", "front_2", "wrist"], "bimanual": ["front", "front_2", "wrist_left", "wrist_right"]}
@@ -259,7 +259,7 @@ def other_robot_processes() -> list[str]:
         user, pid, args = (line.split(None, 2) + ["", ""])[:3]
         if pid in mine or "omx_web.py" in args:
             continue
-        if re.search(r"lerobot-(teleoperate|record)|omx_(record|teleop|return_home)\.py", args):
+        if re.search(r"lerobot-(teleoperate|record)|omx_(run|record|teleop|return_home)\.py", args):
             found.append(f"{user} (PID {pid})")
     return found
 
@@ -350,7 +350,7 @@ def kill_own_robot_processes() -> list[str]:
     killed = []
     for line in out.splitlines():
         pid, pgid, args = (line.split(None, 2) + ["", ""])[:3]
-        if "omx_web.py" in args or not re.search(r"lerobot-(teleoperate|record)|omx_(record|teleop|return_home)\.py", args):
+        if "omx_web.py" in args or not re.search(r"lerobot-(teleoperate|record)|omx_(run|record|teleop|return_home)\.py", args):
             continue
         try:
             os.killpg(int(pgid), signal.SIGKILL)
@@ -510,7 +510,7 @@ def list_datasets() -> list[dict]:
     return items
 
 
-# ---- Training (runs omx_train.py as an independent process; state in ~/il_ws/omx_logs) ----
+# ---- Training (runs omx_train.py as an independent process; state in <log_dir>) ----
 TRAIN_STATE = LOG_DIR / "train_state.json"
 CKPT_HOME = Path(os.environ.get("OMX_CHECKPOINTS", str(omx_config.path("checkpoints"))))
 
@@ -1002,7 +1002,7 @@ class Job:
             if TABLE_RE.match(line):
                 continue
             if m := SLOW_RE.search(line):
-                # lerobot-record warns on every slow loop iteration: count them instead of flooding the log view
+                # omx_run.py warns on every slow loop iteration: count them instead of flooding the log view
                 self.slow.append((time.time(), float(m.group(1))))
                 self.slow_total += 1
                 if self.log_file:
@@ -1037,7 +1037,7 @@ class Job:
         if self.kind == "eval" and self.info.get("repo_id") and proc.returncode != 0:
             remove_unstarted_eval(self.info["repo_id"], self.lines)
         if self.kind in ("record", "eval") and self.info.get("repo_id"):
-            # Also covers force-quit runs, where omx_record.py had no chance to do it itself
+            # Also covers force-quit runs, where omx_run.py had no chance to do it itself
             share_with_team(DATA_HOME / self.info["repo_id"])
             if CONTROL and (DATA_HOME / self.info["repo_id"]).exists():
                 # control PC: the recording / evaluation goes to the team's shared folder on the GPU laptop
@@ -1145,7 +1145,7 @@ class Job:
     def abort(self) -> str:
         """즉시 중단 (eval): stop the policy now and return the follower to the start pose.
 
-        SIGUSR1 makes omx_record.py leave the loop and land at once. If the safe stop has not
+        SIGUSR1 makes omx_run.py leave the loop and land at once. If the safe stop has not
         started within ABORT_WAIT_S (process stuck), or on a second press, the run is killed and
         omx_return_home.py brings the arm back from the saved start pose instead.
         """
@@ -1369,8 +1369,8 @@ def display_args(viewer_ip: str) -> list[str]:
 
 
 def start_teleop(body: dict) -> dict:
-    # omx_teleop.py = lerobot-teleoperate + safe start (lift, close gripper, slow approach at low power)
-    cmd = [str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_teleop.py"), *ROBOT_ARGS, *TELEOP_ARGS]
+    # omx_run.py without a dataset = teleop with the safe start (lift, close gripper, slow approach at low power)
+    cmd = [str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_run.py"), *ROBOT_ARGS, *TELEOP_ARGS]
     viewer_ip = body.get("viewer_ip", "").strip()
     if viewer_ip:
         PREVIEW.stop()  # cameras go to the teleop process for Rerun
@@ -1409,7 +1409,7 @@ def start_record(body: dict) -> dict:
     PREVIEW.stop()  # record needs the cameras itself
     fix_wrist_fps()
     cmd = [
-        str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_record.py"),
+        str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_run.py"),
         *ROBOT_ARGS, f"--robot.cameras={CAMS_ARG}", *TELEOP_ARGS,
         f"--dataset.repo_id={repo_id}", f"--dataset.single_task={task}",
         f"--dataset.num_episodes={episodes}", f"--dataset.episode_time_s={episode_s}",
@@ -1616,7 +1616,7 @@ def model_config(model_path: str) -> dict:
 
 
 def policy_eval_options(model_path: str, body: dict) -> tuple[list[str], dict, dict]:
-    """Policy-specific lerobot-record arguments, the async/RTC environment, and what was used.
+    """Policy-specific omx_run.py arguments, the async/RTC environment, and what was used.
 
     - ACT: smooth = temporal ensembling (every step), only without async execution.
     - Diffusion: inference steps (DDIM with fewer denoising steps, no retraining).
@@ -1881,7 +1881,7 @@ def start_eval(body: dict) -> dict:
     fix_wrist_fps()
     EVAL_HOME_FILE.unlink(missing_ok=True)  # written again by this run before its first move
     cmd = [
-        str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_record.py"),
+        str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_run.py"),
         *ROBOT_ARGS, f"--robot.cameras={CAMS_ARG}",
         f"--policy.path={local_model}",
         f"--dataset.repo_id={repo_id}", f"--dataset.single_task={task}",

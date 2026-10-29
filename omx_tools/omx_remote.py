@@ -29,7 +29,7 @@ CFG = omx_config.CFG
 HOST = CFG.get("gpu_host") or "omx-gpu"
 TUNNEL_PANEL = omx_config.port() + 30
 TUNNEL_INFER = omx_config.port() + 31
-REMOTE_PANEL = int(CFG.get("gpu_panel_port") or 8765)
+REMOTE_PANEL = int(CFG.get("gpu_panel_port") or 8865)
 REMOTE_INFER = REMOTE_PANEL + 25  # omx_infer.default_port() of that account
 SSH_OPTS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3"]
 MODEL_CACHE = Path("~/.cache/omx/models").expanduser()
@@ -162,7 +162,7 @@ def ssh_read(path: str, timeout: float = 30.0) -> bytes:
 
 
 def fetch_model(model_path: str) -> Path:
-    """Local copy of a model's config files (config.json, train_config.json): lerobot-record reads the
+    """Local copy of a model's config files (config.json, train_config.json): omx_run.py reads the
     policy settings from them; the weights are used only on the GPU laptop."""
     local = MODEL_CACHE / hashlib.sha1(model_path.encode()).hexdigest()[:16]
     local.mkdir(parents=True, exist_ok=True)

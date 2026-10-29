@@ -3,7 +3,7 @@
 
   python omx_train_queue.py            # run the plan: start waiting items one after another
 
-The plan lives in ~/il_ws/omx_logs/train_queue.json, so it survives panel restarts:
+The plan lives in <log_dir>/train_queue.json, so it survives panel restarts:
   {"paused": false, "runner": {"pid": 123, "status": "..."},
    "items": [{"id": "q...", "job": {...omx_train job...}, "status": "대기", ...}]}
 
@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import omx_config  # noqa: E402
 
 HOME = Path.home()
-LOG_DIR = HOME / "il_ws/omx_logs"
+LOG_DIR = omx_config.log_dir()
 QUEUE = LOG_DIR / "train_queue.json"
 QUEUE_LOCK = LOG_DIR / "train_queue.lock"
 RUNNER_LOCK = LOG_DIR / "train_queue.runner.lock"

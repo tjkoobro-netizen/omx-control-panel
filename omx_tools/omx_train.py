@@ -13,7 +13,7 @@ Steps
   2. lerobot-train into <checkpoints>/<user>/<policy>_<keyword>_<MMDD_HHMM>
   3. copy the final policy to <run>/pretrained_model, write summary.json and train.log,
      give the team group access, and refresh <checkpoints>/INDEX.md (folders from omx_config)
-Progress goes to ~/il_ws/omx_logs/train_state.json, which the panel reads. The job keeps running
+Progress goes to <log_dir>/train_state.json, which the panel reads. The job keeps running
 when the panel server restarts. SIGINT/SIGTERM stop the training (intermediate saves are kept).
 """
 
@@ -42,8 +42,8 @@ USER = os.environ.get("USER") or Path.home().name
 DATA_HOME = Path(os.environ["HF_LEROBOT_HOME"])
 CKPT_HOME = Path(os.environ.get("OMX_CHECKPOINTS", str(omx_config.path("checkpoints"))))
 VENV_BIN = omx_config.venv_bin()
-LEROBOT_DIR = next((p for p in (HOME / "il_ws/src/lerobot", HOME / "dev/lerobot") if p.is_dir()), HOME)
-LOG_DIR = HOME / "il_ws/omx_logs"
+LEROBOT_DIR = omx_config.lerobot_dir()
+LOG_DIR = omx_config.log_dir()
 STATE = LOG_DIR / "train_state.json"
 TRAIN_LOCK = omx_config.lock_dir() / "train.lock"
 TOOLS = Path(__file__).resolve().parent
@@ -206,8 +206,8 @@ def main() -> int:
         save_state(run_name=run_name, run_dir=str(run_dir))
 
         # 1) training data. Excluded episodes are removed into a new dataset rather than skipped with
-        #    --dataset.episodes: in LeRobot v0.4.4 that option breaks multi-frame policies (diffusion
-        #    indexes past the end of the subset).
+        #    --dataset.episodes (in LeRobot v0.4.4 that option broke multi-frame policies: diffusion
+        #    indexed past the end of the subset; kept this way, the training data is a plain dataset).
         edit = str(VENV_BIN / "lerobot-edit-dataset")
         has_eval = any(d.get("eval") for d in datasets)
         reuse = None if len(datasets) == 1 and not datasets[0].get("exclude") else find_reusable(datasets)
@@ -244,7 +244,7 @@ def main() -> int:
             if not parts:
                 raise RuntimeError("학습에 쓸 에피소드가 없습니다.")
             if len(pieces) > 1 or pieces[0] != train_repo:
-                rc = run_logged([edit, f"--repo_id={train_repo}", "--operation.type=merge",
+                rc = run_logged([edit, f"--new_repo_id={train_repo}", "--operation.type=merge",  # 0.6.1: the result is new_repo_id
                                  "--operation.repo_ids=" + json.dumps(pieces)])
                 if rc != 0 or stop_requested:
                     raise RuntimeError("데이터셋 합치기에 실패했습니다. 로그를 확인하세요 (카메라·fps 구성이 다른 데이터는 합칠 수 없습니다).")
@@ -276,7 +276,7 @@ def main() -> int:
                policy_arg, "--policy.device=cuda", "--policy.push_to_hub=false",
                f"--output_dir={run_dir}", f"--job_name={run_name}",
                f"--steps={int(job['steps'])}", f"--batch_size={int(job['batch_size'])}", f"--num_workers={int(job.get('num_workers', 8))}",
-               "--log_freq=100", f"--save_freq={max(int(job['steps']) // 4, 1000)}", "--eval_freq=0",
+               "--log_freq=100", f"--save_freq={max(int(job['steps']) // 4, 1000)}", "--env_eval_freq=0",
                "--wandb.enable=false"]
         if job.get("augmentation"):
             cmd.append("--dataset.image_transforms.enable=true")

@@ -1,27 +1,33 @@
 #!/usr/bin/env bash
-# OMX Control Panel v2.2.3 - GPU 노트북 설치 (로봇과 카메라가 연결된 노트북에서, 제어판을 쓸 각 계정으로 실행)
+# OMX Control Panel v3.0.0 - GPU 노트북 설치 (로봇과 카메라가 연결된 노트북에서, 제어판을 쓸 각 계정으로 실행)
 #
 #   bash install_gpu.sh            질문에 답하며 설치
 #   bash install_gpu.sh --yes      감지한 값/기본값으로 자동 설치
 #
 # 하는 일
 #   1. 환경 점검 (Ubuntu, GPU 드라이버, SSH 서버, dialout/video 그룹)
-#   2. LeRobot v0.4.4 가상환경 확인 (없으면 설치 여부를 묻습니다)
-#   3. 제어판 파일 복사 (~/il_ws/src/omx_tools) 와 omx-panel 명령 등록
+#   2. LeRobot v0.6.1 가상환경 확인 (Python 3.12, ~/venv/il3; 없으면 설치 여부를 묻습니다)
+#   3. 제어판 파일 복사 (~/il_ws/omx_control_panel_v3/omx_tools) 와 omx-panel-v3 명령 등록
 #   4. 로봇 포트 자동 감지 (모터 ID로 팔로워/리더 구분, 로봇은 움직이지 않음)
 #   5. 카메라 선택 (front, wrist)
 #   6. 데이터/모델 폴더 결정 (팀 공유 폴더 또는 개인 폴더)
-#   7. 설정 저장 (~/.config/omx/config.json) 후 제어판 서버 시작
+#   7. 설정 저장 (~/.config/omx/v3/config.json) 후 제어판 v3 서버 시작 (포트 8865부터)
+# v2 제어판(~/il_ws/src/omx_tools, ~/.config/omx/config.json)은 그대로 두고 옆에 설치합니다.
+# 처음 설치할 때 v2 설정을 시작값으로 복사합니다. 데이터·모델 폴더와 로봇·학습 잠금은 함께 씁니다.
 # sudo가 필요한 일은 직접 하지 않고, 실행할 명령을 안내합니다.
 set -uo pipefail
 
-VERSION=2.2.3
+VERSION=3.0.0
+LEROBOT_COMMIT=7e241bd630a3719a56157a497ce5d08f244784f1  # the team's LeRobot 0.6.1 (tag v0.6.1)
+LEROBOT_DIR="$HOME/il_ws/src/lerobot_v0.6.1"  # beside a v2 checkout (~/il_ws/src/lerobot, 0.4.4), which stays as it is
 PKG="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
-TARGET="$HOME/il_ws/src/omx_tools"
-CONF_DIR="$HOME/.config/omx"
+V3_HOME="$HOME/il_ws/omx_control_panel_v3"
+TARGET="$V3_HOME/omx_tools"
+CONF_DIR="$HOME/.config/omx/v3"
 CONF="$CONF_DIR/config.json"
 YES=0
 [ "${1:-}" = "--yes" ] && YES=1
+[ -t 0 ] || exec < /dev/null  # not at a terminal: questions take their defaults instead of waiting
 
 bold() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
@@ -61,6 +67,19 @@ for k in key.split("."):
 print(v if isinstance(v, str) else "")
 PYEOF
 }
+# v3 runs beside v2 with its own settings: start from the v2 settings (robots, cameras, folders) once
+if [ ! -f "$CONF" ] && [ -f "$HOME/.config/omx/config.json" ]; then
+  mkdir -p "$CONF_DIR"
+  python3 - "$HOME/.config/omx/config.json" "$CONF" <<'PYEOF'
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+for k in ("port_base", "gpu_panel_port", "venv", "log_dir"):  # v3 has its own port, environment and logs
+    cfg.pop(k, None)
+json.dump(cfg, open(sys.argv[2], "w"), ensure_ascii=False, indent=2)
+PYEOF
+  [ -f "$HOME/.config/omx/robot.json" ] && cp "$HOME/.config/omx/robot.json" "$CONF_DIR/robot.json"
+  echo "  v2 설정(~/.config/omx/config.json)을 v3 설정의 시작값으로 복사했습니다 (v2 설정은 그대로)."
+fi
 [ -f "$CONF" ] && echo "  기존 설정($CONF)이 있어 그 값을 기본값으로 씁니다."
 
 # ---------------------------------------------------------------- 1. 환경 점검
@@ -81,22 +100,25 @@ command -v tailscale >/dev/null && tailscale status >/dev/null 2>&1 && ok "Tails
 
 # ---------------------------------------------------------------- 2. LeRobot 환경
 bold "2/7 LeRobot 가상환경"
-ask "LeRobot 가상환경 위치" "$(prev venv || true)"
-[ -z "$REPLY" ] && REPLY="~/venv/il"
+PREV_VENV="$(prev venv || true)"
+[ "$PREV_VENV" = "~/venv/il" ] && PREV_VENV="~/venv/il3"  # v2's LeRobot 0.4.4 environment: v3 uses its own
+ask "LeRobot 가상환경 위치" "${PREV_VENV:-~/venv/il3}"
+[ -z "$REPLY" ] && REPLY="~/venv/il3"
 VENV_IN="$REPLY"; VENV="${VENV_IN/#\~/$HOME}"
 check_lerobot() { "$VENV/bin/python" -c "import lerobot, dynamixel_sdk, cv2; print(lerobot.__version__)" 2>/dev/null; }
 LR_VER="$(check_lerobot || true)"
 if [ -n "$LR_VER" ]; then
   ok "LeRobot $LR_VER ($VENV)"
-  [ "$LR_VER" = "0.4.4" ] || warn "제어판은 LeRobot 0.4.4 기준으로 만들고 시험했습니다. 다른 버전은 일부 기능이 다르게 동작할 수 있습니다."
+  [ "$LR_VER" = "0.6.1" ] || warn "제어판 v3는 LeRobot 0.6.1 기준으로 만들고 시험했습니다. 다른 버전은 일부 기능이 다르게 동작할 수 있습니다."
 else
   warn "$VENV 에 LeRobot이 없습니다."
-  if yesno "지금 LeRobot v0.4.4를 설치할까요? (torch 포함 약 4GB, 20~40분)" n; then
-    command -v python3.10 >/dev/null || { err "python3.10이 없습니다. 매뉴얼 '3-1 LeRobot 설치'의 sudo 명령을 먼저 실행하세요."; exit 1; }
+  if yesno "지금 LeRobot v0.6.1을 설치할까요? (torch 포함 약 6GB, 20~40분)" n; then
+    command -v python3.12 >/dev/null || { err "python3.12가 없습니다 (우분투 24.04 기본). 22.04라면 sudo apt install python3.12 python3.12-venv (deadsnakes) 후 다시 실행하세요."; exit 1; }
     mkdir -p "$(dirname "$VENV")" ~/il_ws/src
-    python3.10 -m venv "$VENV" && "$VENV/bin/pip" install -q --upgrade pip
-    [ -d ~/il_ws/src/lerobot ] || git clone -q --branch v0.4.4 https://github.com/huggingface/lerobot.git ~/il_ws/src/lerobot
-    (cd ~/il_ws/src/lerobot && "$VENV/bin/pip" install -e ".[dynamixel,smolvla]") || { err "LeRobot 설치 실패"; exit 1; }
+    python3.12 -m venv "$VENV" && "$VENV/bin/pip" install -q --upgrade pip
+    [ -d "$LEROBOT_DIR" ] || git clone -q https://github.com/huggingface/lerobot.git "$LEROBOT_DIR"
+    (cd "$LEROBOT_DIR" && git fetch -q origin --tags && git checkout -q "$LEROBOT_COMMIT") || warn "팀 기준 커밋으로 맞추지 못했습니다 (그대로 진행)"
+    (cd "$LEROBOT_DIR" && "$VENV/bin/pip" install -e ".[core_scripts,training,evaluation,dynamixel,diffusion,smolvla]") || { err "LeRobot 설치 실패"; exit 1; }
     LR_VER="$(check_lerobot || true)"; [ -n "$LR_VER" ] && ok "LeRobot $LR_VER 설치 완료" || { err "설치 확인 실패"; exit 1; }
   else
     err "LeRobot 없이는 제어판을 쓸 수 없습니다. 설치 후 다시 실행하세요."; exit 1
@@ -109,7 +131,7 @@ PY="$VENV/bin/python"
 if "$PY" -c "import transformers, num2words" 2>/dev/null; then
   ok "SmolVLA 패키지 있음 (transformers $("$PY" -c 'import transformers; print(transformers.__version__)'))"
 elif yesno "SmolVLA 학습·평가용 패키지를 설치할까요? (transformers 등, torch는 그대로)" n; then
-  (cd ~/il_ws/src/lerobot && "$VENV/bin/pip" install -q -e ".[smolvla]") && ok "SmolVLA 패키지 설치" || warn "SmolVLA 패키지 설치 실패 (ACT·Diffusion은 그대로 쓸 수 있음)"
+  (cd "$LEROBOT_DIR" && "$VENV/bin/pip" install -q -e ".[smolvla]") && ok "SmolVLA 패키지 설치" || warn "SmolVLA 패키지 설치 실패 (ACT·Diffusion은 그대로 쓸 수 있음)"
 fi
 if "$PY" -c "import transformers" 2>/dev/null && ! "$PY" -c "
 from huggingface_hub import snapshot_download
@@ -125,13 +147,13 @@ fi
 
 # ---------------------------------------------------------------- 3. 파일 복사
 bold "3/7 제어판 파일 설치 → $TARGET"
-mkdir -p "$TARGET" ~/.local/bin ~/il_ws/omx_logs "$CONF_DIR"
+mkdir -p "$TARGET" ~/.local/bin "$V3_HOME/logs" "$CONF_DIR"
 if [ "$(readlink -f "$PKG/omx_tools")" != "$(readlink -f "$TARGET")" ]; then
   cp -r "$PKG/omx_tools/." "$TARGET/"
 fi
 chmod +x "$TARGET"/*.sh "$TARGET"/*.py 2>/dev/null
-ln -sf "$TARGET/omx-panel-server.sh" ~/.local/bin/omx-panel
-ok "파일 $(ls "$TARGET" | wc -l)개, 명령 omx-panel 등록 (~/.local/bin, 다음 로그인부터 PATH에 포함)"
+ln -sf "$TARGET/omx-panel-server.sh" ~/.local/bin/omx-panel-v3
+ok "파일 $(ls "$TARGET" | wc -l)개, 명령 omx-panel-v3 등록 (~/.local/bin, 다음 로그인부터 PATH에 포함)"
 
 # ---------------------------------------------------------------- 4. 로봇 포트
 bold "4/7 로봇 포트 감지 (모터에 신호만 보내고 움직이지 않습니다)"
@@ -177,7 +199,7 @@ bold "5/7 카메라 선택"
 mapfile -t CAMS < <(ls /dev/v4l/by-id/*-video-index0 2>/dev/null)
 INTERNAL_RE='Integrated|True_Vision|Chicony|LG_Camera|FaceTime|Webcam|IR_Camera'
 if [ ${#CAMS[@]} -eq 0 ]; then
-  warn "연결된 카메라가 없습니다. 카메라 없이 설정하고, 나중에 ~/.config/omx/config.json 의 cameras를 고치세요."
+  warn "연결된 카메라가 없습니다. 카메라 없이 설정하고, 나중에 ~/.config/omx/v3/config.json 의 cameras를 고치세요."
 else
   i=1; for c in "${CAMS[@]}"; do
     tag=""; [[ "$(basename "$c")" =~ $INTERNAL_RE ]] && tag="  (노트북 내장 카메라로 보임)"
@@ -269,15 +291,15 @@ PYEOF
 ok "설정: $CONF"
 # Recording, teleop and evaluation run as children of the panel server (their output goes through it),
 # so a restart would cut them off. Training runs on its own (omx_train.py) and is not affected.
-if pgrep -u "$USER" -f "omx_record.py|omx_teleop.py|omx_return_home.py|lerobot-(record|teleoperate)" >/dev/null; then
-  warn "녹화·텔레옵·평가가 실행 중이라 서버를 재시작하지 않았습니다. 끝난 뒤 'omx-panel --restart'를 실행하세요."
+if pgrep -u "$USER" -f "omx_run.py|omx_record.py|omx_teleop.py|omx_return_home.py|lerobot-(record|teleoperate)" >/dev/null; then
+  warn "녹화·텔레옵·평가가 실행 중이라 서버를 재시작하지 않았습니다. 끝난 뒤 'omx-panel-v3 --restart'를 실행하세요."
 else
   "$TARGET/omx-panel-server.sh" --restart | sed 's/^/  /'
 fi
 PORT=$("$PY" -c "import sys; sys.path.insert(0, '$TARGET'); import omx_config; print(omx_config.port())")
 
 bold "설치 완료 (v$VERSION)"
-echo "  이 계정의 제어판 포트: $PORT   (설정 확인: $PY $TARGET/omx_config.py)"
+echo "  이 계정의 제어판 v3 포트: $PORT   (설정 확인: $PY $TARGET/omx_config.py)"
 echo "  이제 내 노트북에서 install_laptop.sh 를 실행하세요 (매뉴얼 4단계)."
 if [ ${#SUDO_TODO[@]} -gt 0 ]; then
   bold "관리자(sudo) 권한으로 해야 할 일"

@@ -20,6 +20,8 @@ import re
 import statistics
 from pathlib import Path
 
+import omx_config
+
 GiB = 1024 ** 3
 OBS_STEPS = {"act": 1, "diffusion": 2, "smolvla": 1}
 
@@ -152,7 +154,9 @@ def _log_rate(path: Path) -> dict | None:
 
 def step_seconds(policy: str, batch: int, workers: int, ckpt_home: Path) -> tuple[float | None, str]:
     # team runs next to the models, plus this account's own logs (also stopped or failed runs)
-    logs = list(ckpt_home.glob("*/*/train.log")) + list((Path.home() / "il_ws/omx_logs").glob("train_*.log"))
+    logs = list(ckpt_home.glob("*/*/train.log"))
+    for d in (omx_config.log_dir(), Path.home() / "il_ws/omx_logs"):  # v3 and v2 runs of this account
+        logs += list(d.glob("train_*.log"))
     rates = [r for r in (_log_rate(p) for p in logs) if r and r["policy"] == policy]
     same = [r["sec"] for r in rates if r["batch"] == batch and r["workers"] == workers]
     if same:

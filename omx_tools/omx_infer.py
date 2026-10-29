@@ -17,8 +17,8 @@ Wire format (POST /infer): 4-byte big-endian header length, JSON header, then th
            "obs": [{"state": [..], "images": {"observation.images.front": [offset, length], ...}}, ...],
            "chunk": int, "rtc": {"delay": int, "left": [[..], ..] | null} | null}
   reply:  {"actions": [[..]], "original": [[..]], "infer_ms": float, "load_ms": float}
-overrides: diffusion_steps (DDIM), n_action_steps (Diffusion async), rename_map (SmolVLA cameras),
-           rtc {"horizon", "weight"}.
+overrides: diffusion_steps (DDIM), n_action_steps, temporal_ensemble_coeff (ACT, every step),
+           rename_map (SmolVLA cameras), rtc {"horizon", "weight"}.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ import struct
 import sys
 import threading
 import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from contextlib import nullcontext
 from copy import copy
 from pathlib import Path
@@ -59,8 +59,10 @@ class PolicyRunner:
         cfg.device = self.device.type
         if cfg.type == "diffusion" and o.get("diffusion_steps"):
             cfg.noise_scheduler_type, cfg.num_inference_steps = "DDIM", int(o["diffusion_steps"])
-        if cfg.type == "diffusion" and o.get("n_action_steps"):
+        if o.get("n_action_steps"):
             cfg.n_action_steps = int(o["n_action_steps"])
+        if cfg.type == "act" and o.get("temporal_ensemble_coeff") is not None:
+            cfg.temporal_ensemble_coeff = float(o["temporal_ensemble_coeff"])
         self.cfg = cfg
         self.policy = get_policy_class(cfg.type).from_pretrained(model_path, config=cfg)
         self.policy.to(self.device).eval()
@@ -76,7 +78,26 @@ class PolicyRunner:
                                                       max_guidance_weight=float(o["rtc"].get("weight", 10.0)))
             self.policy.init_rtc_processor()
             self.rtc = True
+        self.rtc_capable = cfg.type in ("smolvla", "pi0", "pi05")
         self.lock = threading.Lock()
+
+    def reset(self) -> None:
+        """A new episode: forget the action queue / observation history kept inside the policy."""
+        with self.lock:
+            self.policy.reset()
+
+    def select(self, obs: dict, task: str | None, robot_type: str | None):
+        """Synchronous path, one action per control step (the policy's own queue, ACT temporal ensembling)."""
+        import torch
+
+        from lerobot.policies.utils import prepare_observation_for_inference
+
+        dev = self.device
+        amp = torch.autocast(device_type=dev.type) if dev.type == "cuda" and self.cfg.use_amp else nullcontext()
+        with self.lock, torch.inference_mode(), amp:
+            batch = self.pre(prepare_observation_for_inference(copy(obs), dev, task, robot_type))
+            action = self.policy.select_action(batch)
+            return self.post(action).squeeze(0).to("cpu")
 
     def image_size(self) -> list | None:
         """[height, width] the policy resizes camera frames to first (Diffusion resize_shape), so the control PC
@@ -86,7 +107,7 @@ class PolicyRunner:
 
     def infer(self, hist: list, task: str | None, robot_type: str | None, chunk: int,
               rtc_delay: int = 0, rtc_left=None):
-        """hist: observation frames (as lerobot-record builds them), oldest first. Returns (processed, original)
+        """hist: observation frames (as omx_run.py builds them), oldest first. Returns (processed, original)
         tensors on the CPU, shape (chunk, action_dim)."""
         import torch
 
@@ -281,6 +302,8 @@ class RemoteClient:
         self.conn = None
         self.image_size = None
         self.n_obs = 2
+        self.rtc_capable = True  # the server knows (it turns RTC off for other policies)
+        self.net: deque = deque(maxlen=20)  # round trip, server inference time, bytes sent
 
     def _post(self, path: str, payload: bytes) -> dict:
         import http.client
@@ -312,6 +335,7 @@ class RemoteClient:
             self.timeout, self.conn = old, None
         self.image_size = out.get("image_size")
         self.n_obs = int(out.get("n_obs") or 1)  # only Diffusion needs the observation before the latest
+        self.rtc_capable = out.get("type") in ("smolvla", "pi0", "pi05")
         return out
 
     def infer(self, hist: list, task, robot_type, chunk: int, rtc_delay: int = 0, rtc_left=None):
@@ -323,8 +347,8 @@ class RemoteClient:
                   "rtc": {"delay": rtc_delay, "left": rtc_left.tolist() if rtc_left is not None else None}}
         t = time.perf_counter()
         out = self._post("/infer", encode(header, blobs))
-        self.last = {"round_ms": (time.perf_counter() - t) * 1000, "infer_ms": out.get("infer_ms"),
-                     "bytes": sum(len(b) for b in blobs)}
+        self.net.append({"round_ms": (time.perf_counter() - t) * 1000, "infer_ms": out.get("infer_ms"),
+                         "bytes": sum(len(b) for b in blobs)})
         return (torch.tensor(out["actions"], dtype=torch.float32), torch.tensor(out["original"], dtype=torch.float32))
 
 

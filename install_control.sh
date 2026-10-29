@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OMX Control Panel v2.2.3 - 제어 PC 설치 (팀원 각자의 우분투 PC, 로봇팔·카메라를 연결하는 PC)
+# OMX Control Panel v3.0.0 - 제어 PC 설치 (팀원 각자의 우분투 PC, 로봇팔·카메라를 연결하는 PC)
 #
 #   bash install_control.sh
 #
@@ -9,23 +9,27 @@
 #   1. 필요한 시스템 패키지 확인 (없으면 설치, sudo)
 #   2. Tailscale 설치·로그인 확인
 #   3. GPU 노트북 고르기, SSH 키 등록 (GPU 노트북 내 계정 비밀번호를 한 번 물음)
-#   4. GPU 노트북의 내 계정에 제어판 v2 확인 (학습·추론 서버). 없거나 옛 버전이면 원격 설치
-#   5. LeRobot 환경 (~/venv/il, LeRobot 0.4.4 같은 버전) 확인·설치
+#   4. GPU 노트북의 내 계정에 제어판 v3 확인 (학습·추론 서버). 없거나 옛 버전이면 원격 설치
+#   5. LeRobot 환경 (~/venv/il3, Python 3.12 + LeRobot 0.6.1, GPU 노트북과 같은 버전) 확인·설치
 #   6. 로봇 장치 이름(OMX 1·2·3)과 USB 권한 (sudo)
 #   7. 제어판 설치, 제어 PC 설정
-#   8. 실행기·바탕화면 아이콘 "OMX Control Panel"
+#   8. 실행기·바탕화면 아이콘 "OMX Control Panel v3"
+# v2 제어판(~/il_ws/src/omx_tools, 바탕화면 "OMX Control Panel")은 그대로 두고 옆에 설치합니다:
+# 폴더 ~/il_ws/omx_control_panel_v3, 설정 ~/.config/omx/v3, 포트 8865부터. 데이터와 로봇 잠금은 함께 씁니다.
 # 다시 실행해도 됩니다: 이미 된 단계는 확인만 하고 넘어갑니다. 설정은 백업 후 유지합니다.
 set -uo pipefail
 
-VERSION=2.2.3
-LEROBOT_COMMIT=8fff0fde7c79f23a93d845d1a50e985de01f8b8a  # the team's LeRobot 0.4.4 (same as the GPU laptop)
+VERSION=3.0.0
+LEROBOT_COMMIT=7e241bd630a3719a56157a497ce5d08f244784f1  # the team's LeRobot 0.6.1 (tag v0.6.1, same as the GPU laptop)
+LEROBOT_DIR="$HOME/il_ws/src/lerobot_v0.6.1"  # beside a v2 checkout (~/il_ws/src/lerobot, 0.4.4), which stays as it is
 PKG="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 ALIAS=omx-gpu
 APP_DIR="$HOME/.local/share/omx"
-CONF_DIR="$HOME/.config/omx"
+CONF_DIR="$HOME/.config/omx/v3"
 CONF="$CONF_DIR/config.json"
-TARGET="$HOME/il_ws/src/omx_tools"
-VENV_IN="~/venv/il"; VENV="$HOME/venv/il"
+V3_HOME="$HOME/il_ws/omx_control_panel_v3"
+TARGET="$V3_HOME/omx_tools"
+VENV_IN="~/venv/il3"; VENV="$HOME/venv/il3"
 
 bold() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
@@ -34,6 +38,9 @@ err()  { printf '  \033[31m✗\033[0m %s\n' "$*"; }
 ask()  { local q="$1" d="${2:-}"; read -r -p "  $q${d:+ [$d]}: " REPLY; REPLY="${REPLY:-$d}"; }
 yesno() { read -r -p "  $1 [$( [ "$2" = y ] && echo Y/n || echo y/N )]: " REPLY; REPLY="${REPLY:-$2}"; [[ "$REPLY" =~ ^[Yy] ]]; }
 YES=0; [ "${1:-}" = "--yes" ] && YES=1
+# Not at a terminal (run from a script or another program): questions take their defaults instead of
+# waiting for an answer that never comes
+[ -t 0 ] || exec < /dev/null
 
 echo "OMX Control Panel v$VERSION - 제어 PC 설치 ($(hostname), 계정 $USER)"
 [ -f "$PKG/omx_tools/omx_web.py" ] || { err "패키지 폴더에서 실행하세요 (omx_tools 폴더가 옆에 있어야 합니다)."; exit 1; }
@@ -43,14 +50,14 @@ grep -qi ubuntu /etc/os-release 2>/dev/null || warn "우분투가 아닙니다. 
 bold "1/8 시스템 패키지"
 NEED=()
 for c in git curl rsync v4l2-ctl; do command -v "$c" >/dev/null || NEED+=("$c"); done
-command -v python3.10 >/dev/null || [ -x "$VENV/bin/python" ] || NEED+=(python3.10)
+command -v python3.12 >/dev/null || [ -x "$VENV/bin/python" ] || NEED+=(python3.12)
 if [ ${#NEED[@]} -gt 0 ]; then
   warn "없는 프로그램: ${NEED[*]}"
   PKGS="git curl rsync v4l-utils acl"
-  if [[ " ${NEED[*]} " == *" python3.10 "* ]]; then
-    PKGS="$PKGS python3.10 python3.10-venv python3.10-dev"
-    if ! apt-cache show python3.10 >/dev/null 2>&1; then
-      echo "  우분투 24.04에는 python3.10이 기본으로 없어 deadsnakes 저장소를 추가합니다."
+  if [[ " ${NEED[*]} " == *" python3.12 "* ]]; then
+    PKGS="$PKGS python3.12 python3.12-venv python3.12-dev"
+    if ! apt-cache show python3.12 >/dev/null 2>&1; then
+      echo "  우분투 22.04에는 python3.12가 기본으로 없어 deadsnakes 저장소를 추가합니다."
       sudo add-apt-repository -y ppa:deadsnakes/ppa && sudo apt update || { err "저장소 추가 실패"; exit 1; }
     fi
   fi
@@ -60,7 +67,7 @@ if [ ${#NEED[@]} -gt 0 ]; then
     err "필요한 프로그램 없이는 진행할 수 없습니다."; exit 1
   fi
 fi
-ok "git, curl, rsync, v4l-utils, python3.10"
+ok "git, curl, rsync, v4l-utils, python3.12"
 
 # ---------------------------------------------------------------- 2. Tailscale
 bold "2/8 Tailscale (GPU 노트북과 연결하는 사설 네트워크)"
@@ -123,20 +130,21 @@ fi
 
 # ---------------------------------------------------------------- 4. GPU 노트북 쪽 (학습·추론 서버)
 bold "4/8 GPU 노트북의 내 계정 (학습·추론 서버)"
-if ssh -o BatchMode=yes "$ALIAS" 'test -f ~/il_ws/src/omx_tools/omx_infer.py && test -f ~/.config/omx/config.json'; then
-  ok "GPU 노트북에 제어판 v2 이상이 설치되어 있습니다 (추론 서버 포함)"
+GPU_VER=$(ssh -o BatchMode=yes "$ALIAS" 'grep -o "^VERSION = \"[0-9.]*\"" ~/il_ws/omx_control_panel_v3/omx_tools/omx_config.py 2>/dev/null | grep -o "[0-9.]*"' 2>/dev/null)
+if [ "${GPU_VER%%.*}" = "3" ] && ssh -o BatchMode=yes "$ALIAS" 'test -f ~/.config/omx/v3/config.json'; then
+  ok "GPU 노트북에 제어판 v$GPU_VER 이 설치되어 있습니다 (학습·추론 서버, LeRobot 0.6.1)"
 else
-  warn "GPU 노트북의 $GPU_USER 계정에 제어판 v2가 없습니다. 학습과 AI 추론에 필요합니다."
+  warn "GPU 노트북의 $GPU_USER 계정에 제어판 v3가 없습니다${GPU_VER:+ (지금 v$GPU_VER)}. 학습과 AI 추론에 필요합니다."
   if [ $YES = 1 ] || yesno "지금 GPU 노트북에 설치할까요? (원격 실행, 몇 가지를 물어봅니다)" y; then
-    ssh "$ALIAS" 'rm -rf ~/omx_panel_install && mkdir -p ~/omx_panel_install'
-    scp -q -r "$PKG/omx_tools" "$PKG/install_gpu.sh" "$ALIAS:omx_panel_install/" || { err "파일 복사 실패"; exit 1; }
-    ssh -t "$ALIAS" 'bash ~/omx_panel_install/install_gpu.sh' || warn "GPU 노트북 설치가 끝까지 되지 않았습니다. 관리자에게 알려 주세요."
+    ssh "$ALIAS" 'rm -rf ~/omx_panel_install_v3 && mkdir -p ~/omx_panel_install_v3'
+    scp -q -r "$PKG/omx_tools" "$PKG/install_gpu.sh" "$ALIAS:omx_panel_install_v3/" || { err "파일 복사 실패"; exit 1; }
+    ssh -t "$ALIAS" 'bash ~/omx_panel_install_v3/install_gpu.sh' || warn "GPU 노트북 설치가 끝까지 되지 않았습니다. 관리자에게 알려 주세요."
   else
     warn "GPU 노트북 설치 없이는 학습·평가(추론)를 쓸 수 없습니다. 텔레옵·녹화만 됩니다."
   fi
 fi
-GPU_PORT=$(ssh -o BatchMode=yes "$ALIAS" '~/venv/il/bin/python -c "import sys; sys.path.insert(0, \"$HOME/il_ws/src/omx_tools\"); import omx_config; print(omx_config.port())"' 2>/dev/null || echo 8765)
-[[ "$GPU_PORT" =~ ^[0-9]+$ ]] || GPU_PORT=8765
+GPU_PORT=$(ssh -o BatchMode=yes "$ALIAS" 'python3 -c "import sys; sys.path.insert(0, \"$HOME/il_ws/omx_control_panel_v3/omx_tools\"); import omx_config; print(omx_config.port())"' 2>/dev/null || echo 8865)
+[[ "$GPU_PORT" =~ ^[0-9]+$ ]] || GPU_PORT=8865
 ok "GPU 노트북의 내 제어판 포트: $GPU_PORT"
 
 # ---------------------------------------------------------------- 5. LeRobot
@@ -145,18 +153,19 @@ check_lerobot() { "$VENV/bin/python" -c "import lerobot, dynamixel_sdk, cv2; pri
 LR_VER="$(check_lerobot || true)"
 if [ -n "$LR_VER" ]; then
   ok "LeRobot $LR_VER"
-  HEAD=$(cd ~/il_ws/src/lerobot 2>/dev/null && git rev-parse HEAD 2>/dev/null || true)
+  HEAD=$(cd "$LEROBOT_DIR" 2>/dev/null && git rev-parse HEAD 2>/dev/null || true)
   [ "$HEAD" = "$LEROBOT_COMMIT" ] || warn "팀 기준 LeRobot(커밋 ${LEROBOT_COMMIT:0:8})과 다를 수 있습니다. 문제가 생기면 관리자에게 알려 주세요."
 else
-  warn "LeRobot이 없습니다. 지금 설치합니다 (torch 포함 약 4GB, 20~40분)."
+  warn "LeRobot 0.6.1이 없습니다. 지금 설치합니다 (torch 포함 약 6GB, 20~40분)."
   if [ $YES = 1 ] || yesno "설치할까요?" y; then
     mkdir -p "$(dirname "$VENV")" ~/il_ws/src
-    [ -x "$VENV/bin/python" ] || { python3.10 -m venv "$VENV" && "$VENV/bin/pip" install -q --upgrade pip; } || { err "가상환경 만들기 실패"; exit 1; }
-    if [ ! -d ~/il_ws/src/lerobot ]; then
-      git clone -q https://github.com/huggingface/lerobot.git ~/il_ws/src/lerobot || { err "LeRobot 내려받기 실패"; exit 1; }
+    [ -x "$VENV/bin/python" ] || { python3.12 -m venv "$VENV" && "$VENV/bin/pip" install -q --upgrade pip; } || { err "가상환경 만들기 실패"; exit 1; }
+    if [ ! -d "$LEROBOT_DIR" ]; then
+      git clone -q https://github.com/huggingface/lerobot.git "$LEROBOT_DIR" || { err "LeRobot 내려받기 실패"; exit 1; }
     fi
-    (cd ~/il_ws/src/lerobot && git fetch -q origin && git checkout -q "$LEROBOT_COMMIT") || warn "팀 기준 커밋으로 맞추지 못했습니다 (그대로 진행)"
-    (cd ~/il_ws/src/lerobot && "$VENV/bin/pip" install -e ".[dynamixel]") || { err "LeRobot 설치 실패"; exit 1; }
+    (cd "$LEROBOT_DIR" && git fetch -q origin --tags && git checkout -q "$LEROBOT_COMMIT") || warn "팀 기준 커밋으로 맞추지 못했습니다 (그대로 진행)"
+    # robot, cameras, datasets with video (av); the policies themselves run on the GPU laptop
+    (cd "$LEROBOT_DIR" && "$VENV/bin/pip" install -e ".[core_scripts,evaluation,dynamixel]") || { err "LeRobot 설치 실패"; exit 1; }
     LR_VER="$(check_lerobot || true)"; [ -n "$LR_VER" ] && ok "LeRobot $LR_VER 설치 완료" || { err "설치 확인 실패"; exit 1; }
   else
     err "LeRobot 없이는 제어판을 쓸 수 없습니다."; exit 1
@@ -183,12 +192,25 @@ fi
 
 # ---------------------------------------------------------------- 7. 제어판, 설정
 bold "7/8 제어판 설치 → $TARGET"
-mkdir -p "$TARGET" ~/il_ws/omx_logs "$CONF_DIR" ~/omx_data/lerobot_data ~/omx_data/checkpoints
+mkdir -p "$TARGET" "$V3_HOME/logs" "$CONF_DIR" ~/omx_data/lerobot_data ~/omx_data/checkpoints
 if [ "$(readlink -f "$PKG/omx_tools")" != "$(readlink -f "$TARGET")" ]; then
   rsync -a --exclude __pycache__ "$PKG/omx_tools/" "$TARGET/" || { err "파일 복사 실패"; exit 1; }
 fi
 chmod +x "$TARGET"/*.sh
 ok "제어판 파일 v$VERSION"
+# v3 runs beside v2 with its own settings: start from the v2 settings (robots, cameras, folders) once
+if [ ! -f "$CONF" ] && [ -f "$HOME/.config/omx/config.json" ]; then
+  mkdir -p "$CONF_DIR"
+  python3 - "$HOME/.config/omx/config.json" "$CONF" <<'PYEOF'
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+for k in ("port_base", "gpu_panel_port", "venv", "log_dir"):  # v3 has its own port, environment and logs
+    cfg.pop(k, None)
+json.dump(cfg, open(sys.argv[2], "w"), ensure_ascii=False, indent=2)
+PYEOF
+  [ -f "$HOME/.config/omx/robot.json" ] && cp "$HOME/.config/omx/robot.json" "$CONF_DIR/robot.json"
+  echo "  v2 설정(~/.config/omx/config.json)을 v3 설정의 시작값으로 복사했습니다 (v2 설정은 그대로)."
+fi
 [ -f "$CONF" ] && cp "$CONF" "$CONF.bak.$(date +%Y%m%d%H%M%S)" && ok "기존 설정 백업"
 GPU_USER="${GPU_USER:-$(ssh -o BatchMode=yes "$ALIAS" whoami)}"
 "$PY" - "$CONF" "$GPU_USER" "$GPU_PORT" "$(hostname)" "$VENV_IN" <<'PYEOF'
@@ -213,31 +235,36 @@ ok "설정: $CONF (제어 PC, GPU 계정 $GPU_USER, 포트 $GPU_PORT)"
 # ---------------------------------------------------------------- 8. 실행기
 bold "8/8 실행기·바탕화면 아이콘"
 mkdir -p "$APP_DIR" ~/.local/bin ~/.local/share/applications
-cp "$TARGET/omx-control.sh" "$APP_DIR/" && chmod +x "$APP_DIR/omx-control.sh"
+cp "$TARGET/omx-control.sh" "$APP_DIR/omx-control-v3.sh" && chmod +x "$APP_DIR/omx-control-v3.sh"
 printf 'OMX_GPU_HOST=%s\n' "$ALIAS" > "$CONF_DIR/laptop.env"
-ln -sf "$APP_DIR/omx-control.sh" ~/.local/bin/omx-panel
-cat > ~/.local/share/applications/omx-control.desktop <<EOF
+ln -sf "$APP_DIR/omx-control-v3.sh" ~/.local/bin/omx-panel-v3
+cat > ~/.local/share/applications/omx-control-v3.desktop <<EOF
 [Desktop Entry]
 Type=Application
-Name=OMX Control Panel
-Comment=OMX 로봇 데이터 수집·학습·평가 (제어 PC)
-Exec=$APP_DIR/omx-control.sh
+Name=OMX Control Panel v3
+Comment=OMX 로봇 데이터 수집·학습·평가 v$VERSION (LeRobot 0.6.1, 제어 PC)
+Exec=$APP_DIR/omx-control-v3.sh
 Icon=applications-science
 Terminal=false
 Categories=Utility;
 EOF
 DESK=$(xdg-user-dir DESKTOP 2>/dev/null || echo ~/Desktop)
 if [ -d "$DESK" ]; then
-  cp ~/.local/share/applications/omx-control.desktop "$DESK/" && chmod +x "$DESK/omx-control.desktop"
-  gio set "$DESK/omx-control.desktop" metadata::trusted true 2>/dev/null
-  ok "바탕화면 아이콘 'OMX Control Panel'"
+  cp ~/.local/share/applications/omx-control-v3.desktop "$DESK/" && chmod +x "$DESK/omx-control-v3.desktop"
+  gio set "$DESK/omx-control-v3.desktop" metadata::trusted true 2>/dev/null
+  ok "바탕화면 아이콘 'OMX Control Panel v3'"
 fi
-ok "명령 omx-panel (새 터미널부터)"
+ok "명령 omx-panel-v3 (새 터미널부터)"
 # a running panel of an older version must not keep the old code
-bash "$TARGET/omx-panel-server.sh" --restart >/dev/null 2>&1 && ok "제어판 서버 시작" || warn "제어판 서버를 켜지 못했습니다 (~/il_ws/omx_logs/web.log)"
+# teleop, recording and evaluation run as children of the panel server: a restart would cut them off
+if pgrep -u "$USER" -f "omx_run.py|omx_record.py|omx_teleop.py|omx_return_home.py" >/dev/null; then
+  warn "텔레옵·녹화·평가가 실행 중이라 서버를 재시작하지 않았습니다. 끝난 뒤 'bash $TARGET/omx-panel-server.sh --restart'를 실행하세요."
+else
+  bash "$TARGET/omx-panel-server.sh" --restart >/dev/null 2>&1 && ok "제어판 v3 서버 시작" || warn "제어판 서버를 켜지 못했습니다 ($V3_HOME/logs/web.log)"
+fi
 
 bold "설치 완료 (v$VERSION)"
-echo "  1) 바탕화면 'OMX Control Panel'을 더블클릭하세요 (처음엔 우클릭 → '실행 허용'이 필요할 수 있음)."
+echo "  1) 바탕화면 'OMX Control Panel v3'를 더블클릭하세요 (처음엔 우클릭 → '실행 허용'이 필요할 수 있음)."
 echo "  2) ① 탭 '로봇 구성'에서 단일/협동 로봇, 로봇 세트, 카메라를 고르고 [저장하고 점검]."
 echo "  3) 모든 항목이 초록이면 텔레옵부터 시작하세요."
 id -nG "$USER" | grep -qw dialout || echo "  ※ USB 권한 적용을 위해 한 번 로그아웃 후 다시 로그인하세요."

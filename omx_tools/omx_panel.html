@@ -1449,7 +1449,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
 
     <section id="h-log">
       <h3>로그</h3>
-      <p>실행 중인 텔레옵·녹화의 출력이 실시간으로 나옵니다. 문제가 생기면 여기의 마지막 줄들을 확인합니다. 전체 기록은 GPU 노트북의 <code>~/il_ws/omx_logs/</code>에 실행할 때마다 파일로 남습니다.</p>
+      <p>실행 중인 텔레옵·녹화의 출력이 실시간으로 나옵니다. 문제가 생기면 여기의 마지막 줄들을 확인합니다. 전체 기록은 GPU 노트북의 <code>~/il_ws/omx_control_panel_v3/logs/</code>에 실행할 때마다 파일로 남습니다.</p>
       <p>"Headless environment detected", "pynput" 경고는 원격 실행이라 키보드 단축키를 끈다는 뜻입니다. 정상이니 무시하세요. 같은 기능은 녹화 버튼으로 합니다.</p>
     </section>
 
@@ -1461,7 +1461,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <tr><td>캘리브레이션 (팀 공유)</td><td><code>&lt;데이터 폴더&gt;/calibration</code></td></tr>
         <tr><td>학습 결과(모델), 학습 기록 표</td><td><code>&lt;모델 폴더&gt;/계정/…</code>, <code>INDEX.md</code> (기본 <code>/srv/il/checkpoints</code>)</td></tr>
         <tr><td>이 GPU 노트북의 실제 위치</td><td>설치 때 정한 값이며 <code>python omx_config.py</code>로 확인합니다</td></tr>
-        <tr><td>실행 로그</td><td>GPU 노트북 <code>~/il_ws/omx_logs/</code></td></tr>
+        <tr><td>실행 로그</td><td>GPU 노트북 <code>~/il_ws/omx_control_panel_v3/logs/</code></td></tr>
       </table></div>
       <p>데이터셋은 계정별 폴더로 나뉘어 서로 덮어쓰지 않습니다. 한 번 모은 데이터셋은 고치지 말고 새 이름으로 추가합니다. 어떤 데이터로 어떤 모델을 학습했는지 재현하기 위해서입니다.</p>
     </section>
@@ -3001,7 +3001,7 @@ async function pollReport() {
   let r;
   try { r = await (await fetch("/api/eval/report?repo=" + encodeURIComponent(ev.view))).json(); } catch (e) { return; }
   $("evReportOpen").hidden = !r.ready;
-  $("evReportState").textContent = r.running ? "만드는 중... (1~2분)" : r.failed ? "만들지 못했습니다. GPU 노트북 ~/il_ws/omx_logs/report.log 를 확인하세요." : r.ready ? `완료 · ${r.files.length}장` : "";
+  $("evReportState").textContent = r.running ? "만드는 중... (1~2분)" : r.failed ? "만들지 못했습니다. GPU 노트북 ~/il_ws/omx_control_panel_v3/logs/report.log 를 확인하세요." : r.ready ? `완료 · ${r.files.length}장` : "";
   rep.last = r;
   if (!r.running) clearInterval(rep.timer);
 }

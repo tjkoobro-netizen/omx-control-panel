@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Two OMX arms as one robot (cooperative / bimanual), for lerobot-record and lerobot-teleoperate.
+"""Two OMX arms as one robot (cooperative / bimanual), for omx_run.py (teleop, recording, evaluation).
 
   --robot.type=bi_omx_follower --robot.left_port=/dev/omx_follower_2 --robot.right_port=/dev/omx_follower_3
       --robot.cameras="{front: {...}, wrist_left: {...}, wrist_right: {...}}"

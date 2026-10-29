@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OMX Control Panel v2.2.3 - 개인 PC(노트북) 설치. 내가 들고 다니는 PC에서 실행합니다.
+# OMX Control Panel v3.0.0 - 개인 PC(노트북) 설치. 내가 들고 다니는 PC에서 실행합니다.
 #
 #   bash install_laptop.sh
 #
@@ -9,15 +9,15 @@
 #   3. SSH 키 만들기·GPU 노트북에 등록 (GPU 노트북 계정 비밀번호를 한 번 물음)
 #   4. SSH 별칭 omx-gpu 등록 (~/.ssh/config)
 #   5. (선택) GPU 노트북 쪽 설치를 여기서 원격으로 실행
-#   6. 실행기·바탕화면 아이콘·omx-panel 명령 설치
+#   6. 실행기·바탕화면 아이콘 'OMX Control Panel v3'·omx-panel-v3 명령 설치 (v2 아이콘은 그대로)
 #   7. (선택) Rerun 뷰어 설치
 set -uo pipefail
 
-VERSION=2.2.3
+VERSION=3.0.0
 PKG="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 ALIAS=omx-gpu
 APP_DIR="$HOME/.local/share/omx"
-CONF_DIR="$HOME/.config/omx"
+CONF_DIR="$HOME/.config/omx/v3"
 
 bold() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[32m✓\033[0m %s\n' "$*"; }
@@ -102,7 +102,7 @@ else err "ssh $ALIAS 접속 실패"; exit 1; fi
 
 # ---------------------------------------------------------------- 5. GPU 쪽 설치 (선택)
 bold "5/7 GPU 노트북 쪽 설치 확인"
-if ssh -o BatchMode=yes "$ALIAS" 'test -x ~/il_ws/src/omx_tools/omx-panel-server.sh && test -f ~/.config/omx/config.json'; then
+if ssh -o BatchMode=yes "$ALIAS" 'test -x ~/il_ws/omx_control_panel_v3/omx_tools/omx-panel-server.sh && test -f ~/.config/omx/v3/config.json'; then
   ok "GPU 노트북에 제어판이 이미 설치되어 있습니다"
   if yesno "이 패키지(v$VERSION)로 GPU 노트북 쪽도 업데이트할까요?" n; then DO_GPU=1; else DO_GPU=0; fi
 else
@@ -110,34 +110,34 @@ else
   if yesno "지금 여기서 GPU 노트북 설치(install_gpu.sh)를 원격으로 실행할까요?" y; then DO_GPU=1; else DO_GPU=0; fi
 fi
 if [ "${DO_GPU:-0}" = 1 ]; then
-  ssh "$ALIAS" 'rm -rf ~/omx_panel_install && mkdir -p ~/omx_panel_install'
-  scp -q -r "$PKG/omx_tools" "$PKG/install_gpu.sh" "$ALIAS:omx_panel_install/" || { err "파일 복사 실패"; exit 1; }
-  ssh -t "$ALIAS" 'bash ~/omx_panel_install/install_gpu.sh' || warn "GPU 노트북 설치가 끝까지 되지 않았습니다. 위 메시지를 확인하세요."
+  ssh "$ALIAS" 'rm -rf ~/omx_panel_install_v3 && mkdir -p ~/omx_panel_install_v3'
+  scp -q -r "$PKG/omx_tools" "$PKG/install_gpu.sh" "$ALIAS:omx_panel_install_v3/" || { err "파일 복사 실패"; exit 1; }
+  ssh -t "$ALIAS" 'bash ~/omx_panel_install_v3/install_gpu.sh' || warn "GPU 노트북 설치가 끝까지 되지 않았습니다. 위 메시지를 확인하세요."
 fi
 
 # ---------------------------------------------------------------- 6. 실행기
 bold "6/7 실행기·아이콘"
 mkdir -p "$APP_DIR" "$CONF_DIR" ~/.local/bin ~/.local/share/applications
-cp "$PKG/omx_tools/omx-control.sh" "$APP_DIR/" && chmod +x "$APP_DIR/omx-control.sh"
+cp "$PKG/omx_tools/omx-control.sh" "$APP_DIR/omx-control-v3.sh" && chmod +x "$APP_DIR/omx-control-v3.sh"
 printf 'OMX_GPU_HOST=%s\n' "$ALIAS" > "$CONF_DIR/laptop.env"
-ln -sf "$APP_DIR/omx-control.sh" ~/.local/bin/omx-panel
-cat > ~/.local/share/applications/omx-control.desktop <<EOF
+ln -sf "$APP_DIR/omx-control-v3.sh" ~/.local/bin/omx-panel-v3
+cat > ~/.local/share/applications/omx-control-v3.desktop <<EOF
 [Desktop Entry]
 Type=Application
-Name=OMX Control Panel
+Name=OMX Control Panel v3
 Comment=GPU 노트북($GPU_NAME)의 OMX 로봇 수집·학습·평가
-Exec=$APP_DIR/omx-control.sh
+Exec=$APP_DIR/omx-control-v3.sh
 Icon=applications-science
 Terminal=false
 Categories=Utility;
 EOF
 DESK=$(xdg-user-dir DESKTOP 2>/dev/null || echo ~/Desktop)
 if [ -d "$DESK" ]; then
-  cp ~/.local/share/applications/omx-control.desktop "$DESK/" && chmod +x "$DESK/omx-control.desktop"
-  gio set "$DESK/omx-control.desktop" metadata::trusted true 2>/dev/null
-  ok "바탕화면 아이콘 'OMX Control Panel'"
+  cp ~/.local/share/applications/omx-control-v3.desktop "$DESK/" && chmod +x "$DESK/omx-control-v3.desktop"
+  gio set "$DESK/omx-control-v3.desktop" metadata::trusted true 2>/dev/null
+  ok "바탕화면 아이콘 'OMX Control Panel v3'"
 fi
-ok "명령 omx-panel (새 터미널부터)"
+ok "명령 omx-panel-v3 (새 터미널부터)"
 
 # ---------------------------------------------------------------- 7. Rerun (선택)
 bold "7/7 Rerun 뷰어 (선택)"
@@ -147,5 +147,5 @@ elif yesno "녹화·평가 중 관절 그래프를 내 PC에서 보는 Rerun 뷰
 fi
 
 bold "설치 완료 (v$VERSION)"
-echo "  바탕화면의 'OMX Control Panel'을 더블클릭하거나 터미널에서 omx-panel 을 실행하세요."
+echo "  바탕화면의 'OMX Control Panel v3'을 더블클릭하거나 터미널에서 omx-panel-v3 을 실행하세요."
 echo "  처음엔 아이콘을 우클릭해 '실행 허용(Allow Launching)'을 눌러야 할 수 있습니다."

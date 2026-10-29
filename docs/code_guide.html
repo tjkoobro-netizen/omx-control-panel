@@ -1,0 +1,648 @@
+<meta charset="utf-8">
+<title>OMX Control Panel 코드 안내</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Same family as install_control.html: one reading column, a table of contents on wide screens,
+   code in dark blocks, file names in mono. Colors are tokens with a dark variant. */
+:root {
+  --bg: #f6f7f9; --surface: #ffffff; --ink: #18202b; --muted: #5b6676; --line: #dde2e9;
+  --accent: #1f5fd1; --accent-soft: #e6eefc; --warn: #9a5b00; --warn-soft: #fff4dc; --ok: #1d7a46; --ok-soft: #e3f4ea;
+  --gpu: #7a3fb8; --gpu-soft: #f1e9fb; --robot: #b4521d; --robot-soft: #fcebe0;
+  --code-bg: #111821; --code-fg: #e4ecf5; --code-dim: #8fa0b5; --code-key: #9cc4ff; --code-str: #b6e3a6;
+  --f-body: "IBM Plex Sans KR", "Noto Sans KR", "Apple SD Gothic Neo", system-ui, sans-serif;
+  --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0f141b; --surface: #161d27; --ink: #e5ebf2; --muted: #9aa7b8; --line: #2a3442;
+  --accent: #6ea2ff; --accent-soft: #1b2a44; --warn: #f2b45c; --warn-soft: #2e2414; --ok: #6fd39a; --ok-soft: #15291e;
+  --gpu: #c39bf0; --gpu-soft: #271d36; --robot: #f0a271; --robot-soft: #33221a;
+  --code-bg: #0a0f15; --code-fg: #dfe8f2; --code-dim: #7d8ca0; --code-key: #9cc4ff; --code-str: #b6e3a6; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0f141b; --surface: #161d27; --ink: #e5ebf2; --muted: #9aa7b8; --line: #2a3442;
+  --accent: #6ea2ff; --accent-soft: #1b2a44; --warn: #f2b45c; --warn-soft: #2e2414; --ok: #6fd39a; --ok-soft: #15291e;
+  --gpu: #c39bf0; --gpu-soft: #271d36; --robot: #f0a271; --robot-soft: #33221a;
+  --code-bg: #0a0f15; --code-fg: #dfe8f2; --code-dim: #7d8ca0; --code-key: #9cc4ff; --code-str: #b6e3a6; color-scheme: dark }
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 400 15px/1.75 var(--f-body); margin: 0; }
+.page { max-width: 1180px; margin: 0 auto; padding-block: 40px 80px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 48px; }
+nav.toc { position: sticky; top: max(24px, env(safe-area-inset-top, 0px)); align-self: start; max-height: calc(100vh - 48px); overflow: auto;
+  font-size: 13.5px; line-height: 1.5; display: grid; gap: 4px; padding-right: 8px; }
+nav.toc b { font: 500 11.5px/1 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 14px 0 6px; }
+nav.toc a { color: var(--muted); text-decoration: none; padding: 3px 0 3px 10px; border-left: 2px solid transparent; }
+nav.toc a:hover { color: var(--accent); border-left-color: var(--accent); }
+main { min-width: 0; display: grid; gap: 0; }
+h1 { font-size: 32px; line-height: 1.2; margin: 0 0 10px; text-wrap: balance; letter-spacing: -.01em; }
+h2 { font-size: 22px; line-height: 1.35; margin: 0; text-wrap: balance; }
+h3 { font-size: 16px; line-height: 1.4; margin: 10px 0 0; }
+h4 { font-size: 14.5px; margin: 6px 0 0; color: var(--muted); }
+p { margin: 0; max-width: 72ch; }
+a { color: var(--accent); }
+.lede { color: var(--muted); font-size: 16.5px; max-width: 70ch; }
+.eyebrow { font: 500 12px/1 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+header { display: grid; gap: 12px; margin-bottom: 30px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { font: 500 12.5px/1 var(--f-mono); padding: 6px 9px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--muted); }
+section { display: grid; gap: 14px; padding-block: 30px; border-top: 1px solid var(--line); scroll-margin-top: 16px; }
+.num { font: 500 12px/1 var(--f-mono); color: var(--accent); letter-spacing: .06em; }
+code, .mono { font-family: var(--f-mono); font-size: .9em; }
+p code, li code, td code { background: var(--accent-soft); color: var(--ink); padding: 1px 5px; border-radius: 3px; }
+pre { background: var(--code-bg); color: var(--code-fg); font: 400 12.8px/1.6 var(--f-mono); padding: 14px 16px; border-radius: 6px;
+  overflow-x: auto; margin: 0; white-space: pre; }
+pre .c { color: var(--code-dim); } pre .k { color: var(--code-key); } pre .s { color: var(--code-str); }
+.tablewrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 13.8px; line-height: 1.55; }
+th, td { text-align: left; vertical-align: top; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+th { font: 500 12px/1.4 var(--f-mono); letter-spacing: .04em; color: var(--muted); background: var(--bg); white-space: nowrap; }
+tr:last-child td { border-bottom: 0; }
+td.f { font-family: var(--f-mono); font-size: 13px; white-space: nowrap; }
+.tag { display: inline-block; font: 500 11px/1 var(--f-mono); padding: 4px 6px; border-radius: 3px; margin: 1px 2px 1px 0; white-space: nowrap; }
+.tag.ctl { background: var(--robot-soft); color: var(--robot); }
+.tag.gpu { background: var(--gpu-soft); color: var(--gpu); }
+.tag.all { background: var(--accent-soft); color: var(--accent); }
+.tag.new { background: var(--ok-soft); color: var(--ok); }
+.note { border-left: 3px solid var(--accent); background: var(--accent-soft); padding: 10px 14px; border-radius: 0 6px 6px 0; max-width: 78ch; }
+.warn { border-left: 3px solid var(--warn); background: var(--warn-soft); padding: 10px 14px; border-radius: 0 6px 6px 0; max-width: 78ch; }
+ol.steps { margin: 0; padding: 0; list-style: none; counter-reset: s; display: grid; gap: 12px; }
+ol.steps > li { counter-increment: s; display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; }
+ol.steps > li::before { content: counter(s); font: 500 12px/26px var(--f-mono); text-align: center; width: 26px; height: 26px;
+  border-radius: 50%; background: var(--accent-soft); color: var(--accent); }
+ol.steps > li > div { display: grid; gap: 8px; min-width: 0; }
+ul { margin: 0; padding-left: 20px; display: grid; gap: 4px; max-width: 76ch; }
+.file { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 18px 20px; display: grid; gap: 10px; scroll-margin-top: 16px; }
+.file h3 { margin: 0; font-family: var(--f-mono); font-size: 16px; display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.file h3 small { font: 400 12.5px var(--f-mono); color: var(--muted); }
+.file .role { color: var(--ink); }
+.files { display: grid; gap: 14px; }
+.figure { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px; overflow-x: auto; }
+.figure svg { display: block; width: 100%; min-width: 760px; height: auto; }
+svg .bx { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
+svg .bx.ctl { fill: var(--robot-soft); stroke: var(--robot); }
+svg .bx.gpu { fill: var(--gpu-soft); stroke: var(--gpu); }
+svg .bx.ui { fill: var(--accent-soft); stroke: var(--accent); }
+svg .zone { fill: none; stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 6 5; }
+svg .t { fill: var(--ink); font: 500 13px var(--f-mono); }
+svg .s { fill: var(--muted); font: 400 11.5px var(--f-body); }
+svg .zl { fill: var(--muted); font: 500 11px var(--f-mono); letter-spacing: .08em; }
+svg .ln { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+svg .ln.tun { stroke: var(--gpu); stroke-dasharray: 5 4; }
+svg .ln.usb { stroke: var(--robot); }
+svg .lt { fill: var(--muted); font: 400 11px var(--f-mono); }
+.cap { color: var(--muted); font-size: 13px; margin-top: 8px; }
+@media (max-width: 900px) {
+  .page { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  nav.toc { display: none; }
+  h1 { font-size: 26px; }
+}
+</style>
+
+<div class="page">
+<nav class="toc" aria-label="목차">
+  <b>흐름</b>
+  <a href="#overview">1. 전체 구조</a>
+  <a href="#map">2. 파일 지도</a>
+  <a href="#flow-button">3. 버튼에서 로봇까지</a>
+  <a href="#flow-control">4. 실행 중 제어</a>
+  <a href="#flow-loop">5. 제어 루프 안</a>
+  <a href="#flow-link">6. 제어 PC ↔ GPU 노트북</a>
+  <a href="#flow-infer">7. AI 추론</a>
+  <a href="#flow-train">8. 학습</a>
+  <b>파일별 상세</b>
+  <a href="#f-web">omx_web.py</a>
+  <a href="#f-panel">omx_panel.html</a>
+  <a href="#f-run">omx_run.py</a>
+  <a href="#f-safe">omx_safe_start.py</a>
+  <a href="#f-bi">omx_bimanual.py</a>
+  <a href="#f-async">omx_async.py</a>
+  <a href="#f-infer">omx_infer.py</a>
+  <a href="#f-remote">omx_remote.py</a>
+  <a href="#f-train">omx_train.py · queue · ram</a>
+  <a href="#f-eval">평가 분석 파일들</a>
+  <a href="#f-data">데이터·이름·설정</a>
+  <a href="#f-sh">스크립트·설치</a>
+  <b>참고</b>
+  <a href="#lerobot">LeRobot에서 쓰는 것</a>
+  <a href="#where">파일·데이터 위치</a>
+</nav>
+
+<main>
+<header>
+  <span class="eyebrow">OMX Control Panel · v3.0.0 · LeRobot 0.6.1</span>
+  <h1>OMX Control Panel 코드 안내</h1>
+  <p class="lede">제어판을 이루는 파이썬 파일이 각각 무슨 일을 하는지, 그리고 화면(GUI)·로봇·AI 추론 서버가 코드에서 어떻게 이어지는지 따라가며 설명합니다. 파일 이름과 함수 이름은 저장소 <code>omx_tools/</code> 폴더 그대로입니다.</p>
+  <div class="meta">
+    <span class="chip">파이썬 22개 · 약 8,000줄</span>
+    <span class="chip">화면 omx_panel.html 3,641줄</span>
+    <span class="chip">Python 3.12</span>
+    <span class="chip">기준 2026-10-28</span>
+  </div>
+</header>
+
+<!-- ================================================================ 1 -->
+<section id="overview">
+  <span class="num">01</span>
+  <h2>전체 구조: 세 곳에서 도는 프로그램</h2>
+  <p>제어판은 한 프로그램이 아니라, 역할이 나뉜 몇 개의 프로세스가 서로 메시지를 주고받는 구조입니다. 사람이 보는 화면은 브라우저이고, 실제 일은 PC마다 떠 있는 <b>제어판 서버(omx_web.py)</b>가 받아서 필요한 프로그램을 띄웁니다.</p>
+  <div class="figure" role="img" aria-label="브라우저, 제어 PC, GPU 노트북의 연결 구조">
+    <svg viewBox="0 0 980 470" xmlns="http://www.w3.org/2000/svg">
+      <!-- zones -->
+      <rect class="zone" x="10" y="30" width="470" height="430" rx="10"/>
+      <text class="zl" x="26" y="52">제어 PC (팀원 각자 · 로봇이 연결된 PC)</text>
+      <rect class="zone" x="560" y="30" width="410" height="430" rx="10"/>
+      <text class="zl" x="576" y="52">GPU 노트북 (학습 · 추론 · 팀 공유 데이터)</text>
+      <!-- control PC -->
+      <rect class="bx ui" x="30" y="70" width="190" height="70" rx="6"/>
+      <text class="t" x="44" y="98">브라우저</text>
+      <text class="s" x="44" y="120">omx_panel.html (화면)</text>
+      <rect class="bx" x="270" y="70" width="190" height="96" rx="6"/>
+      <text class="t" x="284" y="98">omx_web.py</text>
+      <text class="s" x="284" y="120">제어판 서버 · 127.0.0.1:8765</text>
+      <text class="s" x="284" y="140">Job · 동기화 · 터널(omx_remote)</text>
+      <rect class="bx ctl" x="270" y="220" width="190" height="96" rx="6"/>
+      <text class="t" x="284" y="248">omx_run.py</text>
+      <text class="s" x="284" y="270">텔레옵·녹화·평가 1회 실행</text>
+      <text class="s" x="284" y="290">safe_start · async · bimanual</text>
+      <rect class="bx ctl" x="30" y="220" width="190" height="96" rx="6"/>
+      <text class="t" x="44" y="248">로봇 · 카메라</text>
+      <text class="s" x="44" y="270">리더·팔로워 (Dynamixel)</text>
+      <text class="s" x="44" y="290">USB 카메라 (OpenCV)</text>
+      <rect class="bx" x="30" y="370" width="430" height="70" rx="6"/>
+      <text class="t" x="44" y="398">이 PC의 데이터</text>
+      <text class="s" x="44" y="420">~/omx_data/lerobot_data/&lt;계정&gt;/… 녹화·평가 데이터셋 (LeRobot v3.0 형식)</text>
+      <!-- control lines -->
+      <path class="ln" d="M220 105 H270"/><text class="lt" x="222" y="96">HTTP</text>
+      <text class="lt" x="222" y="125">1초마다</text>
+      <path class="ln" d="M365 166 V220"/><text class="lt" x="372" y="190">실행 · stdin · 신호</text>
+      <text class="lt" x="372" y="206">↑ 출력 줄 (stdout)</text>
+      <path class="ln usb" d="M270 268 H220"/><text class="lt" x="226" y="260">USB</text>
+      <path class="ln" d="M365 316 V370"/><text class="lt" x="372" y="346">add_frame · save_episode</text>
+      <!-- GPU -->
+      <rect class="bx gpu" x="760" y="70" width="190" height="96" rx="6"/>
+      <text class="t" x="774" y="98">omx_web.py</text>
+      <text class="s" x="774" y="120">GPU 쪽 제어판 서버 (같은 계정)</text>
+      <text class="s" x="774" y="140">학습 탭 · 모델 · 비교 · 보고서</text>
+      <rect class="bx gpu" x="760" y="200" width="190" height="80" rx="6"/>
+      <text class="t" x="774" y="228">omx_infer.py serve</text>
+      <text class="s" x="774" y="250">추론 서버 · 포트 +25</text>
+      <rect class="bx gpu" x="580" y="200" width="160" height="80" rx="6"/>
+      <text class="t" x="594" y="228">omx_train.py</text>
+      <text class="s" x="594" y="250">→ lerobot-train</text>
+      <rect class="bx" x="580" y="370" width="370" height="70" rx="6"/>
+      <text class="t" x="594" y="398">팀 공유 데이터 /srv/il</text>
+      <text class="s" x="594" y="420">lerobot_data/&lt;계정&gt;/… · checkpoints/&lt;계정&gt;/…</text>
+      <!-- links -->
+      <path class="ln tun" d="M460 95 H760"/><text class="lt" x="478" y="86">SSH 터널 · 포트 +30 → GPU 제어판</text>
+      <path class="ln tun" d="M460 150 C620 150 640 240 760 240"/><text class="lt" x="478" y="170">SSH 터널 · 포트 +31 → 추론 서버</text>
+      <path class="ln tun" d="M460 405 H580"/><text class="lt" x="474" y="396">rsync</text>
+      <path class="ln" d="M855 166 V200"/>
+      <path class="ln" d="M800 166 C760 180 700 180 660 200"/>
+      <path class="ln" d="M660 280 V370"/><path class="ln" d="M855 280 V370"/>
+    </svg>
+  </div>
+  <p class="cap">점선은 Tailscale 위의 SSH 연결 하나입니다. 네트워크에 열린 포트는 없고, 모든 서버는 127.0.0.1에서만 받습니다.</p>
+  <div class="tablewrap"><table>
+    <tr><th>어디서</th><th>무엇이 돈다</th><th>언제</th></tr>
+    <tr><td>브라우저</td><td><code>omx_panel.html</code>: 버튼·표·카메라 화면. 1초마다 <code>/api/status</code>를 읽어 다시 그림</td><td>제어판을 여는 동안</td></tr>
+    <tr><td>제어 PC</td><td><code>omx_web.py</code>(상시) → 작업마다 <code>omx_run.py</code> 한 개</td><td>바탕화면 아이콘으로 켜면 계속</td></tr>
+    <tr><td>GPU 노트북</td><td><code>omx_web.py</code>(상시, 계정마다), <code>omx_infer.py serve</code>(상시), 학습할 때 <code>omx_train.py</code>·<code>omx_train_queue.py</code></td><td>설치 후 계속</td></tr>
+  </table></div>
+  <div class="note"><b>v3에서 바뀐 핵심</b>: v2까지는 LeRobot의 <code>lerobot-record</code> 안쪽 함수를 바꿔 끼워 녹화·평가를 했습니다(<code>omx_record.py</code>). LeRobot 0.6.1에서 녹화 스크립트가 정책 실행을 빼면서, v3는 제어 루프를 <code>omx_run.py</code>가 직접 갖습니다. LeRobot은 로봇 클래스·카메라·데이터셋·정책 같은 "부품"으로만 씁니다.</div>
+</section>
+
+<!-- ================================================================ 2 -->
+<section id="map">
+  <span class="num">02</span>
+  <h2>파일 지도</h2>
+  <p>역할별로 묶었습니다. <span class="tag ctl">제어 PC</span> <span class="tag gpu">GPU</span> <span class="tag all">둘 다</span>는 주로 어디서 실행되는지, <span class="tag new">v3</span>는 이번에 새로 만들었거나 크게 바뀐 파일입니다.</p>
+  <div class="tablewrap"><table>
+    <tr><th>묶음</th><th>파일</th><th>줄</th><th>한 줄 역할</th></tr>
+    <tr><td rowspan="2">화면·서버</td><td class="f"><a href="#f-panel">omx_panel.html</a></td><td>3641</td><td>브라우저 화면 전체(HTML·CSS·JS 한 파일) <span class="tag all">둘 다</span></td></tr>
+    <tr><td class="f"><a href="#f-web">omx_web.py</a></td><td>2524</td><td>제어판 서버: API, 로봇 작업 관리(Job), 카메라 보기, 동기화, 학습·평가 기록 <span class="tag all">둘 다</span></td></tr>
+    <tr><td rowspan="4">로봇 실행</td><td class="f"><a href="#f-run">omx_run.py</a></td><td>704</td><td>텔레옵·녹화·평가 한 번을 실제로 돌리는 프로그램 <span class="tag ctl">제어 PC</span> <span class="tag new">v3</span></td></tr>
+    <tr><td class="f"><a href="#f-safe">omx_safe_start.py</a></td><td>509</td><td>안전 시작·안전 정지·비상 정지 대기·처음 자세 복귀 <span class="tag ctl">제어 PC</span></td></tr>
+    <tr><td class="f"><a href="#f-bi">omx_bimanual.py</a></td><td>190</td><td>OMX 두 대를 로봇 하나로(협동 로봇, 관절 12개) <span class="tag ctl">제어 PC</span></td></tr>
+    <tr><td class="f"><a href="#f-safe">omx_return_home.py</a></td><td>73</td><td>강제 종료된 평가 뒤 팔을 처음 자세로 되돌림 <span class="tag ctl">제어 PC</span></td></tr>
+    <tr><td rowspan="2">AI 추론</td><td class="f"><a href="#f-async">omx_async.py</a></td><td>200</td><td>비동기 실행 엔진: 다음 동작 묶음을 미리 받아 큐로 이어 붙임 <span class="tag ctl">제어 PC</span> <span class="tag new">v3</span></td></tr>
+    <tr><td class="f"><a href="#f-infer">omx_infer.py</a></td><td>361</td><td>정책 불러오기·추론(PolicyRunner), 추론 서버와 클라이언트 <span class="tag all">둘 다</span></td></tr>
+    <tr><td>연결·전송</td><td class="f"><a href="#f-remote">omx_remote.py</a></td><td>292</td><td>GPU 노트북으로 가는 SSH 터널, API 넘기기, 데이터 전송(rsync) <span class="tag ctl">제어 PC</span></td></tr>
+    <tr><td rowspan="3">학습</td><td class="f"><a href="#f-train">omx_train.py</a></td><td>325</td><td>학습 1건: 학습 데이터 만들기 → lerobot-train → 기록 <span class="tag gpu">GPU</span></td></tr>
+    <tr><td class="f"><a href="#f-train">omx_train_queue.py</a></td><td>286</td><td>학습 계획(여러 건을 차례로) <span class="tag gpu">GPU</span></td></tr>
+    <tr><td class="f"><a href="#f-train">omx_ram.py</a></td><td>196</td><td>학습 메모리·시간 예측 <span class="tag gpu">GPU</span></td></tr>
+    <tr><td rowspan="5">평가 분석</td><td class="f"><a href="#f-eval">omx_protocol.py</a></td><td>352</td><td>평가 프로토콜: 지정 위치, 시도별 기록, 실패 단계 <span class="tag all">둘 다</span></td></tr>
+    <tr><td class="f"><a href="#f-eval">omx_eval_report.py</a></td><td>487</td><td>평가 보고서: 장면 모음, 관절 그래프, 시작 위치 지도 <span class="tag gpu">GPU</span></td></tr>
+    <tr><td class="f"><a href="#f-eval">omx_compare.py</a></td><td>244</td><td>같은 프리셋으로 한 평가끼리 모델 비교 <span class="tag gpu">GPU</span></td></tr>
+    <tr><td class="f"><a href="#f-eval">omx_vision.py</a></td><td>59</td><td>물체(딸기) 위치 찾기 <span class="tag all">둘 다</span></td></tr>
+    <tr><td class="f"><a href="#f-eval">omx_camstats.py</a></td><td>71</td><td>카메라 실제 fps·밝기 측정 <span class="tag ctl">제어 PC</span></td></tr>
+    <tr><td rowspan="5">데이터·이름·설정</td><td class="f"><a href="#f-data">omx_config.py</a></td><td>151</td><td>PC별 설정 읽기(포트, 폴더, 역할) <span class="tag all">둘 다</span></td></tr>
+    <tr><td class="f"><a href="#f-data">omx_index.py</a></td><td>318</td><td>모델 ↔ 학습 데이터 색인(INDEX.md) <span class="tag gpu">GPU</span></td></tr>
+    <tr><td class="f"><a href="#f-data">omx_names.py</a></td><td>218</td><td>팀 이름 규칙(모델·평가 이름) <span class="tag all">둘 다</span></td></tr>
+    <tr><td class="f"><a href="#f-data">omx_home.py</a></td><td>221</td><td>표준 홈 자세(학습 데이터 첫 프레임의 중앙값) <span class="tag all">둘 다</span></td></tr>
+    <tr><td class="f"><a href="#f-data">omx_upload.py</a></td><td>175</td><td>허깅페이스 업로드 <span class="tag all">둘 다</span></td></tr>
+    <tr><td rowspan="2">실행 스크립트</td><td class="f"><a href="#f-sh">omx-control.sh</a></td><td>-</td><td>바탕화면 아이콘: 제어판 켜고 브라우저 열기</td></tr>
+    <tr><td class="f"><a href="#f-sh">omx-panel-server.sh</a></td><td>-</td><td>제어판 서버 시작·재시작(<code>omx-panel</code> 명령)</td></tr>
+  </table></div>
+</section>
+
+<!-- ================================================================ 3 -->
+<section id="flow-button">
+  <span class="num">03</span>
+  <h2>흐름 ①: [녹화 시작] 버튼에서 로봇이 움직이기까지</h2>
+  <p>녹화를 예로 듭니다. 텔레옵과 평가도 같은 길을 지나고, 4단계의 명령만 다릅니다.</p>
+  <ol class="steps">
+    <li><div><h3>화면이 API를 부른다 (omx_panel.html)</h3>
+      <p>버튼을 누르면 자바스크립트가 입력값을 모아 POST로 보냅니다. "로봇 옆에 사람이 있음" 체크가 <code>confirm</code>으로 함께 갑니다.</p>
+      <pre><span class="k">await</span> api(<span class="s">"/api/record"</span>, { confirm, name, task, episodes, episode_s, reset_s, upload, ... })</pre></div></li>
+    <li><div><h3>서버가 받는다 (omx_web.py · Handler.do_POST)</h3>
+      <p><code>Handler</code>는 파이썬 표준 <code>http.server</code>입니다. 경로를 보고 함수를 고릅니다. <code>/api/teleop</code>, <code>/api/record</code>, <code>/api/eval/start</code>는 <code>confirm</code>이 없으면 거절합니다. 제어 PC에서 학습·비교·보고서 같은 경로는 여기서 처리하지 않고 GPU 노트북으로 넘깁니다(<a href="#flow-link">흐름 ④</a>).</p>
+      <pre><span class="k">if</span> self.path <span class="k">in</span> (<span class="s">"/api/teleop"</span>, <span class="s">"/api/record"</span>, <span class="s">"/api/eval/start"</span>) <span class="k">and not</span> body.get(<span class="s">"confirm"</span>):
+    <span class="k">raise</span> RuntimeError(<span class="s">"로봇 옆에 사람이 있는지 확인하고 체크해주세요."</span>)
+...
+<span class="k">elif</span> self.path == <span class="s">"/api/record"</span>:
+    self._json(start_record(body))</pre></div></li>
+    <li><div><h3>명령줄을 만든다 (start_record)</h3>
+      <p>데이터셋 이름을 정하고(같은 이름이 있으면 <code>--resume=true</code>로 이어서), 카메라 보기를 끄고(<code>PREVIEW.stop()</code>, 녹화가 카메라를 써야 하므로), 손목 카메라 밝기 자동 조절을 끈 뒤 <code>omx_run.py</code> 명령을 만듭니다. 로봇·카메라 인자(<code>ROBOT_ARGS</code>, <code>CAMS_ARG</code>, <code>TELEOP_ARGS</code>)는 ① 탭 "로봇 구성"에서 저장한 값으로 <code>apply_setup()</code>이 미리 만들어 둡니다.</p>
+      <pre>cmd = [<span class="s">"~/venv/il3/bin/python"</span>, <span class="s">"omx_run.py"</span>,
+       <span class="s">"--robot.type=omx_follower"</span>, <span class="s">"--robot.port=/dev/omx_follower_2"</span>, <span class="s">"--robot.cameras={front: …, wrist: …}"</span>,
+       <span class="s">"--teleop.type=omx_leader"</span>, <span class="s">"--teleop.port=/dev/omx_leader_2"</span>,
+       <span class="s">"--dataset.repo_id=tkoo/1028_1030"</span>, <span class="s">"--dataset.single_task=pick the strawberry"</span>,
+       <span class="s">"--dataset.num_episodes=10"</span>, <span class="s">"--dataset.episode_time_s=30"</span>, <span class="s">"--dataset.reset_time_s=15"</span>]
+JOB.start(<span class="s">"record"</span>, cmd, info)</pre>
+      <p>협동 로봇이면 <code>--robot.type=bi_omx_follower --robot.left_port=… --robot.right_port=…</code>로 바뀌고 카메라가 4대(front, front_2, wrist_left, wrist_right)가 됩니다.</p></div></li>
+    <li><div><h3>프로세스를 띄운다 (Job.start)</h3>
+      <p><code>Job</code>은 "로봇을 쓰는 작업은 한 번에 하나"를 지키는 관리자입니다. 다른 계정이 로봇을 쓰는지 확인하고(<code>other_robot_processes</code>), 포트가 꽂혀 있는지 보고, 공유 잠금 파일(<code>robot.lock</code>)을 잡은 뒤 <code>subprocess.Popen</code>으로 실행합니다. 이때 표준 입력·출력을 파이프로 연결해 두는데, 이것이 이후의 "명령 보내기"와 "진행 상황 읽기" 통로입니다.</p>
+      <pre>self.proc = subprocess.Popen(cmd, cwd=LEROBOT_DIR, env=env, stdin=PIPE, stdout=PIPE, stderr=STDOUT,
+                             text=True, bufsize=1, start_new_session=True)
+threading.Thread(target=self._read_output, daemon=True).start()</pre></div></li>
+    <li><div><h3>로봇 프로그램이 돈다 (omx_run.py)</h3>
+      <p>인자를 읽고(draccus), 로봇·리더 객체를 만들고, 데이터셋을 만들거나 열고, 연결 → 안전 시작 → 에피소드 반복 → 저장 → 안전 정지 순으로 진행합니다. 자세한 내용은 <a href="#flow-loop">흐름 ③</a>.</p></div></li>
+    <li><div><h3>출력 줄이 화면의 "단계"가 된다 (Job._read_output → _parse)</h3>
+      <p><code>omx_run.py</code>가 찍는 줄을 서버가 한 줄씩 읽어 상태(<code>info</code>)를 바꿉니다. 화면은 1초마다 <code>/api/status</code>로 이 상태를 받아 그립니다.</p>
+      <div class="tablewrap"><table>
+        <tr><th>omx_run.py가 찍는 줄</th><th>화면 단계</th></tr>
+        <tr><td><code>[omx] safe start: …</code> (완료 전)</td><td>안전 시작 중</td></tr>
+        <tr><td><code>Recording episode 3</code></td><td>녹화 중 / 실행 중 (에피소드 번호)</td></tr>
+        <tr><td><code>Reset the environment</code>, <code>[omx] reset period</code></td><td>원위치 시간</td></tr>
+        <tr><td><code>Re-record episode</code></td><td>다시 찍기</td></tr>
+        <tr><td><code>Stop recording</code></td><td>저장 중</td></tr>
+        <tr><td><code>[omx] safe stop: …</code></td><td>천천히 내려놓는 중</td></tr>
+        <tr><td><code>[omx] freeze: …</code> / <code>[omx] safe freeze: … 기다립니다</code></td><td>비상 정지 · 제자리에서 기다림</td></tr>
+        <tr><td><code>Record loop is running slower (21.3 Hz)</code></td><td>(10초에 15번 넘으면) 제어 속도 경고</td></tr>
+        <tr><td><code>[omx] loop: episode 3 median 30.0 p5 …</code></td><td>평가 시도별 제어 속도 기록(노트)</td></tr>
+        <tr><td><code>Teleop loop time: 16.74ms (60 Hz)</code></td><td>텔레옵 속도 표시</td></tr>
+      </table></div></div></li>
+    <li><div><h3>끝나면 정리 (Job._read_output 끝부분)</h3>
+      <p>프로세스가 끝나면 종료 코드를 기록하고, 잠금을 풀고, 데이터셋에 팀 그룹 권한을 주고, 제어 PC라면 GPU 노트북으로 전송을 예약합니다(<code>remote.sync_later(push)</code>). 평가라면 시도별 자동 분석(<code>fill_auto_later</code>)도 시작합니다.</p></div></li>
+  </ol>
+</section>
+
+<!-- ================================================================ 4 -->
+<section id="flow-control">
+  <span class="num">04</span>
+  <h2>흐름 ②: 실행 중에 보내는 명령과 신호</h2>
+  <p>실행 중인 <code>omx_run.py</code>에는 두 가지 통로로 지시합니다. 일상적인 조작은 <b>표준 입력 한 줄</b>, 급한 것은 <b>유닉스 신호</b>입니다. 신호는 프로그램이 무엇을 하고 있든 바로 끼어들 수 있어서, 멈춤 계열에 씁니다.</p>
+  <div class="tablewrap"><table>
+    <tr><th>화면 버튼</th><th>서버 함수</th><th>보내는 것</th><th>omx_run.py에서</th></tr>
+    <tr><td>다음으로</td><td><code>Job.send("next")</code></td><td>stdin <code>next</code></td><td><code>_listen_stdin</code> → <code>EVENTS["exit_early"]</code>: 지금 에피소드(또는 원위치 시간)를 끝냄</td></tr>
+    <tr><td>다시 찍기</td><td><code>Job.send("rerecord")</code></td><td>stdin <code>rerecord</code></td><td>에피소드를 버리고(<code>clear_episode_buffer</code>) 같은 번호로 다시</td></tr>
+    <tr><td>끝내기</td><td><code>Job.send("stop")</code></td><td>stdin <code>stop</code></td><td>지금 에피소드까지 저장하고 종료</td></tr>
+    <tr><td>정지</td><td><code>Job.stop()</code></td><td><code>SIGINT</code> (두 번째는 <code>SIGTERM</code>)</td><td><code>_on_interrupt</code>: 첫 번째는 끝내기와 같음, 두 번째는 바로 빠져나감(안전 정지는 그대로)</td></tr>
+    <tr><td>즉시 중단 (평가)</td><td><code>Job.abort()</code></td><td><code>SIGUSR1</code></td><td><code>_on_abort</code>: 정책을 멈추고 곧바로 처음 자세로 내려놓음. 진행 중 시도는 1초 이상이면 '중단됨'으로 저장</td></tr>
+    <tr><td>비상 정지 (평가)</td><td><code>Job.freeze()</code></td><td><code>SIGUSR2</code></td><td><code>_on_freeze</code>: 명령을 끊고 제자리 유지(토크 유지), 기록 저장, [홈 위치로 이동] 대기</td></tr>
+    <tr><td>홈 위치로 이동</td><td><code>home_return()</code></td><td>stdin <code>home</code></td><td><code>omx_safe_start.RELEASE.set()</code> → 처음 자세로 천천히 → 안전 정지</td></tr>
+    <tr><td>강제 종료</td><td><code>Job.kill()</code></td><td><code>SIGKILL</code> (프로세스 그룹 전체)</td><td>응답 없음. 팔로워는 토크를 켠 채 그 자리. 평가였다면 서버가 <code>omx_return_home.py</code>로 복귀</td></tr>
+  </table></div>
+  <div class="note">비상 정지는 "응답 확인"을 합니다. <code>Job.freeze()</code>가 신호를 보내고 <code>FREEZE_WAIT_S</code>초 안에 <code>[omx] freeze:</code> 줄이 오지 않으면(프로그램이 멈춰 있으면) 강제 종료로 바꿉니다. 녹화·텔레옵의 비상 정지는 처음부터 강제 종료입니다.</div>
+</section>
+
+<!-- ================================================================ 5 -->
+<section id="flow-loop">
+  <span class="num">05</span>
+  <h2>흐름 ③: omx_run.py 안의 제어 루프</h2>
+  <p>로봇을 실제로 움직이는 곳입니다. 실행 순서는 <code>main → run → (텔레옵이면 run_teleop) / run_episodes</code>입니다.</p>
+  <ol class="steps">
+    <li><div><h3>준비 (run)</h3>
+      <ul>
+        <li><code>omx_safe_start.install()</code>: LeRobot의 <code>OmxFollower</code> 클래스의 <code>connect</code>·<code>send_action</code>·<code>disconnect</code>를 안전 버전으로 바꿉니다. 그래서 이후 코드는 평범하게 <code>robot.send_action()</code>만 불러도 안전 시작이 적용됩니다.</li>
+        <li><code>make_robot_from_config</code>: 인자의 <code>--robot.type</code>에 맞는 객체(<code>OmxFollower</code> 또는 <code>BiOmxFollower</code>)를 만듭니다.</li>
+        <li><code>install_live_view</code>: 카메라 영상을 제어판에 보여 줄 쓰기 스레드를 띄웁니다.</li>
+        <li><code>_install_controls</code>: 신호 처리기와 stdin 읽기 스레드를 겁니다.</li>
+        <li>평가라면 <code>Policy(cfg)</code>로 모델을 준비합니다(제어 PC는 GPU 노트북에서 불러옴, <a href="#flow-infer">흐름 ⑤</a>).</li>
+        <li><code>open_dataset</code>: 새로 만들기(<code>LeRobotDataset.create</code>) 또는 이어서(<code>LeRobotDataset.resume</code>). 특징(features)은 로봇이 알려 주는 관절·카메라 목록에서 만들어서, 0.4.4 때와 같은 형식이 됩니다.</li>
+      </ul></div></li>
+    <li><div><h3>안전 시작 → 준비 구간 (warm_up)</h3>
+      <p>리더가 있는 녹화는 첫 에피소드 전에 팔로워가 리더를 따라잡을 때까지 기록 없이 돌립니다. 0.2초씩 끊어 돌며 모든 팔의 상태가 <code>normal</code>이 되었는지 확인하고, 이 사이의 [다음]·[다시 찍기]는 무시합니다(아직 에피소드가 없으므로). 평가는 정책이 첫 목표를 주므로 안전 시작이 첫 시도 안에서 일어나고, 그 끝 프레임을 노트에 남깁니다.</p></div></li>
+    <li><div><h3>한 스텝 (control_loop)</h3>
+      <pre>due = start = time.perf_counter()          <span class="c"># 프레임을 고정 일정(시작 + n/30초)으로: 오래 찍어도 밀리지 않음</span>
+<span class="k">while</span> 지난 시간 &lt; episode_time_s:
+    <span class="k">if</span> EVENTS[<span class="s">"exit_early"</span>]: <span class="k">break</span>          <span class="c"># 다음으로 · 다시 찍기 · 끝내기 · 신호</span>
+    obs = robot.get_observation()           <span class="c"># 관절 위치 + 카메라 최신 프레임</span>
+    _show(obs)                              <span class="c"># 실시간 화면용으로 프레임 참조만 넘김</span>
+    <span class="k">if</span> policy:  act = policy.action(obs_frame) → (필터) → make_robot_action(...)
+    <span class="k">else</span>:       act = teleop.get_action()    <span class="c"># 리더 팔 위치</span>
+    robot.send_action(act)                  <span class="c"># omx_safe_start가 바꿔 끼운 send_action</span>
+    dataset.add_frame({관측, 동작, task})   <span class="c"># 영상은 이 순간 압축기로 바로 들어감</span>
+    due += 1/fps; precise_sleep(due - 지금)</pre>
+      <p>한 스텝이 1/30초를 넘으면 <code>Record loop is running slower</code> 경고를 찍고, 크게 밀리면 일정을 지금부터 다시 잡습니다(밀린 프레임을 몰아 찍지 않음).</p></div></li>
+    <li><div><h3>에피소드 사이 (run_episodes · reset_period)</h3>
+      <ul>
+        <li>녹화: 원위치 시간에도 리더를 계속 따라갑니다(기록 없음).</li>
+        <li>평가: <code>OMX_RESET_HOME=1</code>이면 <code>go_home_all</code>로 두 팔 모두 처음 자세로 돌아가고, 그동안 카메라만 따로 읽어(<code>_feed_live_view</code>) 화면과 물체 위치 감지가 멈추지 않게 합니다.</li>
+        <li>저장: <code>save_episode</code>가 규칙을 적용합니다. 중단된 시도는 1초 이상이면 '중단됨'으로, 빈 에피소드는 건너뜀. 저장되는 에피소드마다 관절 데이터를 따로 백업합니다(<code>.omx_backup/…/episode_000003.npz</code>, 강제 종료로 parquet가 깨져도 분석 가능).</li>
+      </ul></div></li>
+    <li><div><h3>끝 (run의 finally)</h3>
+      <p><code>Stop recording</code> → <code>dataset.finalize()</code> → <code>robot.disconnect()</code>. 이 disconnect가 안전 정지입니다: 평가면 처음 자세로 → 그리퍼 정리 → 출력 3초에 걸쳐 감소 → 토크 끔. 비상 정지 상태라면 여기서 [홈 위치로 이동]을 기다립니다. 마지막에 <code>os._exit(0)</code>으로 바로 끝내는데, 파이썬 정리 단계에서 카메라 스레드 때문에 가끔 비정상 종료 코드가 나던 문제를 피하기 위해서입니다.</p></div></li>
+  </ol>
+  <h3>실시간 카메라 화면은 어떻게 보이나</h3>
+  <p>녹화 중에는 <code>omx_run.py</code>가 카메라를 쥐고 있어서 서버가 직접 열 수 없습니다. 그래서 <code>omx_run.py</code>의 쓰기 스레드가 초당 약 10번 최신 프레임을 JPEG로 <code>/dev/shm/omx_live_&lt;uid&gt;_front.jpg</code>(메모리 위 파일)에 쓰고, 서버의 <code>/stream/front</code>가 그 파일을 MJPEG로 브라우저에 흘려보냅니다. fps·밝기(<code>omx_camstats</code>)도 0.5초마다 <code>…_stats.json</code>으로 같은 방식입니다. 녹화가 아닐 때 [카메라 보기]를 켜면 서버의 <code>Preview</code>가 직접 카메라를 열어 같은 파일을 씁니다.</p>
+</section>
+
+<!-- ================================================================ 6 -->
+<section id="flow-link">
+  <span class="num">06</span>
+  <h2>흐름 ④: 제어 PC ↔ GPU 노트북</h2>
+  <p>설정에 <code>"role": "control"</code>인 PC에서 서버가 켜지면 <code>omx_remote.TUNNEL.start()</code>가 SSH 연결 하나를 열고 유지합니다(Wi-Fi가 끊기거나 절전 후에도 다시 연결).</p>
+  <pre>ssh -N -L 127.0.0.1:<span class="k">8795</span>:127.0.0.1:<span class="k">8765</span>   <span class="c"># 내 제어판 포트+30 → GPU 노트북의 내 계정 제어판</span>
+       -L 127.0.0.1:<span class="k">8796</span>:127.0.0.1:<span class="k">8790</span>   <span class="c"># 내 제어판 포트+31 → 내 계정 추론 서버(GPU 제어판 포트+25)</span>
+       omx-gpu                              <span class="c"># 설치 때 만든 SSH 별칭(Tailscale 주소 + 키)</span></pre>
+  <h3>API 넘기기 (Handler._forward)</h3>
+  <p>화면은 항상 이 PC의 서버에만 요청합니다. 서버는 아래 경로를 받으면 직접 처리하지 않고 터널 너머 GPU 노트북 제어판에 그대로 보내 그 답을 돌려줍니다. 그래서 학습 탭·비교·보고서는 제어 PC에서도 같은 화면으로 쓰입니다.</p>
+  <pre>PROXY_GET  = (<span class="s">"/api/train/"</span>, <span class="s">"/api/eval/compare"</span>, <span class="s">"/api/eval/report"</span>, <span class="s">"/report/"</span>, <span class="s">"/api/presets"</span>)
+PROXY_POST = (<span class="s">"/api/train/"</span>, <span class="s">"/api/eval/compare"</span>, <span class="s">"/api/eval/report"</span>, <span class="s">"/api/presets/"</span>, <span class="s">"/api/home/task"</span>)</pre>
+  <h3>데이터 보내기 (sync_dataset · sync_loop)</h3>
+  <ul>
+    <li>녹화·평가가 끝나면 <code>rsync</code>로 GPU 노트북의 <code>/srv/il/lerobot_data/&lt;GPU 계정&gt;/&lt;이름&gt;</code>에 복사합니다. GPU 쪽 파일은 지우지 않습니다(추가·변경만).</li>
+    <li>같은 이름이 이미 있는데 다른 곳에서 만든 데이터면 보내지 않습니다. 데이터셋 안의 <code>.omx_origin</code>(PC 이름+계정)로 구별합니다.</li>
+    <li>보낸 결과는 데이터셋 안 <code>.omx_sync.json</code>에 남기고(GPU로는 안 감), <code>sync_loop</code>가 1분마다 실패했거나 아직 안 보낸 것을 다시 보냅니다. 에피소드 0개, 임시 사진 폴더(<code>images/</code>)는 보내지 않습니다.</li>
+    <li>평가 결과 표시(성공/실패 등)는 <code>.omx_notes/eval_….json</code>에 있고, 바꿀 때마다 2초 뒤 <code>sync_note</code>로 보냅니다.</li>
+  </ul>
+  <h3>모델 고르기</h3>
+  <p>평가할 모델 목록은 GPU 노트북의 학습 기록(<code>/api/train/runs</code>, 넘기기)에서 옵니다. 고르면 <code>fetch_model</code>이 그 모델의 설정 파일 두 개(<code>config.json</code>, <code>train_config.json</code>)만 <code>~/.cache/omx/models</code>로 가져옵니다. 정책 종류·카메라 이름·관절 수를 확인하는 데만 쓰고, 가중치는 GPU 노트북에만 있습니다.</p>
+</section>
+
+<!-- ================================================================ 7 -->
+<section id="flow-infer">
+  <span class="num">07</span>
+  <h2>흐름 ⑤: 평가 때 AI 추론이 오가는 길</h2>
+  <p>제어 PC에는 GPU가 없으므로, 30Hz로 로봇을 움직이는 루프는 제어 PC에서 돌고 "다음 동작 묶음 계산"만 GPU 노트북에 부탁합니다. 매 프레임을 보내지 않고, 묶음이 떨어져 갈 때만 그 순간의 관측을 보냅니다.</p>
+  <ol class="steps">
+    <li><div><h3>평가 시작 (omx_web.start_eval → remote_eval_settings)</h3>
+      <p>모델과 설정을 확인하고(관절 6개=단일, 12개=협동, 카메라 이름 일치: <code>check_model_fits</code>), 추론 설정을 환경 변수로 만들어 <code>omx_run.py</code>에 넘깁니다.</p>
+      <pre>OMX_REMOTE_URL=http://127.0.0.1:8796     OMX_REMOTE_MODEL=/srv/il/checkpoints/tkoo/…/pretrained_model
+OMX_REMOTE_OVERRIDES={"diffusion_steps": 10, "n_action_steps": 15}
+OMX_ASYNC=1  OMX_ASYNC_CHUNK=15  OMX_ASYNC_THRESHOLD=0.90  OMX_ASYNC_AGG=latest_only</pre>
+      <p>비동기를 켜지 않은 기본("동기") 실행도 원격에서는 엔진을 씁니다. 다만 묶음을 거의 다 쓴 뒤, 약 0.5초(네트워크 왕복 한 번) 전에 다음 묶음을 요청하게 합니다: <code>threshold = min(0.9, 15 / 묶음 크기)</code>. ACT(묶음 100)는 0.15, Diffusion(15)은 0.9입니다.</p></div></li>
+    <li><div><h3>모델 미리 불러오기 (Policy → RemoteClient.load)</h3>
+      <p><code>/load</code>를 보내 GPU에 모델을 올립니다(SmolVLA는 처음 수십 초). 서버는 모델이 원하는 영상 크기(Diffusion은 240×320으로 줄여 받음)와 관측 개수(Diffusion 2장, 나머지 1장)를 알려 줍니다.</p></div></li>
+    <li><div><h3>매 스텝 (AsyncRunner.step)</h3>
+      <pre>큐에 남은 동작 ≤ threshold × 묶음  그리고  추론 중이 아니면
+    → 배경 스레드에서 _infer(t0, 최근 관측)      <span class="c"># 로봇은 큐의 동작으로 계속 움직임</span>
+큐에서 이번 스텝 동작을 꺼내 돌려줌
+큐가 비었으면 → 추론이 끝날 때까지 기다림(기다린 횟수로 기록)</pre>
+      <p>새 묶음이 오면 <code>_merge</code>가 이미 지나간 스텝은 버리고, 겹치는 스텝은 합칩니다(<code>weighted_average</code> 0.3·0.7, <code>latest_only</code>는 새 것). RTC(SmolVLA 계열)는 아직 실행할 동작과 예상 지연을 함께 보내, 새 묶음이 이어지게 만들어진 뒤 큐를 통째로 바꿉니다.</p></div></li>
+    <li><div><h3>보내는 형식 (pack_observations · encode)</h3>
+      <pre>[4바이트 머리 길이][JSON 머리][JPEG, JPEG, …]
+머리: {"model", "overrides", "task", "robot_type", "chunk",
+       "obs": [{"state": [관절 6 또는 12개], "images": {"observation.images.front": [위치, 길이], …}}],
+       "rtc": {"delay", "left"}}
+답:   {"actions": 로봇용 묶음, "original": 정규화 전 묶음(RTC용), "infer_ms", "load_ms"}</pre>
+      <p>카메라 프레임은 JPEG(품질 90)로 바꿔 보내므로 카메라 4대 한 번에 약 200KB, Diffusion 2대는 약 50KB입니다.</p></div></li>
+    <li><div><h3>GPU 쪽 (omx_infer.serve → ModelCache → PolicyRunner.infer)</h3>
+      <p>계정마다 하나씩 떠 있는 추론 서버(127.0.0.1 전용)가 받습니다. <code>allowed_model</code>로 팀 체크포인트 폴더 안 모델만 허용하고, <code>ModelCache</code>가 최근 모델 2개를 GPU에 올려 둡니다. <code>PolicyRunner.infer</code>는 LeRobot의 전처리기 → <code>policy.predict_action_chunk</code> → 후처리기를 거쳐 묶음을 만듭니다. Diffusion은 관측 2장을 정책 내부 큐에 직접 채워 넣습니다.</p></div></li>
+    <li><div><h3>로봇으로 (control_loop)</h3>
+      <p>꺼낸 동작 텐서를 <code>make_robot_action</code>으로 관절 이름 dict로 바꿔 <code>robot.send_action</code>, 그리고 데이터셋에 기록합니다. 10초마다 <code>[omx] async: 추론 …ms … 원격: 왕복 …ms (GPU 추론 …ms)</code>를 찍습니다.</p></div></li>
+  </ol>
+  <div class="tablewrap"><table>
+    <tr><th>측정 (2026-10-28, 시험 환경)</th><th>왕복</th><th>GPU 계산</th><th>결과</th></tr>
+    <tr><td>협동 ACT, 카메라 4대, 묶음 100</td><td>370~640ms</td><td>약 22ms</td><td>30Hz 유지, 큐가 빈 경우 시작 때 1~2회</td></tr>
+    <tr><td>단일 Diffusion DDIM 10, 카메라 2대, 묶음 15</td><td>150~330ms</td><td>약 92ms</td><td>왕복이 0.25초 안이면 30Hz. 넘으면 끊김(묶음 0.5초 분량의 한계)</td></tr>
+  </table></div>
+  <p class="cap">GPU 노트북에 로봇을 직접 꽂아 쓰는 경우에는 추론 서버를 거치지 않고 같은 프로세스에서 <code>PolicyRunner</code>를 씁니다. 비동기를 켜면 같은 엔진, 끄면 매 스텝 <code>PolicyRunner.select</code>(정책의 <code>select_action</code>, ACT 시간 앙상블 포함)입니다.</p>
+</section>
+
+<!-- ================================================================ 8 -->
+<section id="flow-train">
+  <span class="num">08</span>
+  <h2>흐름 ⑥: 학습</h2>
+  <ol class="steps">
+    <li><div><h3>학습 탭 → GPU 제어판</h3><p>[학습 시작]은 <code>/api/train/start</code>입니다. 제어 PC에서는 넘기기로 GPU 노트북 제어판의 <code>train_start</code>가 받습니다. <code>make_job</code>이 설정을 검사해(스텝 100~500,000, 배치 1~64, 평가 데이터는 학습 후보로 체크한 시도만) 작업 파일 <code>train_job_….json</code>을 만들고 <code>omx_train.py</code>를 독립 프로세스로 띄웁니다. 제어판이 꺼져도 학습은 계속됩니다.</p></div></li>
+    <li><div><h3>학습 데이터 만들기 (omx_train.py 1단계)</h3><p>데이터셋 하나를 그대로 쓰면 그대로, 빼는 에피소드가 있거나 여러 개면 <code>lerobot-edit-dataset</code>으로 빼고(<code>delete_episodes</code>) 합쳐서(<code>merge</code>, 0.6.1은 결과 이름이 <code>--new_repo_id</code>) <code>&lt;계정&gt;/train_&lt;키워드&gt;_&lt;날짜&gt;</code>를 만듭니다. 어느 원본의 몇 번 에피소드인지 <code>meta/omx_sources.json</code>에 남깁니다. 같은 조합을 전에 만들었으면 다시 씁니다.</p></div></li>
+    <li><div><h3>lerobot-train (2단계)</h3>
+      <pre>lerobot-train --dataset.repo_id=tkoo/train_… --policy.type=act --policy.device=cuda --policy.push_to_hub=false
+  --output_dir=/srv/il/checkpoints/tkoo/&lt;이름&gt; --steps=40000 --batch_size=8 --num_workers=8
+  --log_freq=100 --save_freq=10000 --env_eval_freq=0 --wandb.enable=false
+  <span class="c"># Diffusion: --policy.resize_shape=[240, 320] --policy.crop_ratio=0.95</span>
+  <span class="c"># SmolVLA: --policy.path=lerobot/smolvla_base --rename_map={front→camera1, wrist→camera2}</span></pre>
+      <p><code>run_logged</code>가 출력의 진행 막대(<code>51/100 [00:15&lt;00:09, 5.14step/s]</code>)와 <code>loss:</code> 줄을 읽어 <code>train_state.json</code>에 쓰고, 화면은 2초마다 이것을 읽어 그래프를 그립니다.</p></div></li>
+    <li><div><h3>정리 (3단계)</h3><p>마지막 모델을 <code>&lt;run&gt;/pretrained_model</code>로 복사, <code>summary.json</code>(학습자, 시간, 최종 loss, 데이터 지문)과 <code>train.log</code>를 남기고, 팀 그룹 권한을 주고, <code>omx_index.py</code>로 <code>INDEX.md</code>를 갱신합니다.</p></div></li>
+  </ol>
+  <p>학습 계획(<code>omx_train_queue.py</code>)은 여러 건을 한 줄로 세워 두고 GPU가 비면 차례로 <code>omx_train.py</code>를 돌립니다. GPU 하나에서 학습은 한 번에 하나만 돕니다(다른 계정의 학습도 확인).</p>
+</section>
+
+<!-- ================================================================ files -->
+<section id="files">
+  <span class="num">09</span>
+  <h2>파일별 상세</h2>
+  <p>각 파일의 역할, 언제 실행되는지, 주요 함수를 설명합니다. 함수 이름 옆 설명은 코드에서 실제로 하는 일입니다.</p>
+  <div class="files">
+
+  <article class="file" id="f-web">
+    <h3>omx_web.py <small>2524줄 · 제어판 서버 · 제어 PC와 GPU 노트북 모두</small></h3>
+    <p class="role">브라우저가 말을 거는 유일한 상대입니다. 계정마다 하나씩 <code>127.0.0.1:&lt;포트&gt;</code>에서 떠 있고, 로봇 작업 실행·카메라 보기·데이터 목록·평가 기록·학습 요청을 모두 맡습니다. 표준 라이브러리 <code>http.server</code>만 씁니다.</p>
+    <div class="tablewrap"><table>
+      <tr><th>영역</th><th>함수·클래스</th><th>하는 일</th></tr>
+      <tr><td>로봇 구성</td><td class="f">load_setup · apply_setup · save_setup · camera_label · list_cameras · camera_probe</td><td><code>~/.config/omx/robot.json</code>(단일/협동, 세트, 카메라 역할·라벨)을 읽어 전역 변수(<code>FOLLOWERS</code>, <code>CAMERAS</code>, <code>ROBOT_ARGS</code> …)를 만듦. 카메라는 USB 포트 경로(<code>/dev/v4l/by-path</code>)로 구별</td></tr>
+      <tr><td>점검</td><td class="f">run_check · ping_motors · reset_motors · arms_to_check · other_robot_processes · fix_wrist_fps</td><td>포트·카메라 존재, 모터 핑(Dynamixel SDK 직접), 모터 재부팅, 다른 사람이 로봇을 쓰는지, 손목 카메라 어두울 때 fps 저하 끄기</td></tr>
+      <tr><td>로봇 작업</td><td class="f">class Job · start_teleop · start_record · start_eval · display_args</td><td><code>Job</code>: 한 번에 하나, 잠금, 실행, 출력 읽기(<code>_parse</code>), 명령(<code>send</code>), 정지·즉시 중단·비상 정지·강제 종료. <code>start_*</code>는 명령줄과 환경 변수를 만들어 <code>JOB.start</code></td></tr>
+      <tr><td>평가 설정</td><td class="f">find_model · find_model_remote · check_model_fits · policy_eval_options · remote_eval_settings · thread_env · home_env · task_home_env</td><td>모델 찾기, 로봇 구성과 맞는지 확인, 정책별 옵션(DDIM 단계, ACT 부드럽게, SmolVLA 카메라 이름 바꾸기, 비동기·RTC, 출력 필터)을 인자·환경 변수로</td></tr>
+      <tr><td>평가 프로토콜</td><td class="f">update_note · protocol_target · protocol_attempt_start/_end · detect_loop · fill_auto_later · eval_list · eval_mark · remove_unstarted_eval</td><td>지정 위치 평가: 시도마다 목표 위치, 시작 위치 감지(0.5초마다 front 화면), 결과 표시, 실패 단계 자동 추정. 노트는 잠금 아래에서 읽고 씀</td></tr>
+      <tr><td>카메라 보기</td><td class="f">class Preview · camera_stats · display_jpeg · Handler._stream · _snapshot</td><td>작업이 없을 때 카메라를 직접 열어 보여 줌. 작업 중에는 <code>omx_run.py</code>가 쓰는 <code>/dev/shm</code> 파일을 MJPEG로 중계</td></tr>
+      <tr><td>홈 자세</td><td class="f">home_status · home_current · home_return · start_pose · save_start_pose</td><td>표준 홈 자세 표시·비교, 비상 정지 뒤 [홈 위치로 이동], 시작·휴식 자세 저장(리더 팔 읽기)</td></tr>
+      <tr><td>데이터</td><td class="f">list_datasets · merged_datasets · dataset_detail · dataset_dir · share_with_team · notes_path/read_notes/write_notes · Handler._media</td><td>데이터셋 목록(녹화/학습/평가 구분), 에피소드별 영상 위치, 영상 재생(HTTP Range), 팀 권한, 업로드용 메모</td></tr>
+      <tr><td>GPU 전송</td><td class="f">sync_one · sync_status · sync_retry · sync_loop · local_runs · running_repo_root</td><td>제어 PC: 아직 안 보낸 데이터 목록, [다시 보내기], 1분마다 자동 재전송. 실제 복사는 <code>omx_remote</code></td></tr>
+      <tr><td>학습</td><td class="f">train_status · train_estimate · make_job · train_name · train_start · train_stop · queue_status · queue_action · train_runs · train_clean · gpu_users</td><td>학습 탭 API. 이름 규칙(<code>omx_names</code>), 메모리 예측(<code>omx_ram</code>), 학습 계획(<code>omx_train_queue</code>)</td></tr>
+      <tr><td>보고서·정렬</td><td class="f">start_report · report_status · reference_frame · alignment</td><td>평가 보고서 만들기(<code>omx_eval_report.py</code>를 배경 실행), 카메라 각도가 학습 때와 얼마나 다른지(이동·확대·회전)</td></tr>
+      <tr><td>업로드</td><td class="f">class Uploader</td><td>허깅페이스 업로드를 배경 실행(<code>omx_upload.py</code>), 로그인 확인</td></tr>
+      <tr><td>HTTP</td><td class="f">class Handler (do_GET · do_POST · _json · _forward) · main · start_inference_server</td><td>경로 → 함수 연결. 제어 PC는 학습·비교 경로를 GPU로 넘김. GPU 노트북은 켜질 때 계정의 추론 서버도 띄움</td></tr>
+    </table></div>
+  </article>
+
+  <article class="file" id="f-panel">
+    <h3>omx_panel.html <small>3641줄 · 화면 · 브라우저</small></h3>
+    <p class="role">HTML·CSS·자바스크립트가 한 파일에 들어 있습니다. 탭은 ① 데이터 수집(연결 점검·로봇 구성·카메라·텔레옵·녹화·GPU 전송), ② 학습, ③ 평가 세 개입니다. 서버가 보내 주는 상태를 그리기만 하고, 판단은 서버가 합니다.</p>
+    <div class="tablewrap"><table>
+      <tr><th>부분</th><th>하는 일</th></tr>
+      <tr><td class="f">poll() · render()</td><td>1초마다 <code>/api/status</code>(작업 단계, 로그, 카메라 fps·밝기, GPU 연결, 전송 상태) → 화면 전체 갱신</td></tr>
+      <tr><td class="f">pollSystem · pollTrain · pollReport · pollPreviewDetect</td><td>5초(GPU·RAM), 2초(학습 진행), 2초(보고서), 0.5초(물체 위치)</td></tr>
+      <tr><td class="f">api() · urgent() · act() · armed()</td><td>POST 도우미. <code>urgent</code>는 비상 정지·강제 종료용(기다리지 않음), <code>armed</code>는 "한 번 더 눌러야 실행"</td></tr>
+      <tr><td class="f">buildCamFrames()</td><td>로봇 구성의 카메라 수만큼 화면 칸을 만들고 <code>&lt;img src="/stream/front"&gt;</code>로 영상 연결, 오른쪽 위에 fps·밝기</td></tr>
+      <tr><td class="f">setupPanel · syncPanel</td><td>로봇 구성(세트, 카메라 역할·라벨, 미리보기 한 장), GPU 전송 상태와 [다시 보내기]</td></tr>
+      <tr><td class="f">evFreeze 버튼</td><td>비상 정지 → 같은 자리에서 [홈 위치로 이동]으로 바뀜(버튼 위치 고정)</td></tr>
+    </table></div>
+  </article>
+
+  <article class="file" id="f-run">
+    <h3>omx_run.py <small>704줄 · 로봇 실행 · 제어 PC (GPU 노트북에 로봇이 있으면 그곳도)</small> <span class="tag new">v3</span></h3>
+    <p class="role">텔레옵·녹화·평가 한 번을 처음부터 끝까지 돌리는 독립 프로그램입니다. 제어판 없이 터미널에서도 실행할 수 있습니다. <a href="#flow-loop">흐름 ③</a>이 이 파일의 흐름입니다.</p>
+    <div class="tablewrap"><table>
+      <tr><th>함수·클래스</th><th>하는 일</th></tr>
+      <tr><td class="f">RunConfig · DatasetArgs · PolicyArgs</td><td>인자 정의. 이름은 lerobot-record와 같게(<code>--robot.*</code>, <code>--teleop.*</code>, <code>--dataset.*</code>, <code>--policy.path</code>). 녹화 중 압축(<code>streaming_encoding=True</code>, <code>encoder_threads=2</code>)이 기본</td></tr>
+      <tr><td class="f">EVENTS · ABORT · _on_abort · _on_freeze · _on_interrupt · _listen_stdin · _install_controls</td><td>명령·신호 처리. <code>EVENTS</code>(exit_early·rerecord_episode·stop_recording)를 루프가 매 스텝 확인. 0.6.1의 전역 키보드 단축키는 쓰지 않음(다른 창의 n·r·q 글자까지 받기 때문)</td></tr>
+      <tr><td class="f">ActionFilter · _make_filter</td><td>평가 출력 부드럽게: 관절 목표의 이동 평균(약 0.05/0.1/0.2초 지연), 그리퍼는 따로</td></tr>
+      <tr><td class="f">Policy</td><td>평가의 동작 출처. 원격(<code>RemoteClient</code>) 또는 로컬(<code>PolicyRunner</code>), 비동기 엔진 또는 매 스텝 <code>select</code></td></tr>
+      <tr><td class="f">open_dataset · save_episode · _backup_episode</td><td>데이터셋 만들기·이어서, 저장 규칙(중단 시도, 빈 에피소드), 관절 백업</td></tr>
+      <tr><td class="f">install_live_view · _show · _feed_live_view</td><td>실시간 화면 파일(<code>/dev/shm</code>) 쓰기</td></tr>
+      <tr><td class="f">control_loop · warm_up · reset_period · run_episodes · run_teleop · run · main</td><td>제어 루프(고정 일정), 첫 에피소드 전 따라잡기, 원위치 시간, 에피소드 반복, 텔레옵(60Hz, 1초마다 루프 시간 출력), 전체 순서</td></tr>
+      <tr><td class="f">Viewer</td><td>[Rerun 보기] 주소가 있으면 Rerun으로 관측·동작 보내기</td></tr>
+    </table></div>
+  </article>
+
+  <article class="file" id="f-safe">
+    <h3>omx_safe_start.py · omx_return_home.py <small>509 + 73줄 · 안전 · 제어 PC</small></h3>
+    <p class="role">LeRobot은 연결하자마자 팔로워를 목표 자세로 최대 속도·최대 힘으로 보냅니다. 팔이 책상에 누워 있으면 손목 링크가 부러질 수 있어(실제 사례), <code>install()</code>이 <code>OmxFollower</code>의 메서드를 안전 버전으로 바꿔 끼웁니다.</p>
+    <div class="tablewrap"><table>
+      <tr><th>단계·함수</th><th>하는 일</th></tr>
+      <tr><td class="f">connect (바꿔 끼움)</td><td>출력 30%로 제한(<code>Goal_PWM</code>), 표준 홈 자세가 켜져 있으면 그 자세로 먼저 이동</td></tr>
+      <tr><td class="f">send_action (바꿔 끼움)</td><td>lift(저장된 시작 자세로 천천히 들기) → gripper(천천히 닫기) → approach(제한 속도로 목표 쪽으로, 리더를 움직이기 시작하면 원래 출력으로 빠르게) → normal. 첫 명령 때 시작 자세를 기록(<code>_omx_home</code>, 처음 자세 파일)</td></tr>
+      <tr><td class="f">disconnect (바꿔 끼움) · soft_land · go_home</td><td>안전 정지: 평가면 처음 자세 → 그리퍼 → 출력 3초 감소 → 토크 끔. 비상 정지(<code>FREEZE</code>)면 여기서 <code>RELEASE</code>를 기다림</td></tr>
+      <tr><td class="f">multi-turn 보정 (wrap, 재부팅)</td><td>모터가 한 바퀴 넘게 읽히는 문제: 리더 값은 한 바퀴 빼서 보정, 팔로워 회전 관절은 재부팅, 그래도 차이가 크면 시작 거부</td></tr>
+      <tr><td class="f">arms_of · go_home_all · set_pwm_all · arm_joints</td><td>협동 로봇은 두 팔 각각에 같은 처리, 원위치 복귀는 두 팔 동시</td></tr>
+      <tr><td class="f">omx_return_home.py</td><td>강제 종료된 평가 뒤: 처음 자세 파일(팔마다 포트·관절)을 읽어 버스에만 연결하고, 지금 위치를 목표로 고정 → 처음 자세로 천천히 → 안전 정지</td></tr>
+    </table></div>
+  </article>
+
+  <article class="file" id="f-bi">
+    <h3>omx_bimanual.py <small>190줄 · 협동 로봇 · 제어 PC</small></h3>
+    <p class="role">OMX 두 대(왼팔·오른팔)를 LeRobot의 로봇 하나로 묶습니다. 관절 이름 앞에 <code>left_</code>/<code>right_</code>를 붙여 12개로 만들고, 카메라는 로봇 단위(front, front_2, wrist_left, wrist_right)로 둡니다. 각 팔은 평범한 <code>OmxFollower</code>/<code>OmxLeader</code>라서 안전 기능이 팔마다 그대로 적용됩니다. 파일을 import하면 <code>bi_omx_follower</code>·<code>bi_omx_leader</code> 타입이 LeRobot 설정 파서에 등록됩니다.</p>
+    <div class="tablewrap"><table>
+      <tr><th>클래스</th><th>하는 일</th></tr>
+      <tr><td class="f">BiOmxFollowerConfig · BiOmxFollower</td><td><code>get_observation</code>: 두 팔 관절 + 카메라를 한 dict로, <code>send_action</code>: 앞글자로 나눠 각 팔에. <code>arms</code> 목록(안전 기능이 팔마다 처리), 팔마다 <code>_omx_side</code></td></tr>
+      <tr><td class="f">BiOmxLeaderConfig · BiOmxLeader</td><td>두 리더의 <code>get_action</code>을 한 dict로</td></tr>
+    </table></div>
+  </article>
+
+  <article class="file" id="f-async">
+    <h3>omx_async.py <small>200줄 · 비동기 실행 엔진 · 제어 PC</small> <span class="tag new">v3</span></h3>
+    <p class="role">묶음으로 동작을 내는 정책(ACT, Diffusion, SmolVLA)을 쓸 때, 다음 묶음을 계산하는 동안에도 로봇이 큐에 쌓인 동작으로 계속 움직이게 합니다. v3에서 추론을 "백엔드" 하나로 통일해서, 원격과 로컬이 같은 엔진을 씁니다.</p>
+    <div class="tablewrap"><table>
+      <tr><th>함수</th><th>하는 일</th></tr>
+      <tr><td class="f">AsyncRunner.step(obs)</td><td>관측 기록(최근 2개) → 큐가 기준 이하면 배경 추론 시작 → 이번 스텝 동작 반환. 큐가 비면 기다리고 횟수·시간 기록</td></tr>
+      <tr><td class="f">_infer · _merge · _start</td><td>백엔드의 <code>infer(hist, task, robot_type, chunk, rtc_delay, rtc_left)</code> 호출, 결과를 시간축에 맞춰 큐에 합침</td></tr>
+      <tr><td class="f">new_episode · _report</td><td>에피소드마다 큐 비우기, 10초마다 추론 시간·왕복·기다린 횟수 출력</td></tr>
+      <tr><td class="f">from_env(backend)</td><td><code>OMX_ASYNC*</code>, <code>OMX_RTC*</code> 환경 변수로 엔진 만들기. RTC는 SmolVLA·pi0 계열만</td></tr>
+    </table></div>
+  </article>
+
+  <article class="file" id="f-infer">
+    <h3>omx_infer.py <small>361줄 · 추론 · GPU 노트북(서버)과 제어 PC(클라이언트)</small></h3>
+    <p class="role">모델을 불러 묶음을 계산하는 코드(<code>PolicyRunner</code>)와, 그것을 네트워크 너머에서 쓰게 하는 서버·클라이언트가 함께 있습니다. 같은 <code>PolicyRunner</code>를 GPU 노트북 로컬 평가와 추론 서버가 같이 씁니다.</p>
+    <div class="tablewrap"><table>
+      <tr><th>함수·클래스</th><th>하는 일</th></tr>
+      <tr><td class="f">PolicyRunner(model, overrides)</td><td>LeRobot <code>PreTrainedConfig</code> → 정책 클래스 <code>from_pretrained</code> → 전·후처리기. 덮어쓰기: DDIM 단계, n_action_steps, ACT 시간 앙상블, 카메라 이름 바꾸기, RTC</td></tr>
+      <tr><td class="f">.infer(hist, …) · .select(obs, …) · .reset() · .image_size()</td><td>묶음 추론(비동기·서버용), 한 스텝 추론(정책 자체 큐), 에피소드 초기화, 받을 영상 크기</td></tr>
+      <tr><td class="f">encode · decode · pack_observations · unpack_observations</td><td>보내는 형식: 4바이트 길이 + JSON + JPEG들</td></tr>
+      <tr><td class="f">serve(port) · ModelCache · allowed_model</td><td>HTTP 서버(<code>/load</code>, <code>/infer</code>, <code>/health</code>), 최근 모델 2개 유지, 팀 체크포인트 폴더 밖 모델 거부</td></tr>
+      <tr><td class="f">RemoteClient(url, model, overrides)</td><td>제어 PC 쪽. 연결 유지(keep-alive), 끊기면 한 번 다시 연결. <code>load()</code>는 180초까지 기다림. 왕복·추론 시간·보낸 바이트 기록(<code>net</code>)</td></tr>
+    </table></div>
+  </article>
+
+  <article class="file" id="f-remote">
+    <h3>omx_remote.py <small>292줄 · 연결·전송 · 제어 PC</small></h3>
+    <p class="role">제어 PC 쪽에서 GPU 노트북과 이어지는 모든 것: SSH 터널, API 넘기기 판단, GPU 쪽 데이터 목록, 모델 설정 가져오기, 데이터셋 전송과 그 상태 기록.</p>
+    <div class="tablewrap"><table>
+      <tr><th>함수·클래스</th><th>하는 일</th></tr>
+      <tr><td class="f">Tunnel (start · _run · _clear_stale · status · stop)</td><td><code>ssh -N -L … -L …</code>를 띄우고 끊기면 다시. 비정상 종료한 이전 터널이 포트를 쥐고 있으면 정리(내 것만)</td></tr>
+      <tr><td class="f">gpu_request · gpu_json · proxied · gpu_datasets · ssh_read</td><td>터널로 GPU 제어판 호출, 넘길 경로 판단, GPU의 데이터셋 목록(15초 캐시), 파일 하나 읽기</td></tr>
+      <tr><td class="f">fetch_model · origin_tag</td><td>모델 설정 파일 2개만 가져와 캐시, 이 PC의 이름표(PC 이름·계정)</td></tr>
+      <tr><td class="f">sync_dataset · sync_with_state · needs_sync · episodes · sync_note · sync_later</td><td>rsync 전송(같은 이름의 남의 데이터 보호, 새 계정 폴더 만들기, <code>images/</code> 제외), 결과 기록, 에피소드 0개는 안 보냄, 노트 전송, 배경 실행</td></tr>
+    </table></div>
+  </article>
+
+  <article class="file" id="f-train">
+    <h3>omx_train.py · omx_train_queue.py · omx_ram.py <small>325 + 286 + 196줄 · 학습 · GPU 노트북</small></h3>
+    <div class="tablewrap"><table>
+      <tr><th>파일·함수</th><th>하는 일</th></tr>
+      <tr><td class="f">omx_train.main</td><td>학습 1건 전체(<a href="#flow-train">흐름 ⑥</a>). 팀 학습 잠금(<code>train.lock</code>)을 잡고, SIGINT/SIGTERM이면 중간 저장을 남기고 멈춤</td></tr>
+      <tr><td class="f">omx_train.run_logged · find_reusable · smolvla_rename_map</td><td>진행 막대·loss 읽기, 같은 조합의 학습 데이터 재사용, SmolVLA 카메라 이름 대응(front→camera1, wrist→camera2)</td></tr>
+      <tr><td class="f">omx_train_queue (main · run_item · gpu_busy · memory_check · spawn_runner · edit_queue)</td><td>학습 계획 실행기. 독립 프로세스로 돌며 GPU가 비면 다음 건, 실패하면 이유를 기록하고 다음 건, 메모리가 모자랄 것 같으면 시작하지 않음</td></tr>
+      <tr><td class="f">omx_ram (estimate · ram_bytes · vram_bytes · step_seconds · suggest)</td><td>배치·카메라·작업자 수로 RAM 사용량 예측, 예전 학습 기록으로 시간 예측, 넘치면 작업자 수를 줄인 조합 제안 (0.4.4 때 측정한 식이라 0.6.1에서 다시 맞출 필요가 있음)</td></tr>
+    </table></div>
+  </article>
+
+  <article class="file" id="f-eval">
+    <h3>평가 분석: omx_protocol.py · omx_eval_report.py · omx_compare.py · omx_vision.py · omx_camstats.py</h3>
+    <div class="tablewrap"><table>
+      <tr><th>파일</th><th>하는 일</th></tr>
+      <tr><td class="f">omx_protocol.py</td><td>평가 프리셋(작업별 지정 위치, <code>omx_presets/&lt;id&gt;.json</code>) 관리, 시도마다 목표·시작 위치·결과·실패 단계 기록, 무효 시도는 위치를 돌려줌, 중단된 시도 표시, 학습 후보 고르기</td></tr>
+      <tr><td class="f">omx_eval_report.py</td><td>평가 보고서: 시도별 장면 모음(2초마다 front·wrist), 시작 위치 지도(데모 vs 시도), 관절 그래프(데모 범위 vs 시도), 잡기 분석, 실패 단계 규칙, 매끄러움 지표. 관절 데이터가 없으면 백업(npz)이나 영상만으로</td></tr>
+      <tr><td class="f">omx_compare.py</td><td>같은 프리셋 평가들을 위치 × 평가 표로 비교(성공률, 실패 단계, 제어 속도), 예전 수동 평가를 v2 기록으로 옮기기</td></tr>
+      <tr><td class="f">omx_vision.py</td><td>물체 찾기(<code>red_hsv</code>: 가장 큰 빨간 영역의 중심), 관심 영역 제한</td></tr>
+      <tr><td class="f">omx_camstats.py</td><td>LeRobot 카메라의 하드웨어 읽기 함수를 감싸 실제 fps 측정, 평균 밝기(0~255)</td></tr>
+    </table></div>
+  </article>
+
+  <article class="file" id="f-data">
+    <h3>데이터·이름·설정: omx_config.py · omx_index.py · omx_names.py · omx_home.py · omx_upload.py</h3>
+    <div class="tablewrap"><table>
+      <tr><th>파일</th><th>하는 일</th></tr>
+      <tr><td class="f">omx_config.py</td><td>PC별 설정(<code>~/.config/omx/config.json</code>)을 읽고 없는 값은 기본값. 역할(gpu/control), 포트(계정마다), 데이터·체크포인트 폴더, 파이썬 환경(<code>~/venv/il3</code>), LeRobot 위치(<code>lerobot_dir()</code>), 팀 권한, 카메라 인자. 표준 라이브러리만 써서 시스템 python3로도 읽힘. <code>VERSION</code>이 여기 있음</td></tr>
+      <tr><td class="f">omx_index.py</td><td>체크포인트 폴더를 훑어 <code>INDEX.md</code>·<code>index.json</code>(모델 번호 고정), 모델별 <code>TRAINED_ON.md</code>. 어느 녹화의 몇 번 에피소드로 학습했는지, 평가 결과까지</td></tr>
+      <tr><td class="f">omx_names.py</td><td>팀 이름 규칙: 모델 <code>{작업}_{정책}_{데이터}_{스텝}_{MMDD}</code>, 평가 <code>eval_{모델}__{p10|free}_{설정}_{MMDD_HHMM}</code>. 기존 모델은 표시 이름(별칭)</td></tr>
+      <tr><td class="f">omx_home.py</td><td>표준 홈 자세: 모델은 학습 데이터 첫 프레임의 관절별 중앙값(한 번만 계산해 저장), 텔레옵·녹화는 작업별 홈 자세</td></tr>
+      <tr><td class="f">omx_upload.py</td><td>허깅페이스 업로드: 키워드로 이름 짓기(<code>omx_strawberry_…</code>), 설명 표 만들기, 비공개 기본. 에피소드 0개는 건너뜀</td></tr>
+    </table></div>
+  </article>
+
+  <article class="file" id="f-sh">
+    <h3>스크립트·설치: omx-control.sh · omx-panel-server.sh · install_control.sh · install_gpu.sh</h3>
+    <div class="tablewrap"><table>
+      <tr><th>파일</th><th>하는 일</th></tr>
+      <tr><td class="f">omx-control.sh</td><td>바탕화면 아이콘. 제어 PC면 이 PC의 제어판을 켜고(옛 방식의 터널이 포트를 쥐고 있으면 정리) 브라우저 새 창으로 엶</td></tr>
+      <tr><td class="f">omx-panel-server.sh</td><td><code>omx-panel</code> 명령. 설정의 파이썬으로 <code>omx_web.py</code>를 켬, <code>--restart</code>는 서버와 추론 서버를 껐다 켬</td></tr>
+      <tr><td class="f">install_control.sh</td><td>팀원 제어 PC 설치 8단계: 패키지(python3.12) → Tailscale → GPU SSH 키 → GPU 노트북 v3 확인(없으면 원격 설치) → LeRobot 0.6.1(<code>~/venv/il3</code>) → 로봇 장치 규칙(udev, OMX 1·2·3)·dialout → 제어판 파일·설정 → 아이콘. 다시 실행해도 됨, 녹화 중이면 서버 재시작 안 함</td></tr>
+      <tr><td class="f">install_gpu.sh</td><td>GPU 노트북 계정 설치: 환경 점검 → LeRobot 0.6.1(학습·SmolVLA 포함) → 제어판 파일 → 로봇 포트·카메라 → 데이터 폴더(<code>/srv/il</code>) → 설정 합치기(모르는 키 유지) → 서버 시작</td></tr>
+    </table></div>
+  </article>
+  </div>
+</section>
+
+<!-- ================================================================ lerobot -->
+<section id="lerobot">
+  <span class="num">10</span>
+  <h2>LeRobot 0.6.1에서 가져다 쓰는 것</h2>
+  <p>다음에 LeRobot을 올릴 때 확인할 목록입니다. 이 밖의 LeRobot 내부는 쓰지 않습니다.</p>
+  <div class="tablewrap"><table>
+    <tr><th>LeRobot</th><th>쓰는 곳</th><th>용도</th></tr>
+    <tr><td><code>robots.omx_follower.OmxFollower</code>, <code>teleoperators.omx_leader.OmxLeader</code></td><td>omx_run, omx_bimanual, omx_safe_start</td><td>팔로워·리더(안전 기능이 메서드를 바꿔 끼움)</td></tr>
+    <tr><td><code>robots.RobotConfig</code>, <code>make_robot_from_config</code>, teleoperator 같은 것</td><td>omx_run, omx_bimanual</td><td>인자로 로봇 만들기, 협동 로봇 등록</td></tr>
+    <tr><td><code>motors.dynamixel.DynamixelMotorsBus</code> (<code>sync_read</code>, <code>write("Goal_PWM")</code>), <code>dynamixel_sdk</code></td><td>omx_safe_start, omx_web 점검</td><td>출력 제한, 현재 위치, 모터 핑·재부팅</td></tr>
+    <tr><td><code>cameras.opencv.OpenCVCamera</code> (<code>_read_from_hardware</code>, <code>async_read</code>)</td><td>omx_camstats, omx_run</td><td>fps 측정, 원위치 시간 화면</td></tr>
+    <tr><td><code>datasets.LeRobotDataset</code> (<code>create</code>, <code>resume</code>, <code>add_frame</code>, <code>save_episode</code>, <code>clear_episode_buffer</code>, <code>finalize</code>, <code>push_to_hub</code>)</td><td>omx_run, omx_upload</td><td>데이터셋 쓰기(v3.0 형식, streaming encoding)</td></tr>
+    <tr><td><code>utils.feature_utils</code> (<code>hw_to_dataset_features</code>, <code>build_dataset_frame</code>), <code>policies.utils.make_robot_action</code>, <code>utils.robot_utils.precise_sleep</code></td><td>omx_run</td><td>관측·동작 ↔ 데이터셋 프레임, 정밀 대기</td></tr>
+    <tr><td><code>configs.policies.PreTrainedConfig</code>, <code>policies.factory</code> (<code>get_policy_class</code>, <code>make_pre_post_processors</code>), <code>prepare_observation_for_inference</code>, <code>populate_queues</code>, <code>rtc.RTCConfig</code></td><td>omx_infer</td><td>모델 불러오기·추론·RTC</td></tr>
+    <tr><td>명령: <code>lerobot-train</code>, <code>lerobot-edit-dataset</code></td><td>omx_train</td><td>학습, 학습 데이터 빼기·합치기</td></tr>
+  </table></div>
+</section>
+
+<!-- ================================================================ where -->
+<section id="where">
+  <span class="num">11</span>
+  <h2>파일·데이터 위치</h2>
+  <div class="tablewrap"><table>
+    <tr><th>위치</th><th>무엇</th></tr>
+    <tr><td><code>~/il_ws/src/omx_tools/</code></td><td>설치된 제어판 코드(설치 파일이 저장소에서 복사)</td></tr>
+    <tr><td><code>~/venv/il3</code>, <code>~/il_ws/src/lerobot_v0.6.1</code></td><td>v3 파이썬 환경과 LeRobot 소스 (v2는 <code>~/venv/il</code>, <code>~/il_ws/src/lerobot</code>)</td></tr>
+    <tr><td><code>~/.config/omx/config.json</code>, <code>robot.json</code></td><td>PC 설정, 로봇 구성(단일/협동, 카메라)</td></tr>
+    <tr><td><code>~/il_ws/omx_logs/</code></td><td>서버 로그(<code>web.log</code>), 작업별 로그(<code>…_record.log</code>), 학습 상태·계획, 평가 처음 자세 파일</td></tr>
+    <tr><td><code>/dev/shm/omx_live_&lt;uid&gt;_*.jpg|json</code></td><td>실시간 카메라 화면과 fps·밝기(메모리 위, 재부팅 시 사라짐)</td></tr>
+    <tr><td><code>&lt;데이터&gt;/&lt;계정&gt;/&lt;이름&gt;/</code></td><td>데이터셋(<code>meta/</code>, <code>data/</code>, <code>videos/</code>) + <code>.omx_origin</code>, <code>.omx_sync.json</code>(제어 PC)</td></tr>
+    <tr><td><code>&lt;데이터&gt;/&lt;계정&gt;/.omx_notes/</code>, <code>.omx_backup/</code>, <code>.omx_reports/</code></td><td>업로드 메모·평가 결과 노트, 에피소드 관절 백업, 평가 보고서</td></tr>
+    <tr><td><code>/srv/il/checkpoints/&lt;계정&gt;/&lt;모델&gt;/</code></td><td>학습 결과(<code>pretrained_model</code>, 중간 저장, <code>summary.json</code>, <code>train.log</code>, <code>TRAINED_ON.md</code>), 폴더 위에 <code>INDEX.md</code></td></tr>
+    <tr><td><code>/srv/il/omx_presets/</code></td><td>평가 프리셋, 작업별 홈 자세, 데이터 코드(이름 규칙)</td></tr>
+  </table></div>
+  <p class="cap">OMX Control Panel v3.0.0 · 저장소 github.com/tjkoobro-netizen/omx-control-panel (v3 브랜치) · 이 문서 docs/code_guide.html</p>
+</section>
+</main>
+</div>
