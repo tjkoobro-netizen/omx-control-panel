@@ -16,6 +16,7 @@ import getpass
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import statistics
@@ -918,6 +919,25 @@ class Preview:
             self.cams, self.frames, self.brightness = {}, {}, {}
 
 
+def output_lines(proc: subprocess.Popen, grace_s: float = 2.0):
+    """Lines a run prints, until its output closes - or grace_s after the run has exited, because a
+    helper it leaves behind (multiprocessing's resource tracker) can hold the pipe open a while longer."""
+    fd, buf, exited = proc.stdout.fileno(), b"", None
+    while True:
+        if select.select([fd], [], [], 0.2)[0]:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            *done, buf = re.split(rb"\r\n|\r|\n", buf + chunk)  # \r too: progress bars redraw a line
+            yield from (d.decode(errors="replace") for d in done)
+        elif proc.poll() is not None:
+            exited = exited or time.time()
+            if time.time() - exited > grace_s:
+                break
+    if buf:
+        yield buf.decode(errors="replace")
+
+
 class Job:
     """One robot process at a time (teleop or record), guarded by the shared robot lock."""
 
@@ -936,7 +956,8 @@ class Job:
         return self.proc.pid if self.proc else None
 
     def running(self) -> bool:
-        return self.proc is not None and self.proc.poll() is None
+        # until the output reader has finished too: it records the exit code and releases the robot lock
+        return self.proc is not None and (self.proc.poll() is None or bool(getattr(self, "reader", None) and self.reader.is_alive()))
 
     def _acquire_lock(self, label: str) -> None:
         try:
@@ -992,7 +1013,7 @@ class Job:
 
     def _read_output(self) -> None:
         proc = self.proc
-        for raw in proc.stdout:
+        for raw in output_lines(proc):
             line = ANSI_RE.sub("", raw).rstrip()
             if not line:
                 continue

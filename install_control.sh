@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OMX Control Panel v3.0.0 - 제어 PC 설치 (팀원 각자의 우분투 PC, 로봇팔·카메라를 연결하는 PC)
+# OMX Control Panel v3.0.1 - 제어 PC 설치 (팀원 각자의 우분투 PC, 로봇팔·카메라를 연결하는 PC)
 #
 #   bash install_control.sh
 #
@@ -9,7 +9,7 @@
 #   1. 필요한 시스템 패키지 확인 (없으면 설치, sudo)
 #   2. Tailscale 설치·로그인 확인
 #   3. GPU 노트북 고르기, SSH 키 등록 (GPU 노트북 내 계정 비밀번호를 한 번 물음)
-#   4. GPU 노트북의 내 계정에 제어판 v3 확인 (학습·추론 서버). 없거나 옛 버전이면 원격 설치
+#   4. GPU 노트북의 내 계정에 제어판 v3 확인 (학습·추론 서버). 없거나 이 PC와 버전이 다르면 원격 설치
 #   5. LeRobot 환경 (~/venv/il3, Python 3.12 + LeRobot 0.6.1, GPU 노트북과 같은 버전) 확인·설치
 #   6. 로봇 장치 이름(OMX 1·2·3)과 USB 권한 (sudo)
 #   7. 제어판 설치, 제어 PC 설정
@@ -19,7 +19,7 @@
 # 다시 실행해도 됩니다: 이미 된 단계는 확인만 하고 넘어갑니다. 설정은 백업 후 유지합니다.
 set -uo pipefail
 
-VERSION=3.0.0
+VERSION=3.0.1
 LEROBOT_COMMIT=7e241bd630a3719a56157a497ce5d08f244784f1  # the team's LeRobot 0.6.1 (tag v0.6.1, same as the GPU laptop)
 LEROBOT_DIR="$HOME/il_ws/src/lerobot_v0.6.1"  # beside a v2 checkout (~/il_ws/src/lerobot, 0.4.4), which stays as it is
 PKG="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
@@ -131,11 +131,15 @@ fi
 # ---------------------------------------------------------------- 4. GPU 노트북 쪽 (학습·추론 서버)
 bold "4/8 GPU 노트북의 내 계정 (학습·추론 서버)"
 GPU_VER=$(ssh -o BatchMode=yes "$ALIAS" 'grep -o "^VERSION = \"[0-9.]*\"" ~/il_ws/omx_control_panel_v3/omx_tools/omx_config.py 2>/dev/null | grep -o "[0-9.]*"' 2>/dev/null)
-if [ "${GPU_VER%%.*}" = "3" ] && ssh -o BatchMode=yes "$ALIAS" 'test -f ~/.config/omx/v3/config.json'; then
+if [ "$GPU_VER" = "$VERSION" ] && ssh -o BatchMode=yes "$ALIAS" 'test -f ~/.config/omx/v3/config.json'; then
   ok "GPU 노트북에 제어판 v$GPU_VER 이 설치되어 있습니다 (학습·추론 서버, LeRobot 0.6.1)"
 else
-  warn "GPU 노트북의 $GPU_USER 계정에 제어판 v3가 없습니다${GPU_VER:+ (지금 v$GPU_VER)}. 학습과 AI 추론에 필요합니다."
-  if [ $YES = 1 ] || yesno "지금 GPU 노트북에 설치할까요? (원격 실행, 몇 가지를 물어봅니다)" y; then
+  if [ -n "$GPU_VER" ]; then
+    warn "GPU 노트북의 $GPU_USER 계정 제어판이 v$GPU_VER 입니다. 이 PC와 같은 v$VERSION 으로 맞춥니다."
+  else
+    warn "GPU 노트북의 $GPU_USER 계정에 제어판 v3가 없습니다. 학습과 AI 추론에 필요합니다."
+  fi
+  if [ $YES = 1 ] || yesno "지금 GPU 노트북에 설치할까요? (원격 실행, 설정은 유지)" y; then
     ssh "$ALIAS" 'rm -rf ~/omx_panel_install_v3 && mkdir -p ~/omx_panel_install_v3'
     scp -q -r "$PKG/omx_tools" "$PKG/install_gpu.sh" "$ALIAS:omx_panel_install_v3/" || { err "파일 복사 실패"; exit 1; }
     ssh -t "$ALIAS" 'bash ~/omx_panel_install_v3/install_gpu.sh' || warn "GPU 노트북 설치가 끝까지 되지 않았습니다. 관리자에게 알려 주세요."
