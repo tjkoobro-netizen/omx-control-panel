@@ -187,7 +187,8 @@ def sync_dataset(local_root: Path, lines: list | None = None) -> bool:
         raise RuntimeError("설정에 gpu_user(GPU 노트북 계정)가 없습니다.")
     remote = f"{CFG.get('gpu_data_home', '/srv/il/lerobot_data')}/{user}/{name}"
     r = subprocess.run(["ssh", *SSH_OPTS, HOST,
-                        f"if test -e '{remote}'; then echo EXISTS; cat '{remote}/.omx_origin' 2>/dev/null; else echo NEW; fi; true"],
+                        f"if test -e '{remote}'; then echo EXISTS; cat '{remote}/.omx_origin' 2>/dev/null; "
+                        f"else echo NEW; mkdir -p '{remote.rsplit('/', 1)[0]}'; fi; true"],  # a new account has no folder yet
                        capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         raise RuntimeError(f"GPU 노트북 확인 실패: {r.stderr.strip()[:160]}")
@@ -198,7 +199,9 @@ def sync_dataset(local_root: Path, lines: list | None = None) -> bool:
             lines.append(f"[omx] sync: {msg}")
         raise RuntimeError(msg)
     (local_root / ".omx_origin").write_text(origin_tag())
-    r = subprocess.run(["rsync", "-a", "--chmod=Dug+rwx,Fug+rw", f"--exclude={SYNC_STATE}", "-e", "ssh " + " ".join(SSH_OPTS),
+    # images/ holds the raw frames of an episode until it is encoded (left behind by a discarded one): never sent
+    r = subprocess.run(["rsync", "-a", "--chmod=Dug+rwx,Fug+rw", f"--exclude={SYNC_STATE}", "--exclude=/images/",
+                        "-e", "ssh " + " ".join(SSH_OPTS),
                         f"{local_root}/", f"{HOST}:{remote}/"], capture_output=True, text=True, timeout=3600)
     if r.returncode != 0:
         raise RuntimeError(f"데이터 전송 실패: {r.stderr.strip()[-200:]}")
@@ -230,8 +233,15 @@ def sync_state(root: Path) -> dict:
         return {}
 
 
+def episodes(root: Path) -> int:
+    try:
+        return int(json.loads((root / "meta/info.json").read_text()).get("total_episodes") or 0)
+    except (OSError, ValueError):
+        return 0
+
+
 def needs_sync(root: Path) -> bool:
-    if not (root / "meta/info.json").exists():  # not a dataset (yet)
+    if episodes(root) == 0:  # not a dataset (yet), or nothing was saved (e.g. the only episode was discarded)
         return False
     st = sync_state(root)
     return st.get("status") != "ok" or data_mtime(root) > st.get("data_mtime", 0)
@@ -247,6 +257,10 @@ def mark_sync(root: Path, status: str, error: str = "", mtime: float | None = No
 def sync_with_state(root: Path, note: Path | None, lines: list | None = None) -> bool:
     """Copy a dataset (and its notes) and remember how it went: ok, failed (tried again later) or
     blocked (a dataset of the same name from somewhere else is there: only on request)."""
+    if episodes(root) == 0:
+        if lines is not None:
+            lines.append("[omx] sync: 저장된 에피소드가 없어 GPU 노트북으로 보내지 않습니다")
+        return False
     mtime = data_mtime(root)
     try:
         sync_dataset(root, lines)
@@ -265,7 +279,7 @@ def sync_note(note_path: Path) -> None:
     """The run's notes (results, marks) - this PC is where they are edited; newer copies win."""
     user = gpu_user()
     remote = f"{CFG.get('gpu_data_home', '/srv/il/lerobot_data')}/{user}/.omx_notes/"
-    subprocess.run(["rsync", "-a", "--update", "--chmod=Fug+rw", "-e", "ssh " + " ".join(SSH_OPTS),
+    subprocess.run(["rsync", "-a", "--update", "--mkpath", "--chmod=Fug+rw", "-e", "ssh " + " ".join(SSH_OPTS),
                     str(note_path), f"{HOST}:{remote}"], capture_output=True, timeout=120)
 
 

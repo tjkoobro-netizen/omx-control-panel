@@ -442,7 +442,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v2.2.0</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v2.2.3</span></div>
       </div>
     </div>
     <div class="status">
@@ -1859,7 +1859,7 @@ function renderUpload(s) {
   $("uploadRow").hidden = !u.phase;
   if (u.phase) {
     $("uploadState").textContent = u.phase + (u.running && u.elapsed !== undefined ? " · " + fmtSec(u.elapsed) : "");
-    $("uploadState").className = "pill " + (u.running ? "warn" : u.returncode === 0 ? "ok" : "bad");
+    $("uploadState").className = "pill " + (u.running || u.returncode === 4 ? "warn" : u.returncode === 0 ? "ok" : "bad");
     $("uploadMsg").innerHTML = u.url ? `<a href="${u.url}" target="_blank" rel="noopener">${u.url.replace("https://", "")}</a>`
       : (u.error || (u.repo_id ? u.repo_id + " → Hugging Face" : ""));
     if (lastUploadPhase !== null && lastUploadPhase !== u.phase) {

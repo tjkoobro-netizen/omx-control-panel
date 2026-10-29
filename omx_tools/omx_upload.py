@@ -137,6 +137,11 @@ def main() -> int:
         print(f"[omx] upload failed: dataset not found: {root}", flush=True)
         return 2
 
+    if not json.loads((root / "meta/info.json").read_text()).get("total_episodes"):
+        # LeRobotDataset would look for the metadata on the Hub and fail with a 404
+        print("[omx] upload skipped: 저장된 에피소드가 없습니다 (다시 찍기 뒤 중지 등)", flush=True)
+        return 4
+
     saved = {}
     if notes_path(args.repo_id).exists():
         saved = json.loads(notes_path(args.repo_id).read_text())

@@ -241,10 +241,14 @@ TABLE_RE = re.compile(r"^(\S+\.pos\s*\||-{5,}$|NAME\s*\|)")
 
 
 def fix_wrist_fps() -> None:
-    """Keep the configured camera (usually the wrist one) at full fps in dim light (resets on replug)."""
+    """Keep the configured camera (usually the wrist one) at full fps in dim light (resets on replug).
+    "wrist" also covers a cooperative robot's wrist_left / wrist_right."""
     name = CFG.get("fixed_fps_camera") or ""
-    if name in CAMERAS:
-        subprocess.run(["v4l2-ctl", "-d", CAMERAS[name], "-c", "exposure_dynamic_framerate=0"], capture_output=True)
+    if not name:
+        return
+    for cam, dev in CAMERAS.items():
+        if cam == name or cam.startswith(f"{name}_"):
+            subprocess.run(["v4l2-ctl", "-d", dev, "-c", "exposure_dynamic_framerate=0"], capture_output=True)
 
 
 def other_robot_processes() -> list[str]:
@@ -1107,6 +1111,8 @@ class Job:
                 self.info["phase"] = "조작 중" if done else "안전 시작 중"
             elif not done:
                 self.info["phase"] = "안전 시작 중"
+            elif self.info.get("phase") == "안전 시작 중":  # the safe start ended inside the first episode
+                self.info["phase"] = "실행 중" if self.kind == "eval" else "녹화 중"
         elif "connected." in line and self.kind == "teleop" and self.info.get("phase") != "안전 시작 중":
             self.info["phase"] = "조작 중"
 
@@ -1338,7 +1344,7 @@ class Uploader:
                 self.state["error"] = line.split("] ", 1)[-1]
         proc.wait()
         log.close()
-        self.state["phase"] = "업로드 완료" if proc.returncode == 0 else "업로드 실패"
+        self.state["phase"] = {0: "업로드 완료", 4: "업로드 안 함"}.get(proc.returncode, "업로드 실패")
         self.state["returncode"] = proc.returncode
 
     def status(self) -> dict:
@@ -1457,9 +1463,17 @@ def remote_eval_settings(local_model: Path, gpu_model: str, extra_args: list, as
     env = dict(async_env)
     if not env:  # synchronous: the whole chunk, then the next one
         cfg = model_config(str(local_model))
-        chunk = int(cfg.get("n_action_steps") or cfg.get("chunk_size") or 50)
-        env = {"OMX_ASYNC": "1", "OMX_ASYNC_CHUNK": str(chunk), "OMX_ASYNC_THRESHOLD": "0", "OMX_ASYNC_AGG": "latest_only",
-               "OMX_FPS": "30", "OMX_RTC": "0"}
+        if cfg.get("type") == "diffusion":
+            # its 8 actions (0.27 s) run out before the next ones come back over the network: take what the horizon covers
+            chunk = int(cfg.get("horizon", 16)) - int(cfg.get("n_obs_steps", 2)) + 1
+            overrides["n_action_steps"] = chunk
+        else:
+            chunk = int(cfg.get("n_action_steps") or cfg.get("chunk_size") or 50)
+        # ask for the next chunk about 0.5 s (one network round trip) before this one runs out, so the arm does not
+        # stop at every chunk boundary waiting for the GPU laptop
+        threshold = min(0.9, 15 / chunk)
+        env = {"OMX_ASYNC": "1", "OMX_ASYNC_CHUNK": str(chunk), "OMX_ASYNC_THRESHOLD": f"{threshold:.2f}",
+               "OMX_ASYNC_AGG": "latest_only", "OMX_FPS": "30", "OMX_RTC": "0"}
     env.update(OMX_REMOTE_URL=remote.infer_url(), OMX_REMOTE_MODEL=gpu_model, OMX_REMOTE_OVERRIDES=json.dumps(overrides))
     return env
 

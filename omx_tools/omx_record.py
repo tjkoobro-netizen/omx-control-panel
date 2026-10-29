@@ -481,7 +481,6 @@ def _install_live_view() -> None:
                 except Exception:
                     pass
 
-    omx_follower.OmxFollower.get_observation = get_observation
     threading.Thread(target=writer, daemon=True).start()
 
 
@@ -524,3 +523,8 @@ if __name__ == "__main__":
         lerobot_record.main()
     finally:
         _share_dataset_with_team()
+    # Saved and disconnected: skip interpreter teardown, where a camera or live-view thread still inside
+    # OpenCV can abort the process ("terminate called...", code -6) and the panel shows a failed run
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
