@@ -56,6 +56,7 @@ from lerobot.utils.robot_utils import precise_sleep  # noqa: E402
 from lerobot.utils.utils import init_logging  # noqa: E402
 
 import omx_bimanual  # noqa: E402,F401  (registers bi_omx_follower / bi_omx_leader)
+import omx_config  # noqa: E402
 import omx_safe_start  # noqa: E402
 
 OBS, ACT = "observation", "action"
@@ -397,7 +398,7 @@ def install_live_view(robot) -> None:
     ROBOT_CAMS.update(getattr(robot, "cameras", {}) or {})
     if not ROBOT_CAMS:
         return
-    prefix = f"/dev/shm/omx_live_{os.getuid()}_"
+    prefix = omx_config.live_prefix()
 
     def writer() -> None:
         last_stats = 0.0
@@ -443,6 +444,61 @@ def _feed_live_view(robot, stop: threading.Event) -> None:
         stop.wait(0.1)
 
 
+# ---------------------------------------------------------------- motor output (panel)
+class MotorOutput:
+    """Each follower joint's output as a share of its maximum torque, for the panel's 모터 출력 view: read
+    in the control loop (the only thread on the motor bus) about 10 times a second, and only while the view
+    is open (the panel touches <prefix>torque.want while it polls), so a closed view costs nothing.
+    Address 126 is Present_Load (0.1 % of max torque) on the XL430 and Present_Current (mA) on the XL330;
+    LeRobot calls both Present_Current. XL330 current is taken against its stall current (1.47 A at 5 V)."""
+    PERIOD = 0.1
+    STALL_MA = {"xl330-m288": 1470, "xl330-m077": 1470}
+    LOAD = {"xl430-w250"}
+
+    def __init__(self, robot):
+        self.arms = [(getattr(a, "_omx_side", "") or "", a.bus) for a in (getattr(robot, "arms", None) or [robot])]
+        self.prefix = omx_config.live_prefix() + "torque"
+        self.due = 0.0
+
+    def __call__(self) -> None:
+        now = time.perf_counter()
+        if now < self.due:
+            return
+        self.due = now + self.PERIOD
+        try:
+            if time.time() - os.stat(self.prefix + ".want").st_mtime > 3:
+                return
+        except OSError:
+            return
+        arms = []
+        for side, bus in self.arms:
+            try:
+                raw = bus.sync_read("Present_Current", normalize=False)
+            except Exception as exc:  # shown on the panel; the control loop goes on
+                arms.append({"side": side, "joints": [], "error": str(exc).splitlines()[0][:160]})
+                continue
+            joints = []
+            for name, value in raw.items():
+                model = bus.motors[name].model
+                if model in self.LOAD:
+                    pct = value / 10
+                elif model in self.STALL_MA:
+                    pct = value / self.STALL_MA[model] * 100
+                else:
+                    continue
+                joints.append({"name": name, "model": model, "pct": round(pct, 1), "raw": int(value)})
+            arms.append({"side": side, "joints": joints})
+        try:
+            with open(self.prefix + ".tmp", "w") as f:
+                json.dump({"t": time.time(), "arms": arms}, f)
+            os.replace(self.prefix + ".tmp", self.prefix + ".json")
+        except OSError:
+            pass
+
+
+MOTOR_OUT: MotorOutput | None = None
+
+
 # ---------------------------------------------------------------- control loops
 class Viewer:
     """Rerun on another PC (the panel's viewer address), as lerobot-record --display_data."""
@@ -477,6 +533,8 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
             break
         obs = robot.get_observation()
         _show(obs)
+        if MOTOR_OUT is not None:
+            MOTOR_OUT()
         if loop_times is not None:
             loop_times.append(t0)
         obs_frame = build_dataset_frame(dataset.features, obs, prefix=OBS) if dataset is not None else None
@@ -618,6 +676,8 @@ def run_teleop(cfg: RunConfig, robot, teleop) -> None:
             t0 = time.perf_counter()
             obs = robot.get_observation()
             _show(obs)
+            if MOTOR_OUT is not None:
+                MOTOR_OUT()
             action = teleop.get_action()
             robot.send_action(action)
             viewer.log(obs, action)
@@ -641,6 +701,11 @@ def run(cfg: RunConfig) -> None:
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
     ABORT["robot"] = robot
     install_live_view(robot)
+    global MOTOR_OUT
+    try:
+        MOTOR_OUT = MotorOutput(robot)
+    except Exception as exc:  # the view is optional: never stop a run over it
+        _say(f"[omx] 모터 출력 보기 꺼짐 ({exc})")
     _install_controls()
     if not cfg.dataset.repo_id:
         if teleop is None:

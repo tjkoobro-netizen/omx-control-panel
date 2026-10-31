@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OMX Control Panel v3.0.1 - 개인 PC(노트북) 설치. 내가 들고 다니는 PC에서 실행합니다.
+# OMX Control Panel v3.1.0 - 개인 PC(노트북) 설치. 내가 들고 다니는 PC에서 실행합니다.
 #
 #   bash install_laptop.sh
 #
@@ -13,7 +13,7 @@
 #   7. (선택) Rerun 뷰어 설치
 set -uo pipefail
 
-VERSION=3.0.1
+VERSION=3.1.0
 PKG="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 ALIAS=omx-gpu
 APP_DIR="$HOME/.local/share/omx"

@@ -130,6 +130,31 @@ form { display: grid; gap: 12px; }
 .cam-row .thumb img { width: 100%; height: 100%; object-fit: cover; }
 .cam-row .cam-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; font-size: 12px; }
 @media (max-width: 560px) { .cams { grid-template-columns: 1fr; } }
+/* 모터 출력: a pane right of the cameras while a teleop / record runs (button in the camera panel head) */
+.cam-body { display: grid; gap: 12px; min-width: 0; }
+.cam-body.motor-on { grid-template-columns: minmax(0, 1fr) 236px; align-items: start; }
+@media (max-width: 700px) { .cam-body.motor-on { grid-template-columns: 1fr; } }
+#motorBtn[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.motor { display: grid; gap: 10px; align-content: start; min-width: 0; padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; }
+.motor-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 12.5px; font-weight: 700; }
+.motor-head .age { font: 600 11px var(--mono); color: var(--muted); }
+.motor-head .age.bad { color: var(--bad); }
+.motor-arm { display: grid; gap: 5px; }
+.motor-arm h4 { margin: 0; font-size: 11.5px; font-weight: 700; color: var(--muted); letter-spacing: .04em; }
+.motor-arm h4:not(:first-child) { margin-top: 6px; }
+.motor-arm .err { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--bad); overflow-wrap: anywhere; }
+.motor-row { display: grid; grid-template-columns: 62px minmax(0, 1fr) 38px; gap: 8px; align-items: center; font-size: 12px; }
+.motor-row .v { font: 600 11.5px var(--mono); text-align: right; font-variant-numeric: tabular-nums; }
+/* 0-100 % of max torque, ticks at 50 % and 80 % (where the bar turns yellow / red) */
+.mbar { position: relative; height: 9px; border-radius: 999px; border: 1px solid var(--line); overflow: hidden;
+  background: linear-gradient(to right, transparent calc(50% - 1px), var(--line-strong) calc(50% - 1px) 50%, transparent 50% calc(80% - 1px), var(--line-strong) calc(80% - 1px) 80%, transparent 80%), var(--surface); }
+.mbar > i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--ok); }
+.mbar > b { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--fg); opacity: .55; }
+.motor-row.warn .mbar > i { background: var(--warn); }
+.motor-row.warn .v { color: var(--warn); }
+.motor-row.bad .mbar > i { background: var(--bad); }
+.motor-row.bad .v { color: var(--bad); }
+.motor .legend { margin: 0; font-size: 11px; line-height: 1.5; color: var(--muted); }
 figure { margin: 0; display: grid; gap: 6px; min-width: 0; }
 .frame { position: relative; aspect-ratio: 4 / 3; max-width: 100%; background: var(--code-bg); border-radius: 10px; overflow: hidden; display: grid; place-items: center; color: #6f8197; font-size: 12.5px; text-align: center; padding: 12px; border: 1px solid #0f1a28; }
 .frame img, .frame video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; background: var(--code-bg); }
@@ -442,7 +467,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.0.1</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.1.0</span></div>
       </div>
     </div>
     <div class="status">
@@ -487,9 +512,11 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <div class="row">
           <span class="pill" id="camState">꺼짐</span>
           <label class="opt" style="grid-template-columns:16px auto;align-items:center;font-size:12.5px" title="아래로 스크롤해도 카메라 화면이 왼쪽 위에 붙어 따라옵니다"><input type="checkbox" id="camPin" checked><span>화면 고정</span></label>
+          <button id="motorBtn" type="button" aria-pressed="false" aria-controls="motorPane" title="관절마다 지금 최대 토크의 몇 %를 내고 있는지 카메라 오른쪽에 보여줍니다 (텔레옵·녹화 중)" hidden>모터 출력</button>
           <button id="camBtn" type="button">카메라 켜기</button>
         </div>
       </div>
+      <div class="cam-body" id="camBody">
       <div class="cams" id="camGrid">
         <figure>
           <div class="frame" id="frame-front">카메라 꺼짐</div>
@@ -499,6 +526,12 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
           <div class="frame" id="frame-wrist">카메라 꺼짐</div>
           <figcaption><span><b>wrist</b> · 팔로워 장착</span><span class="mono" id="bright-wrist"></span></figcaption>
         </figure>
+      </div>
+      <aside class="motor" id="motorPane" aria-label="실시간 모터 출력" hidden>
+        <div class="motor-head"><span>모터 출력 · 최대 토크 대비</span><span class="age" id="motorAge"></span></div>
+        <div class="motor-arm" id="motorArms"></div>
+        <p class="legend">막대: 지금 값 · 세로줄: 최근 3초 최고값 · 눈금 50%, 80%. 노랑 50% 이상, 빨강 80% 이상. 막대에 마우스를 올리면 모터가 보낸 원래 값이 나옵니다.</p>
+      </aside>
       </div>
       <p class="muted cam-note" style="margin:0">카메라 보기는 카메라 없는 텔레옵과 동시에 쓸 수 있습니다. 녹화를 시작하면 녹화 프로그램이 카메라를 쓰고, 이 화면에는 그 프로그램이 읽는 영상이 그대로 나옵니다.</p>
       <details class="align" id="alignBox">
@@ -1150,6 +1183,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <li>각 영상 아래 숫자는 밝기입니다. <b>"검은 화면"</b>이 뜨면 렌즈 캡, 가림, USB를 확인합니다.</li>
         <li>카메라 보기는 <b>카메라 없는 텔레옵과 동시에</b> 쓸 수 있습니다.</li>
         <li><b>녹화를 시작하면 카메라 보기는 자동으로 꺼지고</b>, 녹화 프로그램이 읽는 영상이 같은 자리에 나옵니다.</li>
+        <li><b>모터 출력</b>: 텔레옵·녹화 중에 카메라 칸 위쪽에 나오는 버튼입니다. 누르면 카메라 오른쪽에 팔로워 관절마다 지금 <b>최대 토크의 몇 %</b>를 내고 있는지 막대로 나옵니다(초당 5번). 50% 이상은 노랑, 80% 이상은 빨강이고, 세로줄은 최근 3초 최고값입니다. 어깨·팔꿈치(XL430)는 모터가 직접 계산한 부하이고, 손목·그리퍼(XL330)는 전류를 정지 토크 전류(1.47A)로 나눈 추정값입니다. 토크 센서 값이 아니라서 움직이는 중에는 마찰도 섞입니다. 버튼을 다시 누르면 닫히고, 닫혀 있는 동안은 모터를 읽지 않습니다. 열어 둔 상태는 다음 텔레옵·녹화에도 그대로 이어집니다.</li>
         <li><b>화면 고정</b>(기본 켜짐): 아래로 스크롤해도 카메라 칸이 왼쪽 위에 붙어 따라 내려옵니다. 녹화 버튼과 영상을 한 화면에서 보며 작업할 수 있습니다. 다시보기·로그를 볼 때 가리면 체크를 끄세요. 좁은 창(한 줄 배치)에서는 고정하지 않습니다.</li>
       </ul>
       <p class="tip">global 카메라에는 팔로워 전체와 물체 위치가 들어오고, 리더나 사람 손은 들어오지 않아야 합니다. 정해진 위치는 녹화와 실행 내내 바꾸지 않습니다.</p>
@@ -1642,6 +1676,54 @@ function applyCamPin() {
   applyCamPin();
 })();
 
+// ---- 모터 출력: each follower joint's share of its max torque, while a teleop / record runs ----
+const MOTOR_KO = { shoulder_pan: "어깨 회전", shoulder_lift: "어깨", elbow_flex: "팔꿈치", wrist_flex: "손목 굽힘", wrist_roll: "손목 회전", gripper: "그리퍼" };
+const motor = { open: false, avail: false, timer: null, busy: false, peaks: {} };
+try { motor.open = localStorage.getItem("omx.motorOut") === "1"; } catch (e) {}
+function motorShow() {
+  const on = motor.open && motor.avail;
+  $("motorBtn").hidden = !motor.avail;
+  $("motorBtn").setAttribute("aria-pressed", String(motor.open));
+  $("motorPane").hidden = !on;
+  $("camBody").classList.toggle("motor-on", on);
+  if (on && !motor.timer) { motor.timer = setInterval(pollMotor, 200); pollMotor(); }
+  if (!on && motor.timer) { clearInterval(motor.timer); motor.timer = null; motor.peaks = {}; $("motorArms").innerHTML = ""; $("motorAge").textContent = ""; }
+}
+$("motorBtn").addEventListener("click", () => {
+  motor.open = !motor.open;
+  try { localStorage.setItem("omx.motorOut", motor.open ? "1" : "0"); } catch (e) {}
+  motorShow();
+});
+async function pollMotor() {
+  // a hidden browser tab stops asking, so the robot program stops reading the motors a few seconds later
+  if (motor.busy || document.hidden) return;
+  motor.busy = true;
+  try { renderMotor(await (await fetch("/api/motor_output")).json()); } catch (e) {} finally { motor.busy = false; }
+}
+function renderMotor(d) {
+  if (!motor.timer) return;
+  if (!d.arms) {
+    $("motorAge").textContent = "";
+    $("motorArms").innerHTML = `<p class="muted" style="margin:0;font-size:12px">${d.running ? "모터 값을 기다리는 중…" : "텔레옵이나 녹화를 시작하면 나옵니다"}</p>`;
+    return;
+  }
+  const now = Date.now(), side = { left: "왼팔", right: "오른팔" };
+  const level = (p) => p >= 80 ? " bad" : p >= 50 ? " warn" : "";
+  $("motorAge").textContent = d.age > 0.5 ? `${d.age.toFixed(1)}초 전` : "실시간";
+  $("motorAge").classList.toggle("bad", d.age > 0.5);
+  const esc = (t) => String(t ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  $("motorArms").innerHTML = d.arms.map(a => (a.side ? `<h4>${side[a.side] || a.side}</h4>` : "")
+    + (a.error ? `<p class="err">모터를 읽지 못했습니다: ${esc(a.error)}</p>` : "") + a.joints.map(j => {
+    const key = a.side + "/" + j.name, p = Math.abs(j.pct);
+    const hist = motor.peaks[key] = (motor.peaks[key] || []).filter(x => now - x[0] < 3000).concat([[now, p]]);
+    const peak = Math.max(...hist.map(x => x[1]));
+    const raw = j.model.startsWith("xl430") ? `부하 ${(j.raw / 10).toFixed(1)}%` : `전류 ${j.raw} mA`;
+    return `<div class="motor-row${level(p)}" title="${j.name} (${j.model}) · ${raw} · 최근 3초 최고 ${peak.toFixed(0)}%">`
+      + `<span>${MOTOR_KO[j.name] || j.name}</span><span class="mbar"><i style="width:${Math.min(p, 100)}%"></i>`
+      + `<b style="left:calc(${Math.min(peak, 100)}% - 1px)"></b></span><span class="v">${p.toFixed(0)}%</span></div>`;
+  }).join("")).join("");
+}
+
 // Close MJPEG connections before dropping their images: a browser keeps at most 6 connections per
 // server, and live streams that stay open block the status updates and button presses behind them.
 function stopStreams(box) {
@@ -1779,6 +1861,8 @@ function render(s) {
 
   // only the visible tab streams (two cameras = two of the browser's six connections)
   if (s.cameras) buildCamFrames(s.cameras);
+  motor.avail = running && (job.kind === "teleop" || job.kind === "record");
+  motorShow();
   renderSync(s);
   setStreams($("tab-collect").hidden ? false : s.preview ? "preview" : s.live ? "live" : false);
   renderEval(s);

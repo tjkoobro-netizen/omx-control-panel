@@ -58,6 +58,7 @@ VENV_BIN = omx_config.venv_bin()
 LEROBOT_DIR = omx_config.lerobot_dir()
 TOOLS_DIR = Path(__file__).resolve().parent
 LOG_DIR = omx_config.log_dir()
+LIVE = omx_config.live_prefix()  # the running robot program's camera frames and motor output (/dev/shm)
 LOG_DIR.mkdir(parents=True, exist_ok=True)  # a new control PC has none yet
 # Team shared LeRobot home: calibration and datasets live here (child processes inherit it)
 os.environ["HF_LEROBOT_HOME"] = str(omx_config.path("data_home"))
@@ -392,13 +393,32 @@ def camera_stats() -> dict:
     if PREVIEW.running:
         return {n: {**v, "brightness": PREVIEW.brightness.get(n, v["brightness"])}
                 for n, v in omx_camstats.stats(PREVIEW.cams).items()}
-    f = Path(f"/dev/shm/omx_live_{os.getuid()}_stats.json")
+    f = Path(f"{LIVE}stats.json")
     try:
         if JOB.running() and time.time() - f.stat().st_mtime < 3:
             return json.loads(f.read_text())
     except (OSError, ValueError):
         pass
     return {}
+
+
+def motor_output() -> dict:
+    """The 모터 출력 view: each follower joint's share of its max torque from the running teleop / record /
+    eval program. Asking marks the view open, so the program reads the motors only while someone watches."""
+    want = Path(f"{LIVE}torque.want")
+    try:
+        want.touch()
+    except OSError:
+        pass
+    f = Path(f"{LIVE}torque.json")
+    out = {"running": JOB.running(), "kind": JOB.kind, "arms": None}
+    try:
+        if out["running"] and f.stat().st_mtime > JOB.started and time.time() - f.stat().st_mtime < 2:
+            data = json.loads(f.read_text())
+            out["arms"], out["age"] = data["arms"], round(time.time() - data["t"], 2)
+    except (OSError, ValueError, KeyError):
+        pass
+    return out
 
 
 # ---- Control PC: copies to the GPU laptop that did not go through (network down at the end of a run) ----
@@ -1003,7 +1023,7 @@ class Job:
         self.kind, self.info, self.started = kind, info, time.time()
         self.slow = collections.deque(maxlen=2000)  # (time, Hz) of "Record loop is running slower" warnings
         self.slow_total = 0
-        env = dict(os.environ, PYTHONUNBUFFERED="1", **(env_extra or {}))
+        env = dict(os.environ, PYTHONUNBUFFERED="1", OMX_PORT=str(PORT), **(env_extra or {}))  # same LIVE files
         self.proc = subprocess.Popen(
             cmd, cwd=LEROBOT_DIR, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True,
@@ -1805,7 +1825,7 @@ def detect_loop(job, proc, detector: str, camera: str, roi: list | None = None) 
     """Where the object is in the live view (0.5 s), for the target overlay and the attempt start."""
     import omx_vision
 
-    live = Path(f"/dev/shm/omx_live_{os.getuid()}_{camera}.jpg")
+    live = Path(f"{LIVE}{camera}.jpg")
     recent: collections.deque = collections.deque(maxlen=3)  # median of the last 3 readings: steady display
     while job.proc is proc and proc.poll() is None:
         try:
@@ -2182,6 +2202,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path == "/api/motor_output":
+            self._json(motor_output())
         elif self.path == "/api/status":
             self._json({
                 "user": USER,
@@ -2331,7 +2353,7 @@ class Handler(BaseHTTPRequestHandler):
     def _snapshot(self, name: str) -> None:
         """One camera frame for the position editor: camera view, or the running program's live frame."""
         frame = PREVIEW.frames.get(name) if PREVIEW.running else None
-        live = Path(f"/dev/shm/omx_live_{os.getuid()}_{name}.jpg")
+        live = Path(f"{LIVE}{name}.jpg")
         if frame is None and live.exists() and time.time() - live.stat().st_mtime < 5:
             frame = live.read_bytes()
         if not frame or name not in CAMERAS:
@@ -2352,7 +2374,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        live = Path(f"/dev/shm/omx_live_{os.getuid()}_{name}.jpg")
+        live = Path(f"{LIVE}{name}.jpg")
         # keep the connection through short gaps (preview stops just before a record/eval job starts)
         idle_since = None
         last_key = None

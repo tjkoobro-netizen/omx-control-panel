@@ -17,7 +17,7 @@ import socket
 import subprocess
 from pathlib import Path
 
-VERSION = "3.0.1"
+VERSION = "3.1.0"
 
 DEFAULTS: dict = {
     # shown in the panel header
@@ -116,6 +116,12 @@ def port(uid: int | None = None) -> int:
     if os.environ.get("OMX_PORT"):
         return int(os.environ["OMX_PORT"])
     return int(CFG["port_base"]) + max(0, uid - int(CFG["uid_base"]))
+
+
+def live_prefix() -> str:
+    """/dev/shm files a running robot program shares with its panel (camera frames, motor output). Per
+    panel port, so the v2 panel or a test panel on the same account never reads another panel's files."""
+    return f"/dev/shm/omx_live_{os.getuid()}_{port()}_"
 
 
 def is_control() -> bool:

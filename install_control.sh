@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OMX Control Panel v3.0.1 - 제어 PC 설치 (팀원 각자의 우분투 PC, 로봇팔·카메라를 연결하는 PC)
+# OMX Control Panel v3.1.0 - 제어 PC 설치 (팀원 각자의 우분투 PC, 로봇팔·카메라를 연결하는 PC)
 #
 #   bash install_control.sh
 #
@@ -19,7 +19,7 @@
 # 다시 실행해도 됩니다: 이미 된 단계는 확인만 하고 넘어갑니다. 설정은 백업 후 유지합니다.
 set -uo pipefail
 
-VERSION=3.0.1
+VERSION=3.1.0
 LEROBOT_COMMIT=7e241bd630a3719a56157a497ce5d08f244784f1  # the team's LeRobot 0.6.1 (tag v0.6.1, same as the GPU laptop)
 LEROBOT_DIR="$HOME/il_ws/src/lerobot_v0.6.1"  # beside a v2 checkout (~/il_ws/src/lerobot, 0.4.4), which stays as it is
 PKG="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"

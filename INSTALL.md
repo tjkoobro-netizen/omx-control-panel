@@ -1,4 +1,4 @@
-# OMX Control Panel v3.0.1 설치 매뉴얼
+# OMX Control Panel v3.1.0 설치 매뉴얼
 
 > **팀원 제어 PC(로봇팔·카메라를 내 PC에 연결)는 [docs/install_control.html](docs/install_control.html)을 따라 `bash install_control.sh` 하나로 설치합니다.** 아래는 GPU 노트북 관리자용 설치와 예전 방식(GPU 노트북에 로봇 연결) 안내입니다.
 

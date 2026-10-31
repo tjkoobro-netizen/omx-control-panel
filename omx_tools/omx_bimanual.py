@@ -88,10 +88,21 @@ class BiOmxFollower(Robot):
         return all(a.is_connected for a in self.arms) and all(c.is_connected for c in self.cameras.values())
 
     def connect(self, calibrate: bool = True) -> None:
-        for arm in self.arms:  # each arm: safe start / standard home move (omx_safe_start)
-            arm.connect(calibrate)
-        for cam in self.cameras.values():
-            cam.connect()
+        try:
+            for arm in self.arms:  # each arm: safe start / standard home move (omx_safe_start)
+                arm.connect(calibrate)
+            for cam in self.cameras.values():
+                cam.connect()
+        except Exception:
+            # one arm failed (a motor not answering): land the arm already connected now. The run's own
+            # safe stop only runs for a connected robot, and at interpreter exit it no longer works.
+            for arm in self.arms:
+                if arm.bus.is_connected:
+                    try:
+                        arm.disconnect()
+                    except Exception as exc:
+                        print(f"[omx] safe stop: {arm._omx_side} 팔 정지 중 오류 ({exc})", flush=True)
+            raise
 
     @property
     def is_calibrated(self) -> bool:
