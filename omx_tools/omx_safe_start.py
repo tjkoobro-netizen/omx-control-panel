@@ -58,6 +58,9 @@ ARM = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"
 # 비상 정지 (omx_run.py, SIGUSR2): FREEZE stops any slow move and makes disconnect wait, holding the
 # arm (torque on), until RELEASE ([홈 위치로 이동] in the panel); then the usual return and safe stop.
 FREEZE, RELEASE = threading.Event(), threading.Event()
+# Set while an arm is being landed (safe stop): omx_run.py then ignores a second 중지 (SIGINT / SIGTERM),
+# which used to cut the landing short and leave the arms holding with the torque on.
+LANDING = threading.Event()
 PWM_MAX = 885  # X-series Goal_PWM full scale
 
 DEFAULTS = {
@@ -481,19 +484,28 @@ def install() -> None:
         with land_lock:
             if not self.bus.is_connected:
                 return None
-            if FREEZE.is_set():
-                # 비상 정지: hold here (torque on, last goal) until [홈 위치로 이동]
-                _say("제자리에서 기다립니다. [홈 위치로 이동]를 누르면 천천히 돌아갑니다", "freeze")
-                RELEASE.wait()
-                RELEASE.clear()
-                FREEZE.clear()
-                _say("초기 위치로 돌아갑니다", "freeze")
+            outer = LANDING.is_set()  # a cooperative robot sets it for both arms
+            LANDING.set()
             try:
-                if getattr(self.config, "disable_torque_on_disconnect", True):
-                    soft_land(self)
-            except Exception as exc:  # never block the normal shutdown
-                _say(f"건너뜀 ({exc})", "stop")
-            return original_disconnect(self, *args, **kwargs)
+                return _land(self, *args, **kwargs)
+            finally:
+                if not outer:
+                    LANDING.clear()
+
+    def _land(self, *args, **kwargs):
+        if FREEZE.is_set():
+            # 비상 정지: hold here (torque on, last goal) until [홈 위치로 이동]
+            _say("제자리에서 기다립니다. [홈 위치로 이동]를 누르면 천천히 돌아갑니다", "freeze")
+            RELEASE.wait()
+            RELEASE.clear()
+            FREEZE.clear()
+            _say("초기 위치로 돌아갑니다", "freeze")
+        try:
+            if getattr(self.config, "disable_torque_on_disconnect", True):
+                soft_land(self)
+        except Exception as exc:  # never block the normal shutdown
+            _say(f"건너뜀 ({exc})", "stop")
+        return original_disconnect(self, *args, **kwargs)
 
     cls.connect, cls.send_action, cls.disconnect = connect, send_action, disconnect
 

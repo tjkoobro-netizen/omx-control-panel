@@ -467,7 +467,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.1.0</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.2.0</span></div>
       </div>
     </div>
     <div class="status">
@@ -613,6 +613,8 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
           <label class="f">왼팔<select id="setLeft"></select></label>
           <label class="f">오른팔<select id="setRight"></select></label>
         </div>
+        <div style="display:grid;gap:6px"><div><b style="font-size:12.5px">손목 회전 보정</b> <span class="muted" style="font-size:12px">리더 그리퍼가 팔로워 집게와 90° 돌아가게 조립된 세트만. 텔레옵·녹화에서 팔로워 손목 = 리더 손목 + 보정값(녹화되는 동작도 보정된 값), 평가에는 쓰지 않습니다.</span></div>
+          <div class="fields" id="setupWrist"></div></div>
         <div><b style="font-size:12.5px">카메라 지정</b> <span class="muted" style="font-size:12px">같은 모델 카메라는 USB 포트로 구분합니다. 카메라를 다른 포트에 옮기면 다시 지정하세요.</span></div>
         <div id="setupCams" style="display:grid;gap:6px"></div>
         <div class="row"><button class="primary" type="button" id="setupSave">저장하고 점검</button><button type="button" id="setupCancel">취소</button></div>
@@ -1195,7 +1197,8 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       <ul>
         <li><b>텔레옵 시작</b>: 안전 시작(팔 들기 → 그리퍼 닫기 → 천천히 리더 자세로) 뒤 리더를 따라 움직입니다. 데이터는 저장되지 않습니다.</li>
         <li>상태 칸에 경과 시간과 제어 주기(정상은 약 60Hz)가 표시됩니다.</li>
-        <li><b>중지</b>: 안전 정지(끝 자세로 이동 → 출력 서서히 줄이기 → 토크 끄기)로 끝냅니다. 몇 초 걸립니다.</li>
+        <li><b>중지</b>: 안전 정지(끝 자세로 이동 → 출력 서서히 줄이기 → 토크 끄기)로 끝냅니다. 몇 초 걸립니다(협동 로봇은 두 팔을 차례로). 안전 정지 중에 중지를 다시 눌러도 내려놓기를 끝까지 마칩니다. 바로 멈춰야 하면 <b>강제 종료</b>를 누르세요.</li>
+        <li><b>손목 회전 보정</b>(로봇 구성 → 구성 바꾸기): 리더 그리퍼가 팔로워 집게와 90° 돌아가게 조립된 세트는 +90° 또는 −90°를 고릅니다. 텔레옵·녹화에서 팔로워 손목이 리더 손목 + 보정값으로 움직이고, 녹화되는 동작도 보정된 값입니다(평가에는 쓰지 않음). 손목은 한 바퀴(±180°) 안에서만 움직이므로, 보정한 쪽으로는 손목을 90° 덜 돌릴 수 있습니다. 보정을 바꾸기 전과 후의 녹화는 서로 다른 데이터셋에 담으세요.</li>
         <li>기본은 카메라 없이 실행합니다. 화면은 왼쪽 카메라 보기로 확인합니다. <a href="#h-rerun">Rerun 보기</a>를 켜면 카메라를 포함해 실행하고 영상을 Rerun으로 보냅니다.</li>
       </ul>
     </section>
@@ -2075,7 +2078,8 @@ async function loadSetup() {
   const allIn = d.followers.concat(d.leaders).every(x => x.present) && d.active_cameras.every(c => c.present);
   $("setupState").textContent = d.mode === "bimanual" ? "협동" : "단일";
   $("setupState").className = "pill " + (allIn ? "ok" : "warn");
-  $("setupSummary").innerHTML = summary + " · 카메라 " + d.active_cameras.map(c => `${c.name}(${c.label})${c.present ? "" : " ⚠없음"}`).join(", ")
+  const wrist = Object.entries(s0.wrist_offset_deg || {}).map(([n, v]) => `${n} ${v > 0 ? "+" : ""}${v}°`);
+  $("setupSummary").innerHTML = summary + (wrist.length ? " · 손목 보정 " + wrist.join(", ") : "") + " · 카메라 " + d.active_cameras.map(c => `${c.name}(${c.label})${c.present ? "" : " ⚠없음"}`).join(", ")
     + (allIn ? "" : " · <b style='color:var(--warn)'>연결 안 된 장치가 있습니다</b>");
 }
 function fillSetupForm() {
@@ -2086,6 +2090,9 @@ function fillSetupForm() {
   $("setLeft").innerHTML = opts((s0.bimanual || {}).left || "OMX 2");
   $("setRight").innerHTML = opts((s0.bimanual || {}).right || "OMX 3");
   for (const r of document.querySelectorAll("input[name=robotMode]")) r.checked = r.value === (d.mode || "single");
+  const wo = s0.wrist_offset_deg || {};
+  $("setupWrist").innerHTML = Object.keys(d.sets).map(n => `<label class="f">${n}<select data-wrist="${n}">${[[0, "없음"], [90, "+90°"], [-90, "−90°"]].map(([v, t]) =>
+    `<option value="${v}" ${v === (wo[n] || 0) ? "selected" : ""}>${t}</option>`).join("")}</select></label>`).join("");
   renderSetupCams();
 }
 function renderSetupCams() {
@@ -2133,7 +2140,8 @@ $("setupSave").addEventListener("click", async () => {
   const m = setupMode();
   const cameras = [...document.querySelectorAll("#setupCams .cam-row")].map(row => ({
     path: row.dataset.path, role: row.querySelector("[data-role]").value, label: row.querySelector("[data-label]").value.trim() }));
-  const body = { mode: m, set: $("setSingle").value, left: $("setLeft").value, right: $("setRight").value, cameras };
+  const wrist_offset_deg = Object.fromEntries([...document.querySelectorAll("#setupWrist [data-wrist]")].map(el => [el.dataset.wrist, Number(el.value)]));
+  const body = { mode: m, set: $("setSingle").value, left: $("setLeft").value, right: $("setRight").value, cameras, wrist_offset_deg };
   try { await api("/api/robot_setup", body); } catch (e) { toast(e.message, "err"); return; }
   toast("로봇 구성을 저장했습니다. 점검합니다.", "ok");
   $("setupForm").hidden = true; $("setupEdit").hidden = false;

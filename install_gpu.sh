@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OMX Control Panel v3.1.0 - GPU 노트북 설치 (로봇과 카메라가 연결된 노트북에서, 제어판을 쓸 각 계정으로 실행)
+# OMX Control Panel v3.2.0 - GPU 노트북 설치 (로봇과 카메라가 연결된 노트북에서, 제어판을 쓸 각 계정으로 실행)
 #
 #   bash install_gpu.sh            질문에 답하며 설치
 #   bash install_gpu.sh --yes      감지한 값/기본값으로 자동 설치
@@ -17,7 +17,7 @@
 # sudo가 필요한 일은 직접 하지 않고, 실행할 명령을 안내합니다.
 set -uo pipefail
 
-VERSION=3.1.0
+VERSION=3.2.0
 LEROBOT_COMMIT=7e241bd630a3719a56157a497ce5d08f244784f1  # the team's LeRobot 0.6.1 (tag v0.6.1)
 LEROBOT_DIR="$HOME/il_ws/src/lerobot_v0.6.1"  # beside a v2 checkout (~/il_ws/src/lerobot, 0.4.4), which stays as it is
 PKG="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"

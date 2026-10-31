@@ -171,6 +171,9 @@ def _on_abort(signum, frame) -> None:
 
 
 def _on_interrupt(signum, frame) -> None:
+    if omx_safe_start.LANDING.is_set():  # 중지 again while the arm lands: finish the landing (강제 종료 = SIGKILL)
+        _say("[omx] control: 안전 정지 중입니다. 팔을 다 내려놓으면 끝납니다 (바로 멈추려면 강제 종료)")
+        return
     if EVENTS["stop_recording"] or signum == signal.SIGTERM:
         raise KeyboardInterrupt  # second request: leave at once (the finally blocks still land the arm)
     _say("[omx] control: stop")
@@ -444,6 +447,28 @@ def _feed_live_view(robot, stop: threading.Event) -> None:
         stop.wait(0.1)
 
 
+# ---------------------------------------------------------------- wrist roll offset (teleop / record)
+def install_wrist_offset(teleop) -> None:
+    """OMX_WRIST_OFFSET ({"wrist_roll.pos": 50} or {"left_wrist_roll.pos": 50, ...}; normalized units, 50 =
+    90 degrees), set by the panel for a set whose leader gripper is mounted turned against the follower's:
+    the leader's wrist_roll plus the offset is what the follower follows, what the safe start compares and
+    what is recorded as the action. Clamped to one turn (-100..100), like the motor bus itself."""
+    offsets = json.loads(os.environ.get("OMX_WRIST_OFFSET") or "{}")
+    if not offsets or teleop is None:
+        return
+    get_action = teleop.get_action
+
+    def with_offset() -> dict:
+        action = get_action()
+        for key, units in offsets.items():
+            if key in action:
+                action[key] = min(100.0, max(-100.0, float(action[key]) + units))
+        return action
+
+    teleop.get_action = with_offset
+    _say("[omx] 손목 회전 보정: " + ", ".join(f"{k.removesuffix('.pos')} {u * 1.8:+.0f}°" for k, u in offsets.items()))
+
+
 # ---------------------------------------------------------------- motor output (panel)
 class MotorOutput:
     """Each follower joint's output as a share of its maximum torque, for the panel's 모터 출력 view: read
@@ -699,6 +724,7 @@ def run(cfg: RunConfig) -> None:
     omx_safe_start.install()
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
+    install_wrist_offset(teleop)
     ABORT["robot"] = robot
     install_live_view(robot)
     global MOTOR_OUT

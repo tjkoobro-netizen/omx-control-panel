@@ -187,6 +187,25 @@ def camera_probe(path: str) -> bytes:
         cap.release()
 
 
+WRIST_OFFSETS = (0, 90, -90)  # degrees; 180 would leave no range once clamped to one turn
+
+
+def wrist_offset_env() -> dict:
+    """Teleop / record: the follower's wrist_roll target (and the recorded action) is the leader's plus the
+    offset of that arm's set (robot.json "wrist_offset_deg"), for a set whose leader gripper is mounted turned
+    against the follower's. Not for an evaluation: the policy's output already is the follower target."""
+    setup = load_setup() or {}
+    offsets = setup.get("wrist_offset_deg") or {}
+    if ROBOT_MODE == "bimanual":
+        keys = {f"{side}_wrist_roll.pos": setup["bimanual"][side] for side in ("left", "right")}
+    elif setup.get("single"):
+        keys = {"wrist_roll.pos": setup["single"]["set"]}
+    else:
+        return {}
+    units = {k: offsets[n] / 1.8 for k, n in keys.items() if offsets.get(n)}  # 200 units = 360 degrees
+    return {"OMX_WRIST_OFFSET": json.dumps(units)} if units else {}
+
+
 def setup_status() -> dict:
     setup = load_setup()
     return {"setup": setup, "mode": ROBOT_MODE, "sets": {n: {k: {"port": v, "present": Path(v).exists()} for k, v in s.items()}
@@ -207,6 +226,11 @@ def save_setup(body: dict) -> dict:
         raise RuntimeError("단일 로봇 또는 협동 로봇을 고르세요.")
     setup = load_setup() or {}
     setup["mode"] = mode
+    if "wrist_offset_deg" in body:
+        offsets = {n: int(v) for n, v in (body["wrist_offset_deg"] or {}).items() if n in ROBOT_SETS}
+        if any(v not in WRIST_OFFSETS for v in offsets.values()):
+            raise RuntimeError("손목 회전 보정은 0, +90, -90도 중에서 고르세요.")
+        setup["wrist_offset_deg"] = {n: v for n, v in offsets.items() if v}
     if mode == "single":
         if body.get("set") not in ROBOT_SETS:
             raise RuntimeError("로봇 세트를 고르세요.")
@@ -1422,6 +1446,7 @@ def start_teleop(body: dict) -> dict:
     env = task_home_env(None, info)
     if env:  # the kill-and-return path also needs the home file
         env |= {"OMX_HOME_FILE": str(EVAL_HOME_FILE), "OMX_REPO_ID": ""}
+    env = (env or {}) | wrist_offset_env()
     JOB.start("teleop", cmd, info, env_extra=env)
     return {"ok": True}
 
@@ -1464,6 +1489,7 @@ def start_record(body: dict) -> dict:
     env = task_home_env(task, info)
     if env:
         env |= {"OMX_HOME_FILE": str(EVAL_HOME_FILE), "OMX_REPO_ID": repo_id}
+    env = (env or {}) | wrist_offset_env()
     JOB.start("record", cmd, info, env_extra=env)
     return {"ok": True, "repo_id": repo_id, "resume": resume}
 

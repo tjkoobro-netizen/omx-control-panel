@@ -128,11 +128,19 @@ class BiOmxFollower(Robot):
                 **_prefix("right", self.right_arm.send_action(parts["right"]))}
 
     def disconnect(self) -> None:
-        for arm in self.arms:  # safe stop of each arm (home, gripper, fade out, torque off)
-            try:
-                arm.disconnect()
-            except Exception as exc:  # the other arm must still land
-                print(f"[omx] safe stop: {arm._omx_side} 팔 정지 중 오류 ({exc})", flush=True)
+        import omx_safe_start
+
+        outer = omx_safe_start.LANDING.is_set()
+        omx_safe_start.LANDING.set()  # a second 중지 between the two arms must not skip the second one
+        try:
+            for arm in self.arms:  # safe stop of each arm (home, gripper, fade out, torque off)
+                try:
+                    arm.disconnect()
+                except Exception as exc:  # the other arm must still land
+                    print(f"[omx] safe stop: {arm._omx_side} 팔 정지 중 오류 ({exc})", flush=True)
+        finally:
+            if not outer:
+                omx_safe_start.LANDING.clear()
         for cam in self.cameras.values():
             if cam.is_connected:
                 cam.disconnect()
