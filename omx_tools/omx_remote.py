@@ -139,18 +139,27 @@ def proxied(method: str, path: str) -> bool:
     return path.startswith(PROXY_GET if method == "GET" else PROXY_POST)
 
 
-_DATASETS = {"t": 0.0, "items": []}
+_DATASETS = {"t": 0.0, "items": [], "busy": False}
 
 
 def gpu_datasets() -> list[dict]:
-    """The team's datasets on the GPU laptop (cached 15 s for the status poll)."""
-    if time.time() - _DATASETS["t"] > 15:
-        try:
-            _DATASETS["items"] = gpu_json("/api/datasets", timeout=10).get("datasets", [])
-            _DATASETS["t"] = time.time()
-        except Exception:
-            pass  # not connected yet: ask again at the next status poll
+    """The team's datasets on the GPU laptop (cached 15 s for the status poll). Refreshed in the background:
+    a slow link (e.g. during a transfer or upload) must never hold up the status poll, which would leave the
+    page showing an old phase and queue the button clicks behind it."""
+    if time.time() - _DATASETS["t"] > 15 and not _DATASETS["busy"]:
+        _DATASETS["busy"] = True
+        threading.Thread(target=_refresh_datasets, daemon=True).start()
     return _DATASETS["items"]
+
+
+def _refresh_datasets() -> None:
+    try:
+        _DATASETS["items"] = gpu_json("/api/datasets", timeout=10).get("datasets", [])
+        _DATASETS["t"] = time.time()
+    except Exception:
+        pass  # not connected yet: ask again at the next status poll
+    finally:
+        _DATASETS["busy"] = False
 
 
 # ---------------------------------------------------------------- models (configs only, the weights stay there)

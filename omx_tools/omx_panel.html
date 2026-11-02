@@ -413,6 +413,10 @@ body { font-size: 13.5px; font-feature-settings: "tnum" 1; }
 .telemetry .t:first-child { padding-left: 0; }
 .telemetry .t .k { color: var(--appbar-muted); font-size: 11px; font-family: var(--font); letter-spacing: 0; }
 .telemetry .t.right { margin-left: auto; border-right: 0; border-left: 1px solid var(--line); }
+.cpu-bars { display: inline-flex; align-items: flex-end; gap: 1px; height: 14px; }
+.cpu-bars i { display: block; width: 3px; min-height: 1px; background: var(--ok); }
+.cpu-bars i.warn { background: var(--warn); }
+.cpu-bars i.bad { background: var(--bad); }
 .led { width: 8px; height: 8px; border-radius: 50%; background: #3a4552; flex: none; }
 .led.ok { background: var(--ok); box-shadow: 0 0 6px rgba(61, 220, 132, .7); }
 .led.warn { background: var(--warn); box-shadow: 0 0 6px rgba(255, 176, 32, .7); }
@@ -467,7 +471,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.2.0</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.2.5</span></div>
       </div>
     </div>
     <div class="status">
@@ -489,6 +493,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
     <span class="t"><span class="k" data-k="step">진행</span><span id="tlStep">-</span></span>
     <span class="t"><span class="led" id="tlLoopLed"></span><span class="k" data-k="loop">제어 속도</span><span id="tlLoop">-</span></span>
     <span class="t"><span class="led" id="tlCamLed"></span><span class="k" data-k="cam">카메라</span><span id="tlCam">꺼짐</span></span>
+    <span class="t" id="tlCpuBox"><span class="led" id="tlCpuLed"></span><span class="k">CPU</span><span class="cpu-bars" id="tlCpuBars" aria-hidden="true"></span><span id="tlCpu">-</span></span>
     <span class="t"><span class="k">GPU</span><span id="tlGpu">-</span></span>
     <span class="t"><span class="led" id="tlTrainLed"></span><span class="k" data-k="train">학습</span><span id="tlTrain">-</span></span>
     <span class="t right"><span class="k" data-k="host">노트북</span><span id="tlHost">-</span><span class="k" data-k="time">시각</span><span id="tlClock">--:--:--</span></span>
@@ -722,9 +727,9 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <div class="bar"><div id="recBar"></div></div>
         <p class="warn-box" id="recLoopWarn" hidden style="margin:0"></p>
         <div class="row">
-          <button type="button" id="nextBtn" title="키보드 → 와 같음">다음으로</button>
-          <button type="button" id="rerecBtn" title="키보드 ← 와 같음">이번 것 다시 찍기</button>
-          <button type="button" class="danger" id="recStop" title="키보드 Esc 와 같음">녹화 끝내기 (저장)</button>
+          <button type="button" id="nextBtn" title="키보드 → 와 같음 (제어판 창이 앞에 있을 때)">다음으로</button>
+          <button type="button" id="rerecBtn" title="키보드 ← 와 같음 (제어판 창이 앞에 있을 때)">이번 것 다시 찍기</button>
+          <button type="button" class="danger" id="recStop" title="키보드 Esc 와 같음 (제어판 창이 앞에 있을 때)">녹화 끝내기 (저장)</button>
         </div>
         <p class="muted" style="margin:0">끝내기를 누르면 완료된 에피소드까지 저장되고, 진행 중이던 에피소드는 버려집니다.</p>
       </div>
@@ -1161,7 +1166,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <li>팔로워 전원 공급기를 바로 뽑을 수 있는 곳에 둡니다.</li>
       </ul>
       <p><b>안전 시작</b>: 시작하면 팔로워가 ① 저장한 시작 자세로 팔을 들고 ② 그리퍼를 닫은 뒤 ③ 리더 자세로 천천히 다가갑니다. 이 동안 모터 출력은 30%로 제한됩니다. 다가가는 중에 리더를 잡고 움직이기 시작하면 바로 원래 출력과 속도로 따라잡습니다. 리더나 팔로워의 회전 관절이 한 바퀴 넘게 읽히면 자동으로 보정하고, 둘의 차이가 너무 크면(약 160° 이상) 시작하지 않고 이유를 알려줍니다. 녹화는 이 과정이 끝난 뒤에 시작됩니다.</p>
-      <p><b>안전 정지</b>: 중지하면 ① 저장한 끝 자세로 천천히 옮기고 ② 모터 출력을 3초에 걸쳐 줄인 뒤 ③ 토크를 끕니다. 그래서 팔이 툭 떨어지지 않습니다. 정지에 몇 초 걸리며, 그동안 상태가 "천천히 내려놓는 중"으로 보입니다. 이때 중지를 한 번 더 누르면 바로 끝나지만 토크가 켜진 채 그 자세로 멈춥니다.</p>
+      <p><b>안전 정지</b>: 중지하거나 녹화가 끝나면 ① 시작할 때 자세(끝 자세를 저장해 두었으면 그 자세)로 출력 30%로 천천히 옮기고 ② 모터 출력을 3초에 걸쳐 줄인 뒤 ③ 토크를 끕니다. 그래서 팔이 툭 떨어지지 않습니다. 정지에 몇 초 걸리며, 그동안 상태가 "천천히 내려놓는 중"으로 보입니다. 이때 중지를 한 번 더 누르면 바로 끝나지만 토크가 켜진 채 그 자세로 멈춥니다.</p>
       <p><b>시작 자세·끝 자세 저장</b>(텔레옵 칸): 리더암을 손으로 원하는 자세로 잡고 저장 버튼을 누릅니다. 리더 위치만 읽고 로봇은 움직이지 않습니다. 시작 자세는 그리퍼가 바닥에서 충분히 떨어진 "팔을 든 자세", 끝 자세는 "팔을 접어 작업대에 내려놓은 자세"로 정합니다. 처음 쓰기 전에 꼭 저장하세요.</p>
     </section>
 
@@ -1185,6 +1190,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <li>각 영상 아래 숫자는 밝기입니다. <b>"검은 화면"</b>이 뜨면 렌즈 캡, 가림, USB를 확인합니다.</li>
         <li>카메라 보기는 <b>카메라 없는 텔레옵과 동시에</b> 쓸 수 있습니다.</li>
         <li><b>녹화를 시작하면 카메라 보기는 자동으로 꺼지고</b>, 녹화 프로그램이 읽는 영상이 같은 자리에 나옵니다.</li>
+        <li><b>CPU (상단 표시줄)</b>: 이 PC의 CPU입니다. 막대 하나가 스레드 하나, "가동 3/8"은 사용률 25% 이상인 스레드 수, 온도는 5초 평균입니다. 마우스를 올리면 코어 수와 스레드별 사용률이 나옵니다. 녹화 중 막대가 빨갛게 꽉 차거나 "클럭 저하"가 뜨면 프레임이 빠질 수 있으니, 다른 무거운 작업을 멈추세요.</li>
         <li><b>모터 출력</b>: 텔레옵·녹화 중에 카메라 칸 위쪽에 나오는 버튼입니다. 누르면 카메라 오른쪽에 팔로워 관절마다 지금 <b>최대 토크의 몇 %</b>를 내고 있는지 막대로 나옵니다(초당 5번). 50% 이상은 노랑, 80% 이상은 빨강이고, 세로줄은 최근 3초 최고값입니다. 어깨·팔꿈치(XL430)는 모터가 직접 계산한 부하이고, 손목·그리퍼(XL330)는 전류를 정지 토크 전류(1.47A)로 나눈 추정값입니다. 토크 센서 값이 아니라서 움직이는 중에는 마찰도 섞입니다. 버튼을 다시 누르면 닫히고, 닫혀 있는 동안은 모터를 읽지 않습니다. 열어 둔 상태는 다음 텔레옵·녹화에도 그대로 이어집니다.</li>
         <li><b>화면 고정</b>(기본 켜짐): 아래로 스크롤해도 카메라 칸이 왼쪽 위에 붙어 따라 내려옵니다. 녹화 버튼과 영상을 한 화면에서 보며 작업할 수 있습니다. 다시보기·로그를 볼 때 가리면 체크를 끄세요. 좁은 창(한 줄 배치)에서는 고정하지 않습니다.</li>
       </ul>
@@ -1197,7 +1203,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       <ul>
         <li><b>텔레옵 시작</b>: 안전 시작(팔 들기 → 그리퍼 닫기 → 천천히 리더 자세로) 뒤 리더를 따라 움직입니다. 데이터는 저장되지 않습니다.</li>
         <li>상태 칸에 경과 시간과 제어 주기(정상은 약 60Hz)가 표시됩니다.</li>
-        <li><b>중지</b>: 안전 정지(끝 자세로 이동 → 출력 서서히 줄이기 → 토크 끄기)로 끝냅니다. 몇 초 걸립니다(협동 로봇은 두 팔을 차례로). 안전 정지 중에 중지를 다시 눌러도 내려놓기를 끝까지 마칩니다. 바로 멈춰야 하면 <b>강제 종료</b>를 누르세요.</li>
+        <li><b>중지</b>: 안전 정지(시작할 때 자세로 천천히 이동 → 출력 서서히 줄이기 → 토크 끄기)로 끝냅니다. 몇 초 걸립니다(협동 로봇은 두 팔을 차례로). 안전 정지 중에 중지를 다시 눌러도 내려놓기를 끝까지 마칩니다. 바로 멈춰야 하면 <b>강제 종료</b>를 누르세요.</li>
         <li><b>손목 회전 보정</b>(로봇 구성 → 구성 바꾸기): 리더 그리퍼가 팔로워 집게와 90° 돌아가게 조립된 세트는 +90° 또는 −90°를 고릅니다. 텔레옵·녹화에서 팔로워 손목이 리더 손목 + 보정값으로 움직이고, 녹화되는 동작도 보정된 값입니다(평가에는 쓰지 않음). 손목은 한 바퀴(±180°) 안에서만 움직이므로, 보정한 쪽으로는 손목을 90° 덜 돌릴 수 있습니다. 보정을 바꾸기 전과 후의 녹화는 서로 다른 데이터셋에 담으세요.</li>
         <li>기본은 카메라 없이 실행합니다. 화면은 왼쪽 카메라 보기로 확인합니다. <a href="#h-rerun">Rerun 보기</a>를 켜면 카메라를 포함해 실행하고 영상을 Rerun으로 보냅니다.</li>
       </ul>
@@ -1218,6 +1224,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <tr><td>이번 것 다시 찍기</td><td>방금 에피소드를 버리고 다시 찍습니다. 실패한 시연은 꼭 다시 찍으세요</td></tr>
         <tr><td>녹화 끝내기 (저장)</td><td>완료된 에피소드까지 저장하고 끝냅니다. 진행 중이던 에피소드는 버려집니다</td></tr>
       </table></div>
+      <p><b>키보드</b>: 제어판 창이 앞에 있을 때 <span class="mono">→</span> 다음으로, <span class="mono">←</span> 이번 것 다시 찍기, <span class="mono">Esc</span> 녹화 끝내기. 글자 입력 칸에 커서가 있거나 다른 창(터미널 등)이 앞에 있으면 먹지 않습니다. 원위치를 일찍 마쳤으면 <span class="mono">→</span>로 바로 다음 에피소드를 시작하세요.</p>
       <p><b>음성 안내</b>를 체크하면 이 노트북 스피커로 "에피소드 N 녹화 시작", "물체를 원위치하세요", "저장 완료"를 알려줍니다.</p>
       <p><b>Hugging Face 자동 업로드</b>를 체크하면, 녹화가 정상으로 끝난 뒤 <code>huggingface.co/datasets/&lt;HF 아이디&gt;/omx_&lt;첫 키워드&gt;_&lt;MMDD_HHMM&gt;</code>에 비공개로 올립니다. 키워드는 설명과 작업 문장을 보고 자동으로 정합니다. 예를 들어 "딸기를 집어 접시에 놓기"는 strawberry, pick_place, plate가 되고, 첫 키워드가 이름에 들어갑니다. 키워드는 태그로도 붙고, 설명·작업 문장·에피소드 수·카메라 구성·녹화 시각이 데이터셋 페이지에 표로 정리됩니다. 강제 종료했거나 에러로 끝난 녹화는 올리지 않습니다. 업로드는 공유 폴더 저장 다음에 따로 하므로, 실패해도 녹화 데이터는 남아 있습니다. 처음 한 번은 터미널에서 <code>ssh -t omx-gpu '~/venv/il/bin/hf auth login'</code>으로 로그인해야 합니다. 이때 Write 권한 토큰이 필요합니다.</p>
       <p class="tip">처음엔 에피소드 2~3개로 짧게 시험하고, 다시보기로 확인한 뒤 본 녹화를 합니다. 학습에는 보통 50개 이상이 필요합니다.</p>
@@ -1487,7 +1494,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
     <section id="h-log">
       <h3>로그</h3>
       <p>실행 중인 텔레옵·녹화의 출력이 실시간으로 나옵니다. 문제가 생기면 여기의 마지막 줄들을 확인합니다. 전체 기록은 GPU 노트북의 <code>~/il_ws/omx_control_panel_v3/logs/</code>에 실행할 때마다 파일로 남습니다.</p>
-      <p>"Headless environment detected", "pynput" 경고는 원격 실행이라 키보드 단축키를 끈다는 뜻입니다. 정상이니 무시하세요. 같은 기능은 녹화 버튼으로 합니다.</p>
+      <p>"Headless environment detected", "pynput" 경고는 원격 실행이라 키보드 단축키를 끈다는 뜻입니다. 정상이니 무시하세요. 같은 기능은 녹화 버튼과 제어판 창의 → ← Esc로 합니다.</p>
     </section>
 
     <section id="h-data">
@@ -1745,11 +1752,16 @@ async function urgent(path, body) {
   return api(path, body);
 }
 
+// The browser opens at most 6 connections per host, and every camera stream holds one for good. The
+// streams therefore come from the other name of this PC (127.0.0.1 <-> localhost), so the status poll,
+// the motor output and the buttons keep their own connections.
+const STREAM_BASE = location.hostname === "127.0.0.1" ? `${location.protocol}//localhost:${location.port}`
+  : location.hostname === "localhost" ? `${location.protocol}//127.0.0.1:${location.port}` : "";
 // MJPEG <img> that reconnects when the server closes the stream (e.g. preview -> record hand-over)
 function streamImg(name, alt, isOn) {
   const img = document.createElement("img");
   img.alt = alt;
-  const connect = () => { img.src = "/stream/" + name + "?t=" + Date.now(); };
+  const connect = () => { img.src = STREAM_BASE + "/stream/" + name + "?t=" + Date.now(); };
   img.onerror = () => setTimeout(() => { if (img.isConnected && isOn()) connect(); }, 1000);
   connect();
   return img;
@@ -1805,11 +1817,15 @@ const TL = {
   ko: { robot: "로봇", step: "진행", loop: "제어 속도", cam: "카메라", train: "학습", host: "노트북", time: "시각",
         idle: "대기", kinds: { record: "녹화", eval: "평가", teleop: "텔레옵", home: "처음 자세 복귀" },
         ep: "에피소드", loopOk: "30Hz 정상", loopBad: (hz, mn) => `${hz}Hz (최저 ${mn}) / 목표 30`,
-        camLive: "평가·녹화 영상", camPreview: "카메라 보기", off: "꺼짐", eta: "남은 시간", account: "계정", training: "학습 중", btn: "EN" },
+        camLive: "평가·녹화 영상", camPreview: "카메라 보기", off: "꺼짐", eta: "남은 시간", account: "계정", training: "학습 중", btn: "EN",
+        cpuText: (c) => `${c.pct}% · 가동 ${c.busy}/${c.threads.length}`, cpuHot: "클럭 저하",
+        cpuTitle: (c) => `이 PC의 CPU${c.cores ? ` · ${c.cores}코어` : ""} ${c.threads.length}스레드. 막대 하나가 스레드 하나입니다. 가동 = 사용률 ${c.busy_pct}% 이상인 스레드 수.\n스레드별 사용률: ${c.threads.join(" ")}${c.temp !== null ? `\n온도 ${c.temp}°C (5초 평균)` : ""}${c.throttled ? "\n최근 5초 동안 열이나 전력 제한으로 클럭이 낮아졌습니다. 녹화 프레임이 빠질 수 있습니다." : ""}` },
   en: { robot: "ROBOT", step: "STEP", loop: "LOOP", cam: "CAM", train: "TRAIN", host: "HOST", time: "TIME",
         idle: "IDLE", kinds: { record: "RECORDING", eval: "POLICY EVAL", teleop: "TELEOP", home: "RETURN HOME" },
         ep: "EP", loopOk: "30 Hz OK", loopBad: (hz, mn) => `${hz} Hz (min ${mn}) / 30`,
-        camLive: "LIVE (robot)", camPreview: "PREVIEW", off: "OFF", eta: "ETA", account: "user", training: "training", btn: "한국어" },
+        camLive: "LIVE (robot)", camPreview: "PREVIEW", off: "OFF", eta: "ETA", account: "user", training: "training", btn: "한국어",
+        cpuText: (c) => `${c.pct}% · ${c.busy}/${c.threads.length} busy`, cpuHot: "THROTTLED",
+        cpuTitle: (c) => `This PC's CPU${c.cores ? ` · ${c.cores} cores` : ""} ${c.threads.length} threads. One bar per thread. Busy = threads at ${c.busy_pct}% or more.\nUse per thread: ${c.threads.join(" ")}${c.temp !== null ? `\nTemperature ${c.temp}°C (5 s average)` : ""}${c.throttled ? "\nThe clock was lowered by a heat or power limit in the last 5 s; recordings may lose frames." : ""}` },
 };
 let tlLang = "ko";
 try { tlLang = localStorage.getItem("omx.tlLang") === "en" ? "en" : "ko"; } catch (e) {}
@@ -1832,6 +1848,13 @@ function renderTelemetry(s) {
   $("tlRobot").textContent = run ? (L.kinds[job.kind] || job.kind) + (info.phase ? " · " + info.phase : "") : L.idle;
   led("tlRobotLed", run ? (job.kind === "record" || job.kind === "eval" ? "rec" : "warn") : "ok");
   $("tlStep").textContent = run && info.episode !== undefined ? `${L.ep} ${info.episode + 1}/${info.target ?? "-"} · ${fmtSec(job.elapsed || 0)}` : "-";
+  const c = s.cpu;
+  if (c && c.threads) {
+    $("tlCpu").textContent = L.cpuText(c) + (c.temp !== null ? ` · ${c.temp}°C` : "") + (c.throttled ? ` · ${L.cpuHot}` : "");
+    $("tlCpuBox").title = L.cpuTitle(c);
+    $("tlCpuBars").innerHTML = c.threads.map(t => `<i class="${t >= 90 ? "bad" : t >= 70 ? "warn" : ""}" style="height:${Math.max(t, 4)}%"></i>`).join("");
+    led("tlCpuLed", c.throttled || c.temp >= 95 ? "bad" : c.temp >= 85 || c.pct >= 85 ? "warn" : "ok");
+  }
   const lw = info.loop_warn;
   $("tlLoop").textContent = run && (job.kind === "eval" || job.kind === "record") ? (lw ? L.loopBad(lw.hz, lw.min_hz) : L.loopOk) : "-";
   led("tlLoopLed", run && (job.kind === "eval" || job.kind === "record") ? (lw ? "bad" : "ok") : "");
@@ -1985,9 +2008,13 @@ setInterval(refreshStamp, 15000);
 $("dsName").addEventListener("input", () => { nameEdited = $("dsName").value.trim() !== ""; updateRepoPreview(); });
 $("dsSelect").addEventListener("change", updateRepoPreview);
 
+let polling = false;  // one status request at a time: a slow answer must not pile up requests behind it
 async function poll() {
+  if (polling) return;
+  polling = true;
   try { render(await (await fetch("/api/status")).json()); }
   catch (e) { toast("제어판 서버와 연결이 끊겼습니다. 바탕화면의 OMX Control Panel 아이콘을 다시 눌러주세요.", "err"); }
+  finally { polling = false; }
 }
 setInterval(poll, 1000);
 poll();
@@ -3138,7 +3165,7 @@ async function loadStartPose() {
   const r = d.rest, ramp = d.settings.stop_ramp_s;
   $("ssRestInfo").textContent = r && r.joints
     ? `정지할 때: 끝 자세(${r.saved_by || ""} · ${r.saved_at || ""})로 천천히 옮긴 뒤 모터 출력을 ${ramp}초에 걸쳐 줄이고 토크를 끕니다.`
-    : `정지할 때: 끝 자세가 없어 그 자리에서 모터 출력을 ${ramp}초에 걸쳐 줄인 뒤 토크를 끕니다(팔이 천천히 내려앉음). 끝 자세를 저장하면 내려놓을 자리로 먼저 옮깁니다.`;
+    : `정지할 때: 텔레옵·녹화를 시작할 때 자세로 천천히 돌아간 뒤 모터 출력을 ${ramp}초에 걸쳐 줄이고 토크를 끕니다. 끝 자세를 저장하면 그 자리로 옮깁니다.`;
 }
 $("ssSave").addEventListener("click", () => act(() => api("/api/start_pose/save", { kind: "start" }), "리더 자세를 시작 자세로 저장했습니다.").then(loadStartPose));
 $("ssSaveRest").addEventListener("click", () => act(() => api("/api/start_pose/save", { kind: "rest" }), "리더 자세를 끝 자세로 저장했습니다.").then(loadStartPose));
@@ -3728,6 +3755,22 @@ updateTrainSummary();
 $("nextBtn").addEventListener("click", () => act(() => api("/api/control", { cmd: "next" }), "다음 단계로 넘어갑니다."));
 $("rerecBtn").addEventListener("click", () => act(() => api("/api/control", { cmd: "rerecord" }), "이번 에피소드를 버리고 다시 찍습니다."));
 $("recStop").addEventListener("click", () => act(() => urgent("/api/control", { cmd: "stop" }), "녹화를 끝내고 저장합니다."));
+// Closing the panel window stops the server on the control PC (it waits for a running job, transfer or upload).
+// A running robot program asks first: closing the window does not stop it, only the panel's 중지 does.
+window.addEventListener("beforeunload", (ev) => {
+  if (state && state.job && state.job.running) { ev.preventDefault(); ev.returnValue = ""; }
+});
+window.addEventListener("pagehide", () => { try { navigator.sendBeacon("/api/bye"); } catch (e) {} });
+// → ← Esc while recording, as in lerobot-record (v3 does not use LeRobot's global keyboard listener):
+// only with this panel focused, on the collect tab, outside text fields; a held key fires once
+document.addEventListener("keydown", (ev) => {
+  const btn = { ArrowRight: "nextBtn", ArrowLeft: "rerecBtn", Escape: "recStop" }[ev.key];
+  if (!btn || ev.repeat || ev.altKey || ev.ctrlKey || ev.metaKey || ev.shiftKey) return;
+  if ($("tab-collect").hidden || $(btn).disabled || document.querySelector("dialog[open]")) return;
+  if (ev.target.closest?.("input, select, textarea")) return;
+  ev.preventDefault();
+  $(btn).click();
+});
 </script>
 </body>
 </html>

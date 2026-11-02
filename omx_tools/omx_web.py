@@ -290,6 +290,62 @@ def other_robot_processes() -> list[str]:
     return found
 
 
+CPU_NOW = {"t": 0.0, "stat": {}, "throttle": None, "out": None,
+           "temps": collections.deque(maxlen=5), "throttle_ms": collections.deque(maxlen=5)}
+CPU_BUSY_PCT = 25  # a hardware thread at or above this use counts as busy in the panel's top bar
+
+
+def cpu_status() -> dict:
+    """This PC's CPU for the panel's top bar: use of each hardware thread between two status polls, busy
+    threads, physical cores, temperature, thermal throttling. Only reads /proc and /sys, so it never waits."""
+    now = time.time()
+    if now - CPU_NOW["t"] < 0.9 and CPU_NOW["out"]:
+        return CPU_NOW["out"]
+    stat = {}
+    for line in Path("/proc/stat").read_text().splitlines():
+        if re.match(r"cpu\d+ ", line):
+            name, *vals = line.split()
+            vals = [int(v) for v in vals[:8]]
+            stat[int(name[3:])] = (sum(vals), vals[3] + vals[4])  # total, idle + iowait
+    threads = []
+    for i in sorted(stat):
+        total, idle = stat[i]
+        was = CPU_NOW["stat"].get(i, (0, 0))
+        threads.append(round(100 * (1 - (idle - was[1]) / max(total - was[0], 1))))
+    cores = set()
+    for f in Path("/sys/devices/system/cpu").glob("cpu[0-9]*/topology/core_id"):
+        try:
+            cores.add((f.parent.joinpath("physical_package_id").read_text().strip(), f.read_text().strip()))
+        except OSError:
+            pass
+    temps = []
+    for zone in Path("/sys/class/thermal").glob("thermal_zone*"):
+        try:
+            if zone.joinpath("type").read_text().strip() in ("x86_pkg_temp", "TCPU"):
+                temps.append(int(zone.joinpath("temp").read_text()) // 1000)
+        except (OSError, ValueError):
+            pass
+    try:
+        throttle = int(Path("/sys/devices/system/cpu/cpu0/thermal_throttle/package_throttle_total_time_ms").read_text())
+    except (OSError, ValueError):
+        throttle = None
+    if throttle is not None and CPU_NOW["throttle"] is not None:
+        CPU_NOW["throttle_ms"].append(throttle - CPU_NOW["throttle"])
+    if temps:
+        CPU_NOW["temps"].append(max(temps))
+    # The package sensor jumps ~30 C for a second on any short burst and a few ms of throttling is normal:
+    # show a 5 s average, and "throttled" only when it lasts (at least 1 s of the last 5)
+    throttled = sum(CPU_NOW["throttle_ms"]) >= 1000
+    first = not CPU_NOW["stat"]
+    CPU_NOW.update(t=now, stat=stat, throttle=throttle)
+    if first:  # no earlier reading yet: use since boot would mislead
+        threads = [0 for _ in threads]
+    CPU_NOW["out"] = {"pct": round(sum(threads) / max(len(threads), 1)), "threads": threads,
+                      "busy": sum(t >= CPU_BUSY_PCT for t in threads), "busy_pct": CPU_BUSY_PCT, "cores": len(cores) or None,
+                      "temp": round(sum(CPU_NOW["temps"]) / len(CPU_NOW["temps"])) if CPU_NOW["temps"] else None, "throttled": throttled}
+    return CPU_NOW["out"]
+
+
 def arms_to_check() -> list:
     """(name, port, motor ids) of every arm of the current setup; the first follower/leader keep the old keys."""
     out = []
@@ -1362,15 +1418,19 @@ class Uploader:
         return self.proc is not None and self.proc.poll() is None
 
     def hf_login(self) -> str | None:
-        """Logged-in Hugging Face user name, re-checked at most once a minute."""
+        """Logged-in Hugging Face user name, re-checked at most once a minute in the background (a network
+        call; the status poll must not wait for it)."""
         if time.time() - self.hf_checked > 60:
             self.hf_checked = time.time()
-            try:
-                from huggingface_hub import HfApi
-                self.hf_user = HfApi().whoami()["name"]
-            except Exception:
-                self.hf_user = None
+            threading.Thread(target=self._check_hf, daemon=True).start()
         return self.hf_user
+
+    def _check_hf(self) -> None:
+        try:
+            from huggingface_hub import HfApi
+            self.hf_user = HfApi().whoami()["name"]
+        except Exception:
+            self.hf_user = None
 
     def start(self, repo_id: str, keywords: str | None = None, description: str | None = None) -> None:
         if self.running():
@@ -1446,7 +1506,7 @@ def start_teleop(body: dict) -> dict:
     env = task_home_env(None, info)
     if env:  # the kill-and-return path also needs the home file
         env |= {"OMX_HOME_FILE": str(EVAL_HOME_FILE), "OMX_REPO_ID": ""}
-    env = (env or {}) | wrist_offset_env()
+    env = (env or stop_home_env()) | wrist_offset_env()
     JOB.start("teleop", cmd, info, env_extra=env)
     return {"ok": True}
 
@@ -1489,7 +1549,7 @@ def start_record(body: dict) -> dict:
     env = task_home_env(task, info)
     if env:
         env |= {"OMX_HOME_FILE": str(EVAL_HOME_FILE), "OMX_REPO_ID": repo_id}
-    env = (env or {}) | wrist_offset_env()
+    env = (env or stop_home_env()) | wrist_offset_env()
     JOB.start("record", cmd, info, env_extra=env)
     return {"ok": True, "repo_id": repo_id, "resume": resume}
 
@@ -1599,6 +1659,16 @@ ABORT_WAIT_S = 5.0  # 즉시 중단: kill and use omx_return_home.py if the safe
 
 
 RUN_HOME_FILE = LOG_DIR / "run_home_pose.json"  # the standard home pose of the run starting now (omx_safe_start)
+
+
+def stop_home_env() -> dict:
+    """Teleop / recording without a task home pose: the safe stop takes the follower slowly back to where
+    the run started (30% output), opens the gripper only if it started more open, then fades out.
+    A saved rest pose (끝 자세) keeps priority."""
+    import omx_safe_start
+    if (omx_safe_start.load_pose("rest") or {}).get("joints"):
+        return {}
+    return {"OMX_STOP_POSE": "home", "OMX_HOME_GRIPPER": "open"}
 
 
 def task_home_env(task: str | None, info: dict) -> dict:
@@ -2190,6 +2260,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
+        CLIENT["seen"] = time.time()
         if CONTROL:
             if remote.proxied("GET", self.path):
                 return self._forward("GET")
@@ -2243,6 +2314,7 @@ class Handler(BaseHTTPRequestHandler):
                 "robot_mode": ROBOT_MODE,
                 "cameras": [{"name": n, "label": CAMERA_LABELS.get(n, n)} for n in CAMERAS],
                 "job": JOB.status(),
+                "cpu": cpu_status(),
                 "log": list(JOB.lines)[-120:],
                 "datasets": merged_datasets() if CONTROL else list_datasets(),
                 "data_home": str(DATA_HOME),
@@ -2436,6 +2508,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length)
+        CLIENT["seen"] = time.time()
+        if self.path == "/api/bye":  # the panel window was closed (or is reloading)
+            CLIENT["bye"] = time.time()
+            return self._json({"ok": True})
         if CONTROL and remote.proxied("POST", self.path):
             return self._forward("POST", raw)
         body = json.loads(raw or b"{}")
@@ -2535,6 +2611,48 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": str(exc)}, 400)
 
 
+# Control PC: closing the panel window stops the server. The page sends /api/bye when it goes away; if no
+# page asks for anything within CLOSE_GRACE_S (a reload asks again in a second or two) the server stops as
+# with Ctrl+C - but only once no robot program, GPU transfer, upload or eval report is running.
+CLOSE_GRACE_S = 10.0
+CLIENT = {"seen": time.time(), "bye": 0.0}
+
+
+def busy_reason() -> str:
+    if JOB.running():
+        return {"record": "녹화가", "eval": "평가가", "teleop": "텔레옵이", "home": "처음 자세 복귀가"}.get(JOB.kind, "작업이") + " 끝나면"
+    if getattr(JOB, "reader", None) and JOB.reader.is_alive():
+        return "작업 마무리(저장·전송 시작)가 끝나면"
+    if SYNC["busy"]:
+        return "GPU 노트북 전송이 끝나면"
+    if UPLOADER.running():
+        return "Hugging Face 업로드가 끝나면"
+    if any(p.poll() is None for p in REPORTS.values()):
+        return "평가 보고서가 만들어지면"
+    return ""
+
+
+def close_watch() -> None:
+    told, idle = "", 0
+    while True:
+        time.sleep(2)
+        bye = CLIENT["bye"]
+        if not bye or CLIENT["seen"] > bye or time.time() - bye < CLOSE_GRACE_S:
+            told, idle = "", 0
+            continue
+        why = busy_reason()
+        if why:
+            if why != told:
+                print(f"[omx] 제어판 창이 닫혔습니다. {why} 서버를 끕니다", flush=True)
+            told, idle = why, 0
+            continue
+        idle += 1
+        if idle >= 2:  # idle on two checks in a row: a job's follow-up (transfer, upload) has had time to start
+            print("[omx] 제어판 창이 닫혀 서버를 끕니다 (다시 켜려면 바탕화면 아이콘 또는 omx-panel-v3)", flush=True)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return
+
+
 def _raise_interrupt(signum, frame) -> None:
     raise KeyboardInterrupt
 
@@ -2576,6 +2694,7 @@ def main() -> None:
     if CONTROL:
         remote.TUNNEL.start()
         threading.Thread(target=sync_loop, daemon=True).start()
+        threading.Thread(target=close_watch, daemon=True).start()
         print(f"[omx] control PC: training and inference on {remote.HOST} (SSH tunnel)", flush=True)
     else:
         start_inference_server()

@@ -23,7 +23,8 @@ a follower rotation joint read out of range is rebooted (no gravity load); a rem
 than ~160 deg refuses to start. The start pose is read from the leader arm
 (arm held up by hand) with save_start_pose() and shared by everyone using the robot.
 Safe stop (when teleop/record/eval ends normally, e.g. the panel's Stop): before LeRobot turns the
-torque off, the follower moves slowly to the saved rest pose (if any) with capped output, then the
+torque off, the follower moves slowly with capped output to the pose the run started in (the panel
+sets OMX_STOP_POSE=home for teleop, record and eval) or else to the saved rest pose (if any), then the
 output is ramped down to zero over a few seconds so the arm settles under gravity instead of
 dropping. A force-quit (SIGKILL) skips this and leaves the torque on.
 
@@ -182,7 +183,7 @@ def go_home(robot, what: str = "stop", events: dict | None = None) -> bool:
         _say(f"{worst}가 {'홈' if what == 'start' else '처음'} 자세와 너무 달라({gaps[worst] * 1.8:.0f}°) 움직이지 않습니다", what)
         return False
     set_pwm(robot, s["pwm_ratio"])
-    _say(f"{'홈 자세로' if what == 'start' else '평가 시작 때 처음 자세로'} 천천히 {'이동합니다' if what == 'start' else '돌아갑니다'} "
+    _say(f"{'홈 자세로' if what == 'start' else '시작할 때 자세로'} 천천히 {'이동합니다' if what == 'start' else '돌아갑니다'} "
          f"(출력 {int(s['pwm_ratio'] * 100)}%)", what)
 
     def move(goal: dict, speed: float) -> bool:
