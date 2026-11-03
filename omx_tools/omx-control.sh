@@ -20,8 +20,14 @@ open_url() {  # a new window, so the panel is not hidden as a tab behind other w
   fi
 }
 
-# v2 control PC (the robot is on this PC; training and inference on the GPU laptop): run the panel here
-if grep -q '"role": *"control"' $CONF_DIR/config.json 2>/dev/null; then
+robot_here() { ls /dev/serial/by-id/*OpenRB* >/dev/null 2>&1; }
+robot_on_gpu() { ssh -o BatchMode=yes -o ConnectTimeout=5 "$HOST" 'ls /dev/serial/by-id/*OpenRB*' >/dev/null 2>&1; }
+
+# v2 control PC (the robot is on this PC; training and inference on the GPU laptop): run the panel here.
+# With its robot plugged into the GPU laptop instead, open that laptop's panel below, like a personal PC does.
+CONTROL=0
+grep -q '"role": *"control"' $CONF_DIR/config.json 2>/dev/null && CONTROL=1
+if [ "$CONTROL" = 1 ] && { robot_here || ! robot_on_gpu; }; then
   notify-send -t 4000 "OMX Control Panel v3" "이 PC의 제어판 v3를 켜는 중..." 2>/dev/null
   # an SSH tunnel left by the old way of opening (laptop -> GPU panel) would hold the local port
   P0=$(python3 -c "import sys; sys.path.insert(0, '$HOME/$V3/omx_tools'); import omx_config; print(omx_config.port())" 2>/dev/null)
@@ -50,11 +56,13 @@ fi
 PORT=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" "bash $TOOLS/omx-panel-server.sh --port-only") \
   || fail "GPU 노트북($HOST)에서 제어판 서버를 켜지 못했습니다. 'ssh $HOST' 접속과 GPU 노트북의 ~/$V3/logs/web.log 를 확인하세요."
 [[ "$PORT" =~ ^[0-9]+$ ]] || fail "서버 포트를 알 수 없습니다: $PORT"
-URL="http://127.0.0.1:${PORT}"
+LOCAL=$PORT
+[ "$CONTROL" = 1 ] && LOCAL=$((PORT + 100))  # this PC's own panel may hold the same port number
+URL="http://127.0.0.1:${LOCAL}"
 
-if ! ss -ltn | grep -q "127.0.0.1:${PORT} "; then
+if ! ss -ltn | grep -q "127.0.0.1:${LOCAL} "; then
   ssh -f -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
-    -L "${PORT}:127.0.0.1:${PORT}" "$HOST" || fail "SSH 터널을 열지 못했습니다 (포트 ${PORT})."
+    -L "${LOCAL}:127.0.0.1:${PORT}" "$HOST" || fail "SSH 터널을 열지 못했습니다 (포트 ${LOCAL})."
 fi
 
 # Open in a new window so the panel is not hidden as a tab behind other windows

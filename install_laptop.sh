@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OMX Control Panel v3.2.5 - 개인 PC(노트북) 설치. 내가 들고 다니는 PC에서 실행합니다.
+# OMX Control Panel v3.3.0 - 개인 PC(노트북) 설치. 내가 들고 다니는 PC에서 실행합니다.
 #
 #   bash install_laptop.sh
 #
@@ -13,7 +13,7 @@
 #   7. (선택) Rerun 뷰어 설치
 set -uo pipefail
 
-VERSION=3.2.5
+VERSION=3.3.0
 PKG="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 ALIAS=omx-gpu
 APP_DIR="$HOME/.local/share/omx"
@@ -119,6 +119,7 @@ fi
 bold "6/7 실행기·아이콘"
 mkdir -p "$APP_DIR" "$CONF_DIR" ~/.local/bin ~/.local/share/applications
 cp "$PKG/omx_tools/omx-control.sh" "$APP_DIR/omx-control-v3.sh" && chmod +x "$APP_DIR/omx-control-v3.sh"
+cp "$PKG/omx_tools/omx_icon.svg" "$APP_DIR/omx-control-v3.svg"
 printf 'OMX_GPU_HOST=%s\n' "$ALIAS" > "$CONF_DIR/laptop.env"
 ln -sf "$APP_DIR/omx-control-v3.sh" ~/.local/bin/omx-panel-v3
 cat > ~/.local/share/applications/omx-control-v3.desktop <<EOF
@@ -127,7 +128,7 @@ Type=Application
 Name=OMX Control Panel v3
 Comment=GPU 노트북($GPU_NAME)의 OMX 로봇 수집·학습·평가
 Exec=$APP_DIR/omx-control-v3.sh
-Icon=applications-science
+Icon=$APP_DIR/omx-control-v3.svg
 Terminal=false
 Categories=Utility;
 EOF

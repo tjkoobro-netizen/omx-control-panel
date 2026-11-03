@@ -471,7 +471,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.2.5</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.3.0</span></div>
       </div>
     </div>
     <div class="status">
@@ -1648,6 +1648,7 @@ function voiceCue(job) {
   else if (info.phase === "원위치 시간") say("녹화 끝. 물체를 원위치하세요");
   else if (info.phase === "다시 찍기") say("다시 찍습니다");
   else if (info.phase === "저장 중") say("녹화를 마치고 저장합니다");
+  else if (info.phase === "천천히 내려놓는 중") say("끝냅니다. 팔을 천천히 내려놓습니다");
   else if (info.phase === "끝남") say(info.returncode === 0 ? "저장 완료" : "녹화가 비정상 종료됐습니다");
 }
 
@@ -2025,7 +2026,8 @@ function needConfirm() {
 }
 
 async function act(fn, okMsg) {
-  try { const r = await fn(); if (okMsg) toast(typeof okMsg === "function" ? okMsg(r) : okMsg, "ok"); poll(); }
+  // the run changes phase just after the command: look again soon, so the screen and the voice do not wait for the next second
+  try { const r = await fn(); if (okMsg) toast(typeof okMsg === "function" ? okMsg(r) : okMsg, "ok"); poll(); setTimeout(poll, 300); }
   catch (e) { toast(e.message, "err"); }
 }
 
