@@ -15,8 +15,9 @@
     run settings: sync | async05 (queue threshold 0.5), then rtc / smooth / ddim10 when used
 
 Recording codes come from the team file <shared_root>/omx_presets/data_codes.json (kept by the training
-guide; written with DEFAULT_CODES the first time). A recording without a code gets a temporary one from
-the start of its name, with a warning.
+guide; written with DEFAULT_CODES the first time). A name of the data rule MMDD_source_keywords_Nep gets one
+from its source and date (real re, sim si, algo al, realsim rs: 1103_real_twoarm_box_27ep is re1103). Any other
+recording without a code gets a temporary one from the start of its name, with a warning.
 Existing models keep their folder names (eval notes point at them); they get a display name (alias) in
 <checkpoints>/aliases.json: {"<run id>": "<display name>"}. A model trained with a rule name needs none.
 """
@@ -66,12 +67,18 @@ def load_codes() -> dict:
         return DEFAULT_CODES
 
 
+RULE_NAME = re.compile(r"^(\d{4})_(real|sim|algo|realsim)_[a-z0-9_]+_\d+ep$")  # MMDD_source_keywords_Nep
+RULE_SOURCE = {"real": "re", "sim": "si", "algo": "al", "realsim": "rs"}
+
+
 def data_code(repo: str, codes: dict) -> tuple[str, bool]:
     """(code, known) for an original recording ("user/name" or "name")."""
     name = repo.rsplit("/", 1)[-1]
     table = codes["datasets"]
     if repo in table or name in table:
         return table.get(repo) or table[name], True
+    if m := RULE_NAME.match(name):  # the team's data name rule carries its own code, e.g. re1103
+        return f"{RULE_SOURCE[m.group(2)]}{m.group(1)}", True
     words = [w for w in re.split(r"[^a-z0-9]+", name.lower()) if w and w not in ("omx", "taejackooo", "train")]
     return (re.sub(r"[^a-z0-9]", "", "".join(words))[:6] or "data"), False
 

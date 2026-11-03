@@ -722,6 +722,11 @@ def run_teleop(cfg: RunConfig, robot, teleop) -> None:
 
 def run(cfg: RunConfig) -> None:
     omx_safe_start.install()
+    problems = omx_safe_start.preflight(omx_safe_start.run_arms(cfg.robot, cfg.teleop))
+    if problems:
+        for problem in problems:
+            print(f"[omx] safe start: 시작하지 않습니다. {problem}", flush=True)
+        sys.exit(2)
     robot = make_robot_from_config(cfg.robot)
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
     install_wrist_offset(teleop)

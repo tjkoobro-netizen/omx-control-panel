@@ -471,7 +471,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.3.0</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.3.1</span></div>
       </div>
     </div>
     <div class="status">
@@ -1520,6 +1520,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <tr><td>wrist 영상이 끊기듯 느림</td><td>조명을 밝게 합니다. 카메라를 켤 때 fps 고정이 자동으로 적용됩니다</td></tr>
         <tr><td>"다른 사람이 로봇을 쓰고 있습니다"</td><td>점검에 나온 사용자에게 확인합니다. 다른 계정의 프로그램은 강제 종료할 수 없습니다</td></tr>
         <tr><td>모터 "하드웨어 에러"</td><td>모터 초기화 후, 리더와 팔로워 자세를 맞추고 다시 시작합니다</td></tr>
+        <tr><td>"시작하지 않습니다"가 나옴</td><td>시작 전 점검에서 문제를 찾아 팔을 움직이지 않은 것입니다. 안내대로 보드 USB를 다시 꽂거나, 모터 값이 한 바퀴를 넘었으면 팔로워 팔을 내려놓고 모터 초기화를 누른 뒤 다시 시작합니다.</td></tr>
         <tr><td>녹화가 "저장 중"에서 오래 멈춤</td><td>1분 넘게 그대로면 강제 종료하고 로그를 확인합니다</td></tr>
         <tr><td>포트 없음</td><td>USB 허브와 케이블을 확인합니다. 노트북 본체 포트에 직접 꽂으면 더 안정적입니다</td></tr>
       </table></div>
@@ -1613,6 +1614,7 @@ let streamsOn = false;
 
 // Voice prompts in this browser (the GPU laptop's speaker is not reachable from a remote session)
 let lastCue = "";
+let lastRefused = "";
 let audioCtx = null;
 function beep(freq, ms) {
   try {
@@ -1637,7 +1639,7 @@ function say(text) {
 function voiceCue(job) {
   const info = job.info || {};
   if (job.kind !== "record" && job.kind !== "eval") return;
-  const key = [job.running, info.phase, info.episode].join("|");
+  const key = [job.running, info.phase, info.episode || 0].join("|");  // the first status can show the phase before the episode
   if (key === lastCue) return;
   const first = lastCue === "";
   lastCue = key;
@@ -1649,7 +1651,7 @@ function voiceCue(job) {
   else if (info.phase === "다시 찍기") say("다시 찍습니다");
   else if (info.phase === "저장 중") say("녹화를 마치고 저장합니다");
   else if (info.phase === "천천히 내려놓는 중") say("끝냅니다. 팔을 천천히 내려놓습니다");
-  else if (info.phase === "끝남") say(info.returncode === 0 ? "저장 완료" : "녹화가 비정상 종료됐습니다");
+  else if (info.phase === "끝남") say(info.refused ? "시작하지 않았습니다. 화면의 안내를 확인하세요" : info.returncode === 0 ? "저장 완료" : "녹화가 비정상 종료됐습니다");
 }
 
 let toastTimer = null;
@@ -1909,6 +1911,7 @@ function render(s) {
   }
 
   voiceCue(job);
+  if (job.info?.refused && job.info.refused !== lastRefused) { lastRefused = job.info.refused; if (job.running === false) toast(lastRefused, "err"); }
   const teleopRunning = running && job.kind === "teleop";
   const recRunning = running && job.kind === "record";
   $("teleopState").textContent = teleopRunning ? (info.phase || "실행 중") + " · " + fmtSec(job.elapsed) : "대기";
@@ -1930,7 +1933,7 @@ function render(s) {
     $("recPhase").textContent = (info.phase || "-") + (recRunning && total && (info.phase === "녹화 중" || info.phase === "원위치 시간") ? " · " + fmtSec(total - el) + " 남음" : "");
     $("recCount").textContent = info.repo_id ? info.repo_id + (info.episode !== undefined ? " · 에피소드 " + (info.episode + 1) : "") + (info.target ? " (이번 목표 " + info.target + "개)" : "") : "";
     $("recBar").style.width = total ? Math.min(100, (el / total) * 100) + "%" : "0";
-    if (info.phase === "끝남") $("recPhase").textContent = info.returncode === 0 ? "녹화 완료 · 저장됨" : "종료됨 (코드 " + info.returncode + ") · 로그 확인";
+    if (info.phase === "끝남") $("recPhase").textContent = info.refused ? info.refused : info.returncode === 0 ? "녹화 완료 · 저장됨" : "종료됨 (코드 " + info.returncode + ") · 로그 확인";
   }
   const rw = recRunning && info.loop_warn;
   $("recLoopWarn").hidden = !rw;

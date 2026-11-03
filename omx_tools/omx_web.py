@@ -1221,6 +1221,8 @@ class Job:
             self.info["safe_start"] = line.split("safe stop:", 1)[1].strip()
         elif "[omx] safe start:" in line:
             msg = line.split("safe start:", 1)[1].strip()
+            if msg.startswith("시작하지 않습니다"):  # omx_safe_start.preflight: nothing moved; the page shows why
+                self.info["refused"] = " / ".join(filter(None, [self.info.get("refused"), msg]))
             done = msg.startswith("완료") or msg.startswith("시간 초과")
             if done and self.kind == "eval" and self.info.get("protocol") and self.info.get("episode") == 0 \
                     and self.info.get("phase") == "실행 중":

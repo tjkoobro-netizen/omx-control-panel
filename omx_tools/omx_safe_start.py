@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -137,6 +138,67 @@ def wrap(value: float) -> float:
     while value < -100.0:
         value += REV
     return value
+
+
+PROBE_S = 8
+PROBE = """
+import json, sys
+from dynamixel_sdk import PacketHandler, PortHandler
+p = PortHandler(sys.argv[1])
+if not (p.openPort() and p.setBaudRate(1000000)):
+    sys.exit(3)
+h, first, out = PacketHandler(2.0), int(sys.argv[2]), []
+for i in range(first, first + 6):
+    v, comm, _ = h.read4ByteTxRx(p, i, 132)
+    out.append(None if comm else v - 2**32 if v >= 2**31 else v)
+p.closePort()
+print(json.dumps(out))
+"""
+PROBE_MOTORS = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
+
+
+def run_arms(robot_cfg, teleop_cfg) -> list:
+    """(label, port, first motor id) of every arm of a run."""
+    out = []
+    for cfg, kind, first in ((robot_cfg, "팔로워", 11), (teleop_cfg, "리더", 1)):
+        if cfg is None:
+            continue
+        if getattr(cfg, "left_port", None):
+            out += [(f"왼팔 {kind}", cfg.left_port, first), (f"오른팔 {kind}", cfg.right_port, first)]
+        else:
+            out.append((kind, cfg.port, first))
+    return out
+
+
+def preflight(arms: list) -> list:
+    """Problems to refuse a start over, found before any arm connects or any torque comes on. LeRobot 0.6.1 clips
+    readings to the calibrated range, so a motor past one turn reads +-100 and only the raw ticks show it (the
+    wrist then swings at the start). Read-only, in separate processes: a board that stopped answering would
+    otherwise block the connect with no message."""
+    procs = [(label, port, subprocess.Popen([sys.executable, "-c", PROBE, port, str(first)], stdout=subprocess.PIPE,
+                                            stderr=subprocess.DEVNULL, text=True)) for label, port, first in arms]
+    problems, end = [], time.monotonic() + PROBE_S
+    try:
+        while time.monotonic() < end and any(p.poll() is None for _, _, p in procs):
+            time.sleep(0.05)
+        for label, port, p in procs:
+            if p.poll() is None:
+                problems.append(f"{label} 보드가 응답하지 않습니다({port}). 그 보드의 USB를 뽑았다가 다시 꽂으세요.")
+                continue
+            if p.returncode:
+                problems.append(f"{label} 포트를 열 수 없습니다({port}). USB 연결을 확인하세요.")
+                continue
+            ticks = json.loads(p.stdout.read())
+            for name, tick in zip(PROBE_MOTORS, ticks):
+                if tick is None:
+                    problems.append(f"{label} {name} 모터가 응답하지 않습니다. 전원과 모터 케이블을 확인하세요.")
+                elif not 0 <= tick <= 4095:
+                    problems.append(f"{label} {name} 모터 값({tick})이 한 바퀴를 넘었습니다. 팔로워 팔을 내려놓고 '모터 초기화'를 누른 뒤 다시 시작하세요.")
+    finally:
+        for _, _, p in procs:  # waiting for a stuck process would block here too
+            if p.poll() is None:
+                p.kill()
+    return problems
 
 
 def _say(msg: str, what: str = "start") -> None:

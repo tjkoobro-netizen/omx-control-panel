@@ -60,6 +60,12 @@ LOCAL=$PORT
 [ "$CONTROL" = 1 ] && LOCAL=$((PORT + 100))  # this PC's own panel may hold the same port number
 URL="http://127.0.0.1:${LOCAL}"
 
+# a tunnel from before a network change or sleep can hold the port without answering: open a new one
+if ss -ltn | grep -q "127.0.0.1:${LOCAL} " && command -v curl >/dev/null && ! curl -s -m 5 -o /dev/null "$URL/api/status"; then
+  for pid in $(ss -ltnpH | grep "127.0.0.1:${LOCAL} " | grep '"ssh"' | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u); do kill "$pid"; done
+  for _ in 1 2 3 4 5 6; do ss -ltn | grep -q "127.0.0.1:${LOCAL} " || break; sleep 0.5; done
+fi
+
 if ! ss -ltn | grep -q "127.0.0.1:${LOCAL} "; then
   ssh -f -N -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=30 \
     -L "${LOCAL}:127.0.0.1:${PORT}" "$HOST" || fail "SSH 터널을 열지 못했습니다 (포트 ${LOCAL})."
