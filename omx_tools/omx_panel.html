@@ -479,7 +479,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.4.0</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.4.1</span></div>
       </div>
     </div>
     <div class="status">
@@ -1254,7 +1254,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
     <section id="h-train">
       <h3>② 학습 시키기</h3>
       <ol>
-        <li><b>학습 데이터 고르기</b>: 데이터는 구역별로 접고 펼칩니다. 이름 규칙(<code>MMDD_출처_행동키워드_Nep</code>)을 따르면 설명이 저절로 채워지고, 이름과 실제 에피소드 수가 다르면 빨갛게 알려 줍니다. <b>전체 선택</b>은 펼친 구역만 고릅니다. <b>HTML로 내려받기</b>로 목록을 파일로 받을 수 있습니다. 녹화 원본에 체크합니다. <b>빠른 선택</b>으로 전체 선택·선택 해제·날짜별 선택을 할 수 있고, <b>짧은 에피소드 빼기</b>는 데이터셋마다 길이 중앙값의 60%보다 짧은 에피소드(중간에 끊긴 시연 등)를 뺍니다.</li>
+        <li><b>학습 데이터 고르기</b>: 데이터는 구역별로 접고 펼칩니다. 이름 규칙(<code>MMDD_출처_행동키워드_Nep</code>, 무작위화 데이터는 끝이 <code>rand_epN</code>)을 따르면 설명이 저절로 채워지고, 이름과 실제 에피소드 수가 다르면 빨갛게 알려 줍니다. <b>전체 선택</b>은 펼친 구역만 고릅니다. <b>HTML로 내려받기</b>로 목록을 파일로 받을 수 있습니다. 녹화 원본에 체크합니다. <b>빠른 선택</b>으로 전체 선택·선택 해제·날짜별 선택을 할 수 있고, <b>짧은 에피소드 빼기</b>는 데이터셋마다 길이 중앙값의 60%보다 짧은 에피소드(중간에 끊긴 시연 등)를 뺍니다.</li>
         <li><b>영상 보며 고르기</b>: 이름을 눌러 에피소드를 펼친 뒤 에피소드를 누르면 아래에서 front·wrist 영상이 2배속으로 재생됩니다. 실패한 시연이면 <b>학습에서 빼기</b>(단축키 X)를 누르고, <b>다음 ▶</b>(→)으로 넘기며 훑어봅니다. 스페이스는 재생·멈춤입니다.</li>
         <li><b>학습 설정</b>: 정책(ACT 추천), 스텝 수, 배치 크기, 이미지 증강을 정합니다. 아래에 예상 소요 시간과 데이터 반복 횟수, 저장 위치가 나옵니다.</li>
         <li><b>바로 시작</b>을 누르면 진행 막대, 남은 시간, 손실 그래프가 실시간으로 표시됩니다.</li>
@@ -2418,7 +2418,7 @@ function drawTrainDatasets() {
   const note = state?.data_legacy_note || "";
   box.innerHTML = trGroups().map(g => {
     const picked = g.list.filter(d => tr.selected.has(d.repo_id)).length;
-    return `<details class="ds-group" data-group="${escHtml(g.key)}" ${trGroupOpen(g.key) ? "open" : ""}><summary>${escHtml(g.title)}<span class="meta">${g.list.length}개${picked ? ` · ${picked}개 선택` : ""}</span></summary>${g.older && note ? `<p class="ds-group-note">${escHtml(note)}</p>` : ""}${g.key === "new" ? '<p class="ds-group-note">이름을 규칙(MMDD_출처_행동키워드_Nep)에 맞추면 설명이 저절로 채워집니다.</p>' : ""}<div class="ds-list">${g.list.map(row).join("")}</div></details>`;
+    return `<details class="ds-group" data-group="${escHtml(g.key)}" ${trGroupOpen(g.key) ? "open" : ""}><summary>${escHtml(g.title)}<span class="meta">${g.list.length}개${picked ? ` · ${picked}개 선택` : ""}</span></summary>${g.older && note ? `<p class="ds-group-note">${escHtml(note)}</p>` : ""}${g.key === "new" ? '<p class="ds-group-note">이름을 규칙(MMDD_출처_행동키워드_Nep, 무작위화 데이터는 끝이 rand_epN)에 맞추면 설명이 저절로 채워집니다.</p>' : ""}<div class="ds-list">${g.list.map(row).join("")}</div></details>`;
   }).join("");
   updateTrainSummary();
 }

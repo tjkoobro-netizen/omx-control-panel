@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """What each dataset in the training tab is: group, source and description.
 
-A name of the team's data rule MMDD_source_keywords_Nep describes itself. What a name cannot tell comes from the
+A name of the team's data rule MMDD_source_keywords_Nep (randomized data: ..._rand_epN) describes itself. What a name cannot tell comes from the
 team file <shared_root>/omx_presets/data_notes.json, so the notes need no panel release and stay out of the public repo:
   {"notes": {"<name>": {"use": "...", "how": "...", "action": "..."}},
    "legacy": {"<name>": {"group": "...", "how": "...", "action": "..."}},

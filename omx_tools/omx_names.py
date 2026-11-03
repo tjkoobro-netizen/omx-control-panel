@@ -15,7 +15,8 @@
     run settings: sync | async05 (queue threshold 0.5), then rtc / smooth / ddim10 when used
 
 Recording codes come from the team file <shared_root>/omx_presets/data_codes.json (kept by the training
-guide; written with DEFAULT_CODES the first time). A name of the data rule MMDD_source_keywords_Nep gets one
+guide; written with DEFAULT_CODES the first time). A name of the data rule MMDD_source_keywords_Nep (randomized
+data: MMDD_source_keywords_rand_epN) gets one
 from its source and date (real re, sim si, algo al, realsim rs: 1103_real_twoarm_box_27ep is re1103). Any other
 recording without a code gets a temporary one from the start of its name, with a warning.
 Existing models keep their folder names (eval notes point at them); they get a display name (alias) in
@@ -67,7 +68,8 @@ def load_codes() -> dict:
         return DEFAULT_CODES
 
 
-RULE_NAME = re.compile(r"^(\d{4})_(realsim|real|sim|algo)_([a-z0-9_]+)_(\d+)ep(?:_p\d+)?(?:_\d+)?$")  # MMDD_source_keywords_Nep
+# MMDD_source_keywords_Nep, or ..._rand_epN for randomized data; group 4 is the episode count in both
+RULE_NAME = re.compile(r"^(\d{4})_(realsim|real|sim|algo)_([a-z0-9_]+)_(?:rand_ep(?!\d+ep)|(?=\d+ep))(\d+)(?:ep)?(?:_p\d+)?(?:_\d+)?$")
 RULE_SOURCE = {"real": "re", "sim": "si", "algo": "al", "realsim": "rs"}
 
 
