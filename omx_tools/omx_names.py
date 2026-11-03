@@ -67,7 +67,7 @@ def load_codes() -> dict:
         return DEFAULT_CODES
 
 
-RULE_NAME = re.compile(r"^(\d{4})_(real|sim|algo|realsim)_[a-z0-9_]+_\d+ep$")  # MMDD_source_keywords_Nep
+RULE_NAME = re.compile(r"^(\d{4})_(realsim|real|sim|algo)_([a-z0-9_]+)_(\d+)ep(?:_p\d+)?(?:_\d+)?$")  # MMDD_source_keywords_Nep
 RULE_SOURCE = {"real": "re", "sim": "si", "algo": "al", "realsim": "rs"}
 
 

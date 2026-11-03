@@ -221,10 +221,18 @@ pre.log { margin: 0; background: var(--code-bg); color: var(--code-fg); border-r
 .ds-item { border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; display: grid; gap: 8px; background: var(--surface); }
 .ds-item.on { border-color: var(--accent); background: var(--accent-soft); }
 .ds-row { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 10px; align-items: center; }
-.ds-row .name { height: auto; padding: 0; border: 0; background: none; font-family: var(--mono); font-size: 12.5px; font-weight: 550; color: var(--fg); justify-content: flex-start; overflow: hidden; text-overflow: ellipsis; text-decoration: underline dotted var(--muted); text-underline-offset: 3px; }
+.ds-row .name { height: auto; padding: 0; border: 0; background: none; font-family: var(--mono); font-size: 12.5px; font-weight: 550; color: var(--fg); justify-content: flex-start; overflow: hidden; text-overflow: ellipsis; text-decoration: underline dotted var(--muted); text-underline-offset: 3px; white-space: normal; overflow-wrap: anywhere; overflow: visible; text-overflow: clip; text-align: left; }
 .ds-row .name:hover:not(:disabled) { color: var(--accent); }
 .ds-row .meta { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .ep-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.ds-group { display: grid; gap: 6px; }
+.ds-group > summary { cursor: pointer; font-weight: 650; font-size: 13px; padding: 4px 0; }
+.ds-group > summary .meta { font-weight: 400; color: var(--muted); font-size: 12px; margin-left: 6px; }
+.ds-group-note { margin: 0; font-size: 12px; color: var(--muted); }
+.ds-note { display: grid; gap: 2px; font-size: 12px; color: var(--muted); padding-left: 26px; }
+.ds-note b { color: var(--fg); font-weight: 550; }
+.ds-note .warn { color: var(--bad); font-weight: 600; }
+.src-tag { font: 600 11px var(--mono); padding: 0 6px; border: 1px solid currentColor; border-radius: 9px; margin-right: 6px; color: var(--accent); }
 .ep-chips button.off { text-decoration: line-through; color: var(--bad); border-color: var(--bad); background: var(--bad-soft); }
 .ep-chips button.cur { outline: 2px solid var(--accent); outline-offset: 1px; }
 .pv { border: 1px solid var(--accent); border-radius: 12px; padding: 12px; display: grid; gap: 10px; background: var(--surface); }
@@ -471,7 +479,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.3.1</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.4.0</span></div>
       </div>
     </div>
     <div class="status">
@@ -762,11 +770,12 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </div>
       <p class="muted" style="margin:0">녹화 원본 중에서 고릅니다. 데이터셋 이름을 누르면 에피소드가 펼쳐지고, <b>에피소드를 누르면 아래에서 영상이 재생</b>됩니다. 보고 나서 <b>학습에서 빼기</b>를 누르면 줄이 그어집니다. 여러 개를 고르면 하나로 합쳐 학습하고, 어떤 녹화의 몇 번 에피소드를 썼는지 자동으로 기록합니다.</p>
       <div class="row quick">
-        <button type="button" id="trAll">전체 선택</button>
+        <button type="button" id="trAll" title="펼쳐 둔 구역의 데이터만 고릅니다. 접힌 구역은 고르지 않습니다">전체 선택</button>
         <button type="button" id="trNone">선택 해제</button>
         <select id="trDate" aria-label="날짜별 선택"><option value="">날짜별 선택</option></select>
         <button type="button" id="trShort" title="고른 데이터셋마다 길이 중앙값의 60%보다 짧은 에피소드를 뺍니다">짧은 에피소드 빼기</button>
         <button type="button" id="trResetEx">제외 초기화</button>
+        <button type="button" id="trExport" title="이 목록을 HTML 파일로 내려받습니다">HTML로 내려받기</button>
       </div>
       <div class="ds-list" id="trDatasets"><p class="muted">불러오는 중...</p></div>
       <div class="pv" id="trPv" hidden>
@@ -1245,7 +1254,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
     <section id="h-train">
       <h3>② 학습 시키기</h3>
       <ol>
-        <li><b>학습 데이터 고르기</b>: 녹화 원본에 체크합니다. <b>빠른 선택</b>으로 전체 선택·선택 해제·날짜별 선택을 할 수 있고, <b>짧은 에피소드 빼기</b>는 데이터셋마다 길이 중앙값의 60%보다 짧은 에피소드(중간에 끊긴 시연 등)를 뺍니다.</li>
+        <li><b>학습 데이터 고르기</b>: 데이터는 구역별로 접고 펼칩니다. 이름 규칙(<code>MMDD_출처_행동키워드_Nep</code>)을 따르면 설명이 저절로 채워지고, 이름과 실제 에피소드 수가 다르면 빨갛게 알려 줍니다. <b>전체 선택</b>은 펼친 구역만 고릅니다. <b>HTML로 내려받기</b>로 목록을 파일로 받을 수 있습니다. 녹화 원본에 체크합니다. <b>빠른 선택</b>으로 전체 선택·선택 해제·날짜별 선택을 할 수 있고, <b>짧은 에피소드 빼기</b>는 데이터셋마다 길이 중앙값의 60%보다 짧은 에피소드(중간에 끊긴 시연 등)를 뺍니다.</li>
         <li><b>영상 보며 고르기</b>: 이름을 눌러 에피소드를 펼친 뒤 에피소드를 누르면 아래에서 front·wrist 영상이 2배속으로 재생됩니다. 실패한 시연이면 <b>학습에서 빼기</b>(단축키 X)를 누르고, <b>다음 ▶</b>(→)으로 넘기며 훑어봅니다. 스페이스는 재생·멈춤입니다.</li>
         <li><b>학습 설정</b>: 정책(ACT 추천), 스텝 수, 배치 크기, 이미지 증강을 정합니다. 아래에 예상 소요 시간과 데이터 반복 횟수, 저장 위치가 나옵니다.</li>
         <li><b>바로 시작</b>을 누르면 진행 막대, 남은 시간, 손실 그래프가 실시간으로 표시됩니다.</li>
@@ -2359,25 +2368,83 @@ function renderTrainDatasets(all) {
       tr.exclude[d.repo_id] = new Set([...Array(d.episodes).keys()].filter(e => !keep.has(e)));
     }
   }
-  const sig = JSON.stringify(list.map(d => [d.repo_id, d.episodes, d.candidates && d.candidates.episodes]));
+  const sig = JSON.stringify(list.map(d => [d.repo_id, d.episodes, d.candidates && d.candidates.episodes, d.group, d.how, d.action, d.use, d.warn]));
   if (sig !== tr.sig) { tr.sig = sig; tr.datasets = list; fillDateSelect(); drawTrainDatasets(); }
+}
+
+const escHtml = (t) => String(t ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const TR_GROUP_TITLE = { rule: "학습 데이터", new: "규칙 이름이 아닌 새 데이터", other: "다른 계정", eval: "평가 후보" };
+const TR_SOURCE_ORDER = ["real", "realsim", "sim", "algo"];
+
+// the accordion's groups: newest rule data first (the same day real, realsim, sim, algo), older groups, other accounts, evaluations
+function trGroups() {
+  const by = new Map();
+  for (const d of tr.datasets) {
+    const g = d.kind === "eval" ? "eval" : d.group || "new";
+    if (!by.has(g)) by.set(g, []);
+    by.get(g).push(d);
+  }
+  for (const [g, list] of by) if (g === "rule") list.sort((a, b) => (b.mmdd || "").localeCompare(a.mmdd || "")
+    || TR_SOURCE_ORDER.indexOf(a.source) - TR_SOURCE_ORDER.indexOf(b.source) || a.repo_id.localeCompare(b.repo_id));
+  const rank = (g) => g === "rule" ? 0 : g === "new" ? 1 : g === "other" ? 3 : g === "eval" ? 4 : 2;
+  return [...by.keys()].sort((a, b) => rank(a) - rank(b)).map(g => ({ key: g, title: TR_GROUP_TITLE[g] || g, older: rank(g) === 2, list: by.get(g) }));
+}
+function trGroupOpen(key) {
+  const saved = store.get("omx.trGroups", "");
+  if (saved) { try { const o = JSON.parse(saved); if (key in o) return o[key]; } catch (e) {} }
+  return key === "rule" || key === "new";
+}
+function trNoteHtml(d) {
+  if (d.kind === "eval") return "";
+  const lines = [d.how && `어떻게: ${escHtml(d.how)}`, d.action && `행동: ${escHtml(d.action)}`, d.use && d.use !== "미정" && `용도: <b>${escHtml(d.use)}</b>`]
+    .filter(Boolean).map(t => `<span>${t}</span>`);
+  if (d.warn) lines.push(`<span class="warn">${escHtml(d.warn)}</span>`);
+  return lines.length ? `<div class="ds-note">${lines.join("")}</div>` : "";
 }
 
 function drawTrainDatasets() {
   const box = $("trDatasets");
   if (!tr.datasets.length) { box.innerHTML = '<p class="muted">녹화된 데이터셋이 없습니다. ① 데이터 수집 탭에서 먼저 녹화하세요.</p>'; return; }
-  box.innerHTML = tr.datasets.map(d => {
+  const row = (d) => {
     const on = tr.selected.has(d.repo_id), ex = tr.exclude[d.repo_id] || new Set();
     const eps = tr.episodes[d.repo_id];
     const chips = tr.open.has(d.repo_id)
       ? `<div class="ep-chips">${eps ? eps.map(e => `<button type="button" data-repo="${d.repo_id}" data-ep="${e.index}" class="${ex.has(e.index) ? "off" : ""} ${pv.repo === d.repo_id && pv.ep === e.index ? "cur" : ""}" title="${e.seconds}초 · 눌러서 영상 보기">ep${e.index}</button>`).join("") : '<span class="muted">불러오는 중...</span>'}</div>` : "";
     return `<div class="ds-item ${on ? "on" : ""}"><div class="ds-row">
       <input type="checkbox" data-sel="${d.repo_id}" ${on ? "checked" : ""} aria-label="${d.repo_id} 선택">
-      <button type="button" class="name" data-open="${d.repo_id}" title="눌러서 에피소드 펼치기">${tr.open.has(d.repo_id) ? "▾" : "▸"} ${d.kind === "eval" ? "[평가 후보] " : ""}${d.repo_id}</button>
-      <span class="meta">${d.kind === "eval" ? `후보 ${d.episodes - ex.size}개 (한 번에 ${d.candidates.one_shot} · 리커버리 ${d.candidates.recovery} · 헤맴 ${d.candidates.wandering_by_user})` : `${d.episodes - ex.size}/${d.episodes}개 · ${d.minutes}분`}</span></div>${chips}</div>`;
+      <button type="button" class="name" data-open="${d.repo_id}" title="눌러서 에피소드 펼치기">${tr.open.has(d.repo_id) ? "▾" : "▸"} ${d.kind === "eval" ? "[평가 후보] " : ""}${d.source ? `<span class="src-tag">${escHtml(d.source)}</span>` : ""}${d.repo_id}</button>
+      <span class="meta">${d.kind === "eval" ? `후보 ${d.episodes - ex.size}개 (한 번에 ${d.candidates.one_shot} · 리커버리 ${d.candidates.recovery} · 헤맴 ${d.candidates.wandering_by_user})` : `${d.episodes - ex.size}/${d.episodes}개 · ${d.minutes}분`}</span></div>${trNoteHtml(d)}${chips}</div>`;
+  };
+  const note = state?.data_legacy_note || "";
+  box.innerHTML = trGroups().map(g => {
+    const picked = g.list.filter(d => tr.selected.has(d.repo_id)).length;
+    return `<details class="ds-group" data-group="${escHtml(g.key)}" ${trGroupOpen(g.key) ? "open" : ""}><summary>${escHtml(g.title)}<span class="meta">${g.list.length}개${picked ? ` · ${picked}개 선택` : ""}</span></summary>${g.older && note ? `<p class="ds-group-note">${escHtml(note)}</p>` : ""}${g.key === "new" ? '<p class="ds-group-note">이름을 규칙(MMDD_출처_행동키워드_Nep)에 맞추면 설명이 저절로 채워집니다.</p>' : ""}<div class="ds-list">${g.list.map(row).join("")}</div></details>`;
   }).join("");
   updateTrainSummary();
 }
+
+$("trDatasets").addEventListener("toggle", (ev) => {  // toggle does not bubble: caught on the way down
+  const g = ev.target.dataset?.group;
+  if (!g) return;
+  let o = {};
+  try { o = JSON.parse(store.get("omx.trGroups", "") || "{}"); } catch (e) {}
+  o[g] = ev.target.open;
+  store.set("omx.trGroups", JSON.stringify(o));
+}, true);
+
+// the same list as one HTML file to keep or send
+function dataListHtml() {
+  const stamp = new Date().toLocaleString("ko-KR");
+  const sections = trGroups().map(g => `<details ${g.key === "rule" || g.key === "new" ? "open" : ""}><summary>${escHtml(g.title)} <span class="c">${g.list.length}</span></summary>${g.older && state?.data_legacy_note ? `<p class="c">${escHtml(state.data_legacy_note)}</p>` : ""}<div class="s"><table><thead><tr><th>데이터</th><th>출처</th><th>에피소드</th><th>길이</th><th>어떻게 나온 데이터인지</th><th>어떤 행동인지</th><th>용도</th></tr></thead><tbody>${g.list.map(d => `<tr><td><code>${escHtml(d.repo_id)}</code></td><td>${escHtml(d.source)}</td><td>${d.episodes}</td><td>${d.minutes}분</td><td>${escHtml(d.how)}</td><td>${escHtml(d.action)}${d.warn ? `<div class="w">${escHtml(d.warn)}</div>` : ""}</td><td>${escHtml(d.use)}</td></tr>`).join("")}</tbody></table></div></details>`).join("");
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>학습 데이터 목록</title><style>:root{--bg:#f6f7f9;--pn:#fff;--ln:#dfe3e8;--tx:#1b2026;--mu:#5d6773;--w:#a4260f}@media (prefers-color-scheme:dark){:root{--bg:#14181d;--pn:#1e242b;--ln:#343c46;--tx:#e6ebf0;--mu:#9aa6b2;--w:#ff8b80}}body{margin:0 auto;max-width:1400px;padding:20px;background:var(--bg);color:var(--tx);font:14px/1.5 system-ui,'Noto Sans CJK KR',sans-serif}h1{font-size:20px;margin:0 0 4px}.c{color:var(--mu);font-weight:400}details{margin:14px 0}summary{cursor:pointer;font-weight:600}.s{overflow-x:auto;background:var(--pn);border:1px solid var(--ln);border-radius:8px;margin-top:8px}table{border-collapse:collapse;width:100%;min-width:900px}th,td{padding:7px 10px;border-bottom:1px solid var(--ln);text-align:left;vertical-align:top}th{color:var(--mu);font-size:12px}code{font:12.5px ui-monospace,monospace}.w{color:var(--w);font-weight:600}</style></head><body><h1>학습 데이터 목록</h1><p class="c">${escHtml(stamp)} 기준 · 패널 ${escHtml(state?.version || "")} · 계정 ${escHtml(state?.user || "")}</p>${sections || '<p class="c">데이터가 없습니다.</p>'}</body></html>`;
+}
+$("trExport").addEventListener("click", () => {
+  const a = document.createElement("a"), d = new Date(), p = (n) => String(n).padStart(2, "0");
+  a.href = URL.createObjectURL(new Blob([dataListHtml()], { type: "text/html" }));
+  a.download = `omx_data_list_${p(d.getMonth() + 1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}.html`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+});
 
 $("trDatasets").addEventListener("click", async (ev) => {
   const sel = ev.target.closest("[data-sel]"), open = ev.target.closest("[data-open]"), chip = ev.target.closest("[data-ep]");
@@ -3187,7 +3254,7 @@ async function ensureEpisodes(repo) {
 function fillDateSelect() {
   const groups = {};
   for (const d of tr.datasets) {
-    const m = d.repo_id.match(/(\d{2})(\d{2})_\d{4}$/);
+    const m = d.repo_id.match(/(\d{2})(\d{2})_\d{4}$/) || d.repo_id.match(/\/(\d{2})(\d{2})_(?:realsim|real|sim|algo)_/);
     if (m) (groups[m[1] + m[2]] = groups[m[1] + m[2]] || []).push(d.repo_id);
   }
   const opts = ['<option value="">날짜별 선택</option>'].concat(Object.keys(groups).sort().reverse().map(k =>
@@ -3196,7 +3263,10 @@ function fillDateSelect() {
   if ($("trDate").dataset.sig !== sig) { $("trDate").innerHTML = sig; $("trDate").dataset.sig = sig; }
   tr.dateGroups = groups;
 }
-$("trAll").addEventListener("click", () => { tr.datasets.forEach(d => tr.selected.add(d.repo_id)); drawTrainDatasets(); });
+$("trAll").addEventListener("click", () => {
+  for (const g of trGroups()) if (trGroupOpen(g.key)) g.list.forEach(d => tr.selected.add(d.repo_id));
+  drawTrainDatasets();
+});
 $("trNone").addEventListener("click", () => { tr.selected.clear(); drawTrainDatasets(); });
 $("trDate").addEventListener("change", () => {
   const k = $("trDate").value;

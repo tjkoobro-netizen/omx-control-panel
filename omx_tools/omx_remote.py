@@ -152,9 +152,14 @@ def gpu_datasets() -> list[dict]:
     return _DATASETS["items"]
 
 
+def gpu_legacy_note() -> str:
+    return _DATASETS.get("note", "")
+
+
 def _refresh_datasets() -> None:
     try:
-        _DATASETS["items"] = gpu_json("/api/datasets", timeout=10).get("datasets", [])
+        got = gpu_json("/api/datasets", timeout=10)
+        _DATASETS["items"], _DATASETS["note"] = got.get("datasets", []), got.get("legacy_note", "")
         _DATASETS["t"] = time.time()
     except Exception:
         pass  # not connected yet: ask again at the next status poll

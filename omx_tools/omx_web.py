@@ -37,6 +37,7 @@ import omx_train_queue as tq  # noqa: E402  (training plan file and runner)
 import omx_ram  # noqa: E402  (RAM and time estimates)
 import omx_protocol as proto  # noqa: E402  (evaluation protocol v2: position presets, attempts)
 import omx_names as names  # noqa: E402  (team naming rule, display names of models)
+import omx_data_notes as data_notes  # noqa: E402  (group and description of each dataset in the training tab)
 import omx_home  # noqa: E402  (standard home pose from the training data; config "home_pose")
 import omx_camstats  # noqa: E402  (measured camera fps and brightness)
 
@@ -606,6 +607,7 @@ def list_datasets() -> list[dict]:
             "frames": meta.get("total_frames", 0),
             "minutes": round(meta.get("total_frames", 0) / (meta.get("fps") or 30) / 60, 1),
             "kind": kind,
+            **data_notes.describe(repo.parent.name, repo.name, meta.get("total_episodes", 0), USER),
             **({"candidates": proto.candidate_episodes(read_notes(f"{repo.parent.name}/{repo.name}"))} if kind == "eval" else {}),
         })
     return items
@@ -2279,7 +2281,7 @@ class Handler(BaseHTTPRequestHandler):
                     out = {"error": str(exc)}
                 return self._json(home_status() | {k: v for k, v in out.items() if k in ("home", "error")})
         if self.path == "/api/datasets":
-            return self._json({"datasets": list_datasets()})
+            return self._json({"datasets": list_datasets(), "legacy_note": data_notes.load().get("legacy_note", "")})
         if self.path == "/api/robot_setup":
             return self._json(setup_status())
         if self.path.startswith("/api/camera_probe?"):
@@ -2319,6 +2321,7 @@ class Handler(BaseHTTPRequestHandler):
                 "cpu": cpu_status(),
                 "log": list(JOB.lines)[-120:],
                 "datasets": merged_datasets() if CONTROL else list_datasets(),
+                "data_legacy_note": remote.gpu_legacy_note() if CONTROL else data_notes.load().get("legacy_note", ""),
                 "data_home": str(DATA_HOME),
                 "role": "control" if CONTROL else "gpu",
                 "sync": sync_status() if CONTROL else None,
