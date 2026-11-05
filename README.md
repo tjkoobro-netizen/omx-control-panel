@@ -12,7 +12,7 @@ git clone https://github.com/tjkoobro-netizen/omx-control-panel.git ~/omx-contro
 cd ~/omx-control-panel && bash install_control.sh
 ```
 
-단계별 안내(그림, 문제 해결 포함): [docs/install_control.html](docs/install_control.html) — 내려받은 뒤 브라우저로 여세요.
+**처음이면 [INSTALL.md](INSTALL.md)부터 보세요.** 설치 전에 누구에게 무엇을 받아야 하는지, Tailscale 연결, GPU 노트북이 다를 때를 단계별로 설명합니다. 제어 PC 설치만 그림으로 보려면 [docs/install_control.html](docs/install_control.html)을 내려받아 브라우저로 여세요.
 
 업데이트: `cd ~/omx-control-panel && git pull && bash install_control.sh` (설정과 로봇 구성은 유지됩니다)
 
@@ -22,7 +22,7 @@ v2를 마지막 버전(v2.2.3)으로 맞추려면: `cd ~/omx-control-panel && gi
 
 ## 그 밖의 문서
 
-- GPU 노트북 설치(관리자용)와 설정 항목: [INSTALL.md](INSTALL.md)
+- 전체 설치 가이드(팀원, 관리자): [INSTALL.md](INSTALL.md)
 - 버전별 변경 내용: [CHANGELOG.md](CHANGELOG.md)
 
 요구 사항: Ubuntu 24.04(22.04는 Python 3.12 추가 설치), LeRobot 0.6.1·Python 3.12(설치 파일이 맞춰 줌), OMX-AI(OpenRB-150, 팔로워 모터 ID 11~16, 리더 1~6).

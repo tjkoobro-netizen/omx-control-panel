@@ -38,6 +38,7 @@ import omx_ram  # noqa: E402  (RAM and time estimates)
 import omx_protocol as proto  # noqa: E402  (evaluation protocol v2: position presets, attempts)
 import omx_names as names  # noqa: E402  (team naming rule, display names of models)
 import omx_data_notes as data_notes  # noqa: E402  (group and description of each dataset in the training tab)
+import omx_errors  # noqa: E402  (err_code_N of an abnormal end)
 import omx_home  # noqa: E402  (standard home pose from the training data; config "home_pose")
 import omx_camstats  # noqa: E402  (measured camera fps and brightness)
 
@@ -1139,6 +1140,12 @@ class Job:
         proc.wait()
         self.info["phase"] = "끝남"
         self.info["returncode"] = proc.returncode
+        self.info["err"] = omx_errors.classify(self.lines, proc.returncode)
+        if self.info["err"]:
+            line = f"[omx] {self.info['err']['name']}: {self.info['err']['title']} ({self.info['err']['detail']})"
+            self.lines.append(line)
+            if self.log_file:
+                self.log_file.write(line + "\n")
         if self.log_file:
             self.log_file.close()
             self.log_file = None
@@ -1154,6 +1161,8 @@ class Job:
                 note["loop"] = {"slow_warnings": self.slow_total,
                                 "slow_median_hz": hz[len(hz) // 2] if hz else None,
                                 "slow_min_hz": hz[0] if hz else None}
+                if self.info["err"]:
+                    note["stop_error"] = {k: self.info["err"][k] for k in ("name", "title", "detail")}
                 path.write_text(json.dumps(note, ensure_ascii=False, indent=2))
             except (OSError, ValueError):
                 pass
@@ -1692,7 +1701,7 @@ def task_home_env(task: str | None, info: dict) -> dict:
 
 def home_status(model_path: str = "") -> dict:
     """Panel: the standard home pose (of a model, else the task default) and the setting."""
-    out = {"enabled": omx_home.enabled(), "freeze_return_after_s": float(omx_config.CFG.get("freeze_return_after_s") or 0),
+    out = {"enabled": omx_home.enabled(), "eval_enabled": omx_home.eval_enabled(), "freeze_return_after_s": float(omx_config.CFG.get("freeze_return_after_s") or 0),
            "tasks": omx_home.load_tasks()}
     if model_path:
         try:
@@ -1991,7 +2000,7 @@ def start_eval(body: dict) -> dict:
         extra_args = [a for a in extra_args if a.startswith("--dataset.")] + ["--policy.device=cpu"]
         opts["remote_inference"] = remote.HOST
     home = None
-    if omx_home.enabled():  # first move to the model's home pose (median of its training data's first frames)
+    if omx_home.eval_enabled():  # first move to the model's home pose (median of its training data's first frames)
         try:
             if CONTROL:
                 home = remote.gpu_json("/api/home?model=" + urllib.parse.quote(run["model_path"])).get("home")
@@ -2000,7 +2009,9 @@ def start_eval(body: dict) -> dict:
             else:
                 home = omx_home.model_home(run["model_path"])
         except Exception as exc:
-            raise RuntimeError(f"모델의 홈 자세를 계산하지 못했습니다({exc}). 설정 home_pose를 끄면 지금처럼 시작합니다.")
+            if omx_home.enabled():
+                raise RuntimeError(f"모델의 홈 자세를 계산하지 못했습니다({exc}). 설정 home_pose를 끄면 지금처럼 시작합니다.")
+            home = None  # e.g. the training data is gone: start from where the arm is, as before
     # eval_{model display name}__{p10 | free}_{run settings}_{MMDD_HHMM}; _2, _3 ... when the name is taken
     # (a second start in the same minute, or a folder left by a run that failed to start)
     step = run.get("step")  # set when an intermediate save was chosen
@@ -2282,6 +2293,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(home_status() | {k: v for k, v in out.items() if k in ("home", "error")})
         if self.path == "/api/datasets":
             return self._json({"datasets": list_datasets(), "legacy_note": data_notes.load().get("legacy_note", "")})
+        if self.path == "/api/errors":
+            return self._json({"codes": omx_errors.all_codes()})
         if self.path == "/api/robot_setup":
             return self._json(setup_status())
         if self.path.startswith("/api/camera_probe?"):

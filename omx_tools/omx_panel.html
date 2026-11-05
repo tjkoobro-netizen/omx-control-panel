@@ -479,7 +479,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.4.1</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.5.1</span></div>
       </div>
     </div>
     <div class="status">
@@ -488,6 +488,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       <span class="chip mono" id="gpu" hidden></span>
       <button type="button" class="theme-btn" id="langBtn" title="상태 줄 언어: 한국어 / English">EN</button>
       <button type="button" class="theme-btn" id="themeBtn" title="밝은 화면 / 어두운 화면">밝게</button>
+      <button type="button" id="errBadge" class="pill bad" hidden title="눌러서 오류 내용 보기"></button>
       <button type="button" class="help-open" data-help="start">사용법</button>
     </div>
   </div>
@@ -1114,12 +1115,22 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
   </div>
 </dialog>
 
+<dialog id="errDlg" aria-labelledby="errTitle" style="max-width:640px">
+  <div style="display:grid;gap:10px">
+    <h2 id="errTitle" style="margin:0"></h2>
+    <div id="errNow" style="display:grid;gap:8px"></div>
+    <details id="errAllBox"><summary>전체 오류 코드</summary><div id="errAll" style="display:grid;gap:8px;margin-top:8px"></div></details>
+    <div class="row" style="justify-content:flex-end"><button type="button" id="errClose">닫기</button></div>
+  </div>
+</dialog>
+
 <dialog id="help" aria-labelledby="helpTitle">
 <div class="help-wrap">
   <nav class="help-nav" id="helpNav" aria-label="매뉴얼 목차">
     <a href="#h-start">처음 시작하기</a>
     <a href="#h-open">제어판 여는 방법</a>
     <a href="#h-safety">안전 확인</a>
+    <a href="#h-errors">오류 코드</a>
     <a href="#h-check">점검</a>
     <a href="#h-camera">카메라</a>
     <a href="#h-teleop">텔레옵</a>
@@ -1165,7 +1176,8 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       <p>주소 <code>127.0.0.1:8765</code>는 SSH 연결을 통해 GPU 노트북으로 이어집니다. 내 노트북을 재부팅했다면 위 방법으로 다시 여세요. 브라우저를 닫아도 실행 중인 텔레옵이나 녹화는 계속됩니다.</p>
     </section>
 
-    <section id="h-safety">
+    <section id="h-errors"><h3>오류 코드</h3><p>텔레옵·녹화·평가가 이상하게 끝나면 위쪽에 빨간 <b>err_code_N</b> 표시가 나옵니다. 누르면 원인과 조치, 실제 오류 내용을 볼 수 있습니다. 다음 작업을 시작할 때까지 남아 있고, 로그에도 같은 코드가 남습니다. 직접 누른 중지·평가 끝내기·즉시 중단은 이상 정지로 표시하지 않습니다.</p><div id="errHelpList" style="display:grid;gap:10px"></div></section>
+<section id="h-safety">
       <h3>안전 확인</h3>
       <p>텔레옵과 녹화는 시작하면 팔로워가 리더 자세로 움직입니다(안전 시작으로 천천히). 그래서 맨 위 확인란을 체크해야만 시작 버튼이 동작합니다.</p>
       <ul>
@@ -1175,7 +1187,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <li>팔로워 전원 공급기를 바로 뽑을 수 있는 곳에 둡니다.</li>
       </ul>
       <p><b>안전 시작</b>: 시작하면 팔로워가 ① 저장한 시작 자세로 팔을 들고 ② 그리퍼를 닫은 뒤 ③ 리더 자세로 천천히 다가갑니다. 이 동안 모터 출력은 30%로 제한됩니다. 다가가는 중에 리더를 잡고 움직이기 시작하면 바로 원래 출력과 속도로 따라잡습니다. 리더나 팔로워의 회전 관절이 한 바퀴 넘게 읽히면 자동으로 보정하고, 둘의 차이가 너무 크면(약 160° 이상) 시작하지 않고 이유를 알려줍니다. 녹화는 이 과정이 끝난 뒤에 시작됩니다.</p>
-      <p><b>안전 정지</b>: 중지하거나 녹화가 끝나면 ① 시작할 때 자세(끝 자세를 저장해 두었으면 그 자세)로 출력 30%로 천천히 옮기고 ② 모터 출력을 3초에 걸쳐 줄인 뒤 ③ 토크를 끕니다. 그래서 팔이 툭 떨어지지 않습니다. 정지에 몇 초 걸리며, 그동안 상태가 "천천히 내려놓는 중"으로 보입니다. 이때 중지를 한 번 더 누르면 바로 끝나지만 토크가 켜진 채 그 자세로 멈춥니다.</p>
+      <p><b>안전 정지</b>: 중지하거나 녹화가 끝나면 ① 시작할 때 자세(끝 자세를 저장해 두었으면 그 자세)로 출력 30%로 천천히 옮기고 ② 손목 카메라가 위를 보도록(집게가 좌우로 벌어지는 방향) 돌린 뒤 그리퍼를 천천히 닫고(물건에 닿으면 그 자리에서 멈춤) ③ 모터 출력을 3초에 걸쳐 줄인 뒤 ③ 토크를 끕니다. 그래서 팔이 툭 떨어지지 않습니다. 정지에 몇 초 걸리며, 그동안 상태가 "천천히 내려놓는 중"으로 보입니다. 이때 중지를 한 번 더 누르면 바로 끝나지만 토크가 켜진 채 그 자세로 멈춥니다.</p>
       <p><b>시작 자세·끝 자세 저장</b>(텔레옵 칸): 리더암을 손으로 원하는 자세로 잡고 저장 버튼을 누릅니다. 리더 위치만 읽고 로봇은 움직이지 않습니다. 시작 자세는 그리퍼가 바닥에서 충분히 떨어진 "팔을 든 자세", 끝 자세는 "팔을 접어 작업대에 내려놓은 자세"로 정합니다. 처음 쓰기 전에 꼭 저장하세요.</p>
     </section>
 
@@ -1212,7 +1224,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       <ul>
         <li><b>텔레옵 시작</b>: 안전 시작(팔 들기 → 그리퍼 닫기 → 천천히 리더 자세로) 뒤 리더를 따라 움직입니다. 데이터는 저장되지 않습니다.</li>
         <li>상태 칸에 경과 시간과 제어 주기(정상은 약 60Hz)가 표시됩니다.</li>
-        <li><b>중지</b>: 안전 정지(시작할 때 자세로 천천히 이동 → 출력 서서히 줄이기 → 토크 끄기)로 끝냅니다. 몇 초 걸립니다(협동 로봇은 두 팔을 차례로). 안전 정지 중에 중지를 다시 눌러도 내려놓기를 끝까지 마칩니다. 바로 멈춰야 하면 <b>강제 종료</b>를 누르세요.</li>
+        <li><b>중지</b>: 안전 정지(시작할 때 자세로 천천히 이동 → 손목 카메라가 위를 보게 돌리고 그리퍼 닫기 → 출력 서서히 줄이기 → 토크 끄기)로 끝냅니다. 몇 초 걸립니다(협동 로봇은 두 팔을 차례로). 안전 정지 중에 중지를 다시 눌러도 내려놓기를 끝까지 마칩니다. 바로 멈춰야 하면 <b>강제 종료</b>를 누르세요.</li>
         <li><b>손목 회전 보정</b>(로봇 구성 → 구성 바꾸기): 리더 그리퍼가 팔로워 집게와 90° 돌아가게 조립된 세트는 +90° 또는 −90°를 고릅니다. 텔레옵·녹화에서 팔로워 손목이 리더 손목 + 보정값으로 움직이고, 녹화되는 동작도 보정된 값입니다(평가에는 쓰지 않음). 손목은 한 바퀴(±180°) 안에서만 움직이므로, 보정한 쪽으로는 손목을 90° 덜 돌릴 수 있습니다. 보정을 바꾸기 전과 후의 녹화는 서로 다른 데이터셋에 담으세요.</li>
         <li>기본은 카메라 없이 실행합니다. 화면은 왼쪽 카메라 보기로 확인합니다. <a href="#h-rerun">Rerun 보기</a>를 켜면 카메라를 포함해 실행하고 영상을 Rerun으로 보냅니다.</li>
       </ul>
@@ -1564,6 +1576,33 @@ for (const h of document.querySelectorAll(".panel h2")) {
 })();
 
 // single=true: only that topic in a small popup ("?"); false: the full manual ("사용법")
+// ---- err_code_N of an abnormal end (server: omx_errors.py)
+const errInfo = { codes: [], shown: "" };
+const errCardHtml = (c) => `<div><b>${escHtml(c.name)} · ${escHtml(c.title)}</b><p style="margin:4px 0">${escHtml(c.why)}</p><p style="margin:4px 0"><b>조치</b>: ${escHtml(c.what)}</p>${c.detail ? `<code style="display:block;white-space:pre-wrap;word-break:break-word;font-size:12px">${escHtml(c.detail)}</code>` : ""}</div>`;
+async function loadErrorCodes() {
+  try { errInfo.codes = (await (await fetch("/api/errors")).json()).codes || []; } catch (e) { return; }
+  const html = errInfo.codes.map(errCardHtml).join("");
+  $("errAll").innerHTML = html;
+  $("errHelpList").innerHTML = html;
+}
+function openError(err) {
+  $("errTitle").textContent = err ? `이상 정지: ${err.name}` : "오류 코드";
+  $("errNow").innerHTML = err ? errCardHtml(err) : "";
+  $("errAllBox").open = !err;
+  $("errDlg").showModal();
+}
+$("errClose").addEventListener("click", () => $("errDlg").close());
+function renderError(job) {
+  const err = !job.running && job.info ? job.info.err : null;
+  $("errBadge").hidden = !err;
+  if (!err) { errInfo.shown = ""; return; }
+  $("errBadge").textContent = err.name;
+  $("errBadge").onclick = () => openError(err);
+  const key = `${job.kind}:${job.info.repo_id || ""}:${err.name}:${err.detail}`;
+  if (key !== errInfo.shown) { errInfo.shown = key; toast(`이상 정지 ${err.name}: ${err.title}. 위쪽 빨간 표시를 누르면 내용을 볼 수 있습니다`, "err"); }
+}
+loadErrorCodes();
+
 function openHelp(section, single) {
   const dlg = $("help");
   section = section || "start";
@@ -1920,6 +1959,7 @@ function render(s) {
   }
 
   voiceCue(job);
+  renderError(job);
   if (job.info?.refused && job.info.refused !== lastRefused) { lastRefused = job.info.refused; if (job.running === false) toast(lastRefused, "err"); }
   const teleopRunning = running && job.kind === "teleop";
   const recRunning = running && job.kind === "record";
@@ -1942,7 +1982,7 @@ function render(s) {
     $("recPhase").textContent = (info.phase || "-") + (recRunning && total && (info.phase === "녹화 중" || info.phase === "원위치 시간") ? " · " + fmtSec(total - el) + " 남음" : "");
     $("recCount").textContent = info.repo_id ? info.repo_id + (info.episode !== undefined ? " · 에피소드 " + (info.episode + 1) : "") + (info.target ? " (이번 목표 " + info.target + "개)" : "") : "";
     $("recBar").style.width = total ? Math.min(100, (el / total) * 100) + "%" : "0";
-    if (info.phase === "끝남") $("recPhase").textContent = info.refused ? info.refused : info.returncode === 0 ? "녹화 완료 · 저장됨" : "종료됨 (코드 " + info.returncode + ") · 로그 확인";
+    if (info.phase === "끝남") $("recPhase").textContent = info.refused ? info.refused : info.returncode === 0 ? "녹화 완료 · 저장됨" : "종료됨 (" + (info.err ? info.err.name : "코드 " + info.returncode) + ") · 위쪽 빨간 표시를 누르세요";
   }
   const rw = recRunning && info.loop_warn;
   $("recLoopWarn").hidden = !rw;
@@ -2584,7 +2624,7 @@ function renderEval(s) {
       ? `${info.abort_sent || job.kind === "home" ? "즉시 중단 · " : ""}${info.safe_start}`
       : running && (info.phase || "").startsWith("즉시 중단") ? info.phase
       : running && total && ["실행 중", "원위치 시간"].includes(info.phase)
-      ? `${info.phase} · ${fmtSec(total - el)} 남음${info.phase === "원위치 시간" && info.home_msg ? " · " + info.home_msg : ""}` : (info.phase === "끝남" ? (info.returncode === 0 ? "평가 완료 · 저장됨" : "종료됨 (코드 " + info.returncode + ")") : (info.phase || "대기 중"));
+      ? `${info.phase} · ${fmtSec(total - el)} 남음${info.phase === "원위치 시간" && info.home_msg ? " · " + info.home_msg : ""}` : (info.phase === "끝남" ? (info.returncode === 0 ? "평가 완료 · 저장됨" : "종료됨 (" + (info.err ? info.err.name : "코드 " + info.returncode) + ")") : (info.phase || "대기 중"));
     $("evCount").textContent = info.episode !== undefined ? `시도 ${info.episode + 1} / ${info.target}` : "";
     $("evBar").style.width = total && running ? Math.min(100, el / total * 100) + "%" : "0";
     if (running) ev.view = info.repo_id;  // a finished run is opened from the list (else the empty panel shows)
@@ -3753,7 +3793,7 @@ async function loadHome() {
     ${homeTable(h, home.current)}
     <span>${g ? `시작 그리퍼: ${h.gripper_start === "open" ? "열림" : h.gripper_start === "closed" ? "닫힘" : "중간"} (열림 ${g.open} / 중간 ${g.half} / 닫힘 ${g.closed})` : ""}</span>
     ${h.warning ? `<span class="home-warn">⚠ ${h.warning}</span>` : ""}
-    <span class="muted">${d.enabled ? "<b>평가 시작</b>을 누르면 먼저 이 홈 자세로 천천히(출력 30%) 이동하고 그리퍼를 맞춘 뒤 첫 시도를 시작합니다. 원위치 시간과 끝날 때도 여기로 돌아옵니다." : "표준 홈 자세 이동은 <b>꺼져 있습니다</b>(설정 home_pose). 지금은 평가 시작 순간의 팔 자세를 처음 자세로 씁니다. 차이 확인용으로만 보여 줍니다."}</span>`;
+    <span class="muted">${d.eval_enabled ? "<b>평가 시작</b>을 누르면 먼저 이 홈 자세로 천천히(출력 30%) 이동하고 그리퍼를 맞춘 뒤 첫 시도를 시작합니다. 원위치 시간과 끝날 때도 여기로 돌아옵니다. 이후 시도는 출력 50%로 첫 동작까지 천천히 다가간 뒤 정상 출력으로 바뀝니다." : "평가의 홈 자세 이동은 <b>꺼져 있습니다</b>(설정 eval_home_pose). 지금은 평가 시작 순간의 팔 자세를 처음 자세로 씁니다. 차이 확인용으로만 보여 줍니다."}</span>`;
   $("evHomeRead").addEventListener("click", async () => {
     try { home.current = (await api("/api/home/current")).current; } catch (e) { toast(e.message, "err"); return; }
     loadHome();

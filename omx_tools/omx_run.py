@@ -638,6 +638,8 @@ def reset_period(robot, cfg: RunConfig, teleop, viewer: Viewer | None) -> None:
         while time.perf_counter() < end and not EVENTS["exit_early"]:
             time.sleep(0.05)
         EVENTS["exit_early"] = False
+        if not EVENTS["stop_recording"]:
+            omx_safe_start.approach_next_attempt(robot)
     finally:
         feeding.set()
 

@@ -39,6 +39,12 @@ def enabled() -> bool:
     return bool(omx_config.CFG.get("home_pose"))
 
 
+def eval_enabled() -> bool:
+    """An evaluation starts from the model's home pose unless "eval_home_pose" is off: a model acts as it was
+    trained from there. Teleop and recording follow "home_pose" alone."""
+    return enabled() or omx_config.CFG.get("eval_home_pose", True) is not False
+
+
 def first_frames(root: Path, episodes: list[int] | None = None):
     """(names, array n x joints) of the first frame of every (or the given) episode."""
     import numpy as np

@@ -25,8 +25,10 @@ than ~160 deg refuses to start. The start pose is read from the leader arm
 Safe stop (when teleop/record/eval ends normally, e.g. the panel's Stop): before LeRobot turns the
 torque off, the follower moves slowly with capped output to the pose the run started in (the panel
 sets OMX_STOP_POSE=home for teleop, record and eval) or else to the saved rest pose (if any), then the
-output is ramped down to zero over a few seconds so the arm settles under gravity instead of
-dropping. A force-quit (SIGKILL) skips this and leaves the torque on.
+wrist turns so the wrist camera looks up with the jaws spreading left and right (stop_wrist_roll), the
+gripper closes slowly until it is closed or touches something, and the output is ramped down to zero
+over a few seconds so the arm settles under gravity instead of dropping. A force-quit (SIGKILL) skips
+this and leaves the torque on.
 
 Return home (policy evaluation, enabled by the panel with environment variables): the follower's
 pose when the run starts (read just before the first move, after the multi-turn fixes) is kept as
@@ -82,6 +84,10 @@ DEFAULTS = {
     "timeout_s": 25.0,       # give up the slow approach after this long (then normal control)
     "stop_speed": 12.0,      # units/s while moving to the rest pose on stop
     "stop_ramp_s": 3.0,      # seconds to fade the output to zero before torque off
+    "read_retries": 3,       # extra tries when a position read comes back garbled, before the run ends
+    "attempt_pwm_ratio": 0.5,  # output cap while approaching the policy's first target in later attempts
+    "stop_wrist_roll": 0.0,  # wrist on stop: camera up, jaws spreading left and right (as the recordings start)
+    "gripper_stall": 4.0,    # units behind its command: the closing gripper has touched something, so it stops
 }
 
 
@@ -271,7 +277,9 @@ def go_home(robot, what: str = "stop", events: dict | None = None) -> bool:
     if arrived and "gripper" in home and (what == "start" or os.environ.get("OMX_HOME_GRIPPER") == "open"):
         present["gripper"] = float(robot.bus.sync_read("Present_Position")["gripper"])
         closing = home["gripper"] < present["gripper"] - 1.0
-        if closing and what != "start":
+        if closing and what == "stop":  # park_arm closes it afterwards
+            _say("처음 자세에 도착했습니다", what)
+        elif closing and what != "start":
             _say("처음 자세에 도착. 그리퍼는 닫지 않습니다(쥔 물건 보호)", what)
         else:
             _say(f"{'홈' if what == 'start' else '처음'} 자세에 도착. 그리퍼를 {'닫힌' if closing else '처음'} 상태로 천천히 맞춥니다", what)
@@ -281,20 +289,57 @@ def go_home(robot, what: str = "stop", events: dict | None = None) -> bool:
     return arrived
 
 
+def park_arm(robot) -> None:
+    """The end of a safe stop, at the capped output: turn the wrist so the camera looks up, then close the
+    gripper slowly. It stops closing once it lags behind its command, so a held object is not squeezed."""
+    s = settings()
+    present = {m: float(v) for m, v in robot.bus.sync_read("Present_Position").items()}
+    if not -100.0 <= present.get("wrist_roll", 0.0) <= 100.0:
+        _say("wrist_roll 위치가 범위를 벗어나 손목을 돌리지 않습니다", "stop")
+        return
+    _say("손목 카메라가 위를 보도록 돌리고 그리퍼를 천천히 닫습니다", "stop")
+
+    def steps(motor: str, goal: float, speed: float, stall: float | None = None) -> bool:
+        cmd = present[motor]
+        t = t0 = time.monotonic()
+        while time.monotonic() - t0 < s["timeout_s"]:
+            if FREEZE.is_set():
+                return False
+            time.sleep(1 / 30)
+            now = time.monotonic()
+            dt, t = min(now - t, 0.2), now
+            cmd = _step(cmd, goal, speed * dt)
+            if stall is not None:
+                at = float(robot.bus.sync_read("Present_Position")[motor])
+                if abs(cmd - at) > stall:
+                    robot.bus.sync_write("Goal_Position", {motor: at})
+                    _say(f"그리퍼가 닿아 그 자리에서 멈춥니다 ({at:.0f})", "stop")
+                    return True
+            robot.bus.sync_write("Goal_Position", {motor: cmd})
+            if abs(cmd - goal) <= 1e-6:
+                time.sleep(0.5)  # let the servo settle on the last goal
+                return True
+        return False
+
+    if steps("wrist_roll", s["stop_wrist_roll"], s["stop_speed"]) and "gripper" in present and present["gripper"] > s["gripper_close"]:
+        steps("gripper", s["gripper_close"], s["gripper_speed"], s["gripper_stall"])
+
+
 def soft_land(robot) -> None:
-    """Home (eval) or the rest pose (if saved) at capped output, then fade the output out and
-    turn the torque off. Also used by omx_return_home.py on a bare bus connection."""
+    """Home (eval) or the rest pose (if saved) at capped output, the end pose (park_arm), then fade the output
+    out and turn the torque off. Also used by omx_return_home.py on a bare bus connection."""
     s = settings()
     rest = (load_pose("rest") or {}).get("joints")
     set_pwm(robot, s["pwm_ratio"])
+    arrived = False
     if os.environ.get("OMX_STOP_POSE") == "home":
-        go_home(robot, "stop")
+        arrived = go_home(robot, "stop")
         while FREEZE.is_set():  # 비상 정지 while returning: hold, then go on after [홈 위치로 이동]
             _say("비상 정지 · 제자리에서 기다립니다. [홈 위치로 이동]를 누르면 이어서 돌아갑니다", "freeze")
             RELEASE.wait()
             RELEASE.clear()
             FREEZE.clear()
-            go_home(robot, "stop")
+            arrived = go_home(robot, "stop")
     elif rest:
         _say("끝 자세로 천천히 이동합니다", "stop")
         cmd = {m: float(v) for m, v in robot.bus.sync_read("Present_Position").items()}
@@ -309,7 +354,13 @@ def soft_land(robot) -> None:
             robot.bus.sync_write("Goal_Position", {m: cmd[m] for m in ARM if m in rest})
             if all(abs(cmd[m] - rest[m]) <= 1e-6 for m in ARM if m in rest):
                 time.sleep(0.5)  # let the servos settle on the last goal
+                arrived = True
                 break
+    if arrived:
+        try:
+            park_arm(robot)
+        except Exception as exc:  # the output still has to fade out
+            _say(f"끝 자세를 맞추지 못했습니다 ({exc})", "stop")
     _say(f"모터 출력을 {s['stop_ramp_s']:.0f}초에 걸쳐 줄입니다", "stop")
     steps = 15
     for k in range(1, steps + 1):
@@ -352,6 +403,19 @@ def go_home_all(robot, what: str = "reset", events: dict | None = None) -> bool:
 def set_pwm_all(robot, ratio: float) -> None:
     for arm in arms_of(robot):
         set_pwm(arm, ratio)
+
+
+def approach_next_attempt(robot) -> None:
+    """Before a later attempt of a policy run: the first target comes with the same slow approach as in the
+    first attempt, at a capped output, so a gap to the policy's first action is not closed at full speed."""
+    s = settings()
+    arms = [a for a in arms_of(robot) if getattr(a, "_omx_ss", None) is not None]
+    for arm in arms:
+        arm._omx_ss = {"phase": "approach", "pose": None, "cmd": None, "t": None, "t0": None, "near": None,
+                       "home_fixed": True}
+        set_pwm(arm, s["attempt_pwm_ratio"])
+    if arms:
+        _say(f"다음 시도: 출력 {int(s['attempt_pwm_ratio'] * 100)}%로 첫 동작까지 천천히 다가갑니다")
 
 
 def _go_standard_home(robot) -> bool:
@@ -422,6 +486,22 @@ def install() -> None:
     if not s["enabled"]:
         return
     original_connect, original_send, original_disconnect = cls.connect, cls.send_action, cls.disconnect
+    original_observation = cls.get_observation
+
+    def get_observation(self):
+        # one garbled status packet must not end a run; nothing is sent until a read succeeds
+        for left in range(s["read_retries"], -1, -1):
+            try:
+                return original_observation(self)
+            except ConnectionError as exc:
+                if not left or not self.bus.is_connected:
+                    raise
+                sys.stdout.write(f"[omx] motor: 위치 읽기 오류, 다시 읽습니다 ({left}번 남음): {exc}\n")
+                sys.stdout.flush()
+                time.sleep(0.005)
+                ser = getattr(self.bus.port_handler, "ser", None)
+                if ser is not None:
+                    ser.reset_input_buffer()  # bytes left from the bad packet
 
     # Leader: wrap multi-turn readings (stateless, also fixes the recorded actions)
     from lerobot.teleoperators.omx_leader import omx_leader
@@ -571,6 +651,7 @@ def install() -> None:
         return original_disconnect(self, *args, **kwargs)
 
     cls.connect, cls.send_action, cls.disconnect = connect, send_action, disconnect
+    cls.get_observation = get_observation
 
 
 if __name__ == "__main__":

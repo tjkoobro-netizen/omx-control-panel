@@ -85,8 +85,9 @@ footer { color: var(--muted); font-size: 13px; padding-top: 20px; border-top: 1p
 
 <div class="wrap">
 <header>
-  <span class="eyebrow">OMX-AI · 팀원 설치 안내 · v3.4.1</span>
+  <span class="eyebrow">OMX-AI · 팀원 설치 안내 · v3.5.1</span>
   <h1>OMX Control Panel 설치</h1>
+  <p class="lede">설치 전에 받을 권한, Tailscale 초대, GPU 노트북이 다를 때는 저장소의 <b>INSTALL.md</b>를 먼저 보세요.</p>
   <p class="lede">내 우분투 PC에 로봇팔과 카메라를 연결하고, 학습과 AI 추론은 GPU 노트북에 맡기는 제어판입니다. 아래 순서대로 한 번만 설치하면 바탕화면 아이콘으로 바로 씁니다.</p>
   <div class="meta">
     <span class="chip">우분투 22.04 / 24.04</span><span class="chip">약 1시간 (대부분 자동)</span><span class="chip">설치 파일: install_control.sh</span>
@@ -99,7 +100,7 @@ footer { color: var(--muted); font-size: 13px; padding-top: 20px; border-top: 1p
     <div class="box"><b>내 제어 PC</b>
       <ul><li>리더암·팔로워암·카메라 연결</li><li>텔레옵, 데이터 녹화, 평가 실행</li><li>안전 시작·정지, 비상 정지</li></ul></div>
     <div class="link"><span>Tailscale<br>+ SSH</span></div>
-    <div class="box"><b>GPU 노트북 (team16-PC)</b>
+    <div class="box"><b>GPU 노트북</b>
       <ul><li>모델 학습</li><li>AI 추론 서버 (평가 중 동작 계산)</li><li>팀 공유 데이터·모델 보관</li></ul></div>
   </div>
   <p>녹화한 데이터는 끝나면 GPU 노트북 공유 폴더로 자동으로 올라갑니다. 다른 사람이 만든 같은 이름의 데이터는 덮어쓰지 않습니다.</p>
@@ -136,7 +137,7 @@ footer { color: var(--muted); font-size: 13px; padding-top: 20px; border-top: 1p
         <tbody>
           <tr><td class="n">1/8</td><td>git, v4l-utils, python3.12 등 확인</td><td>없으면 sudo 비밀번호 입력</td></tr>
           <tr><td class="n">2/8</td><td>Tailscale 설치·로그인</td><td>화면에 나온 주소를 브라우저로 열어 팀 계정으로 로그인</td></tr>
-          <tr><td class="n">3/8</td><td>GPU 노트북 선택, SSH 키 등록</td><td>목록에서 <b>team16-pc</b> 번호 선택 → GPU 노트북 계정 이름 → 그 계정 비밀번호 한 번</td></tr>
+          <tr><td class="n">3/8</td><td>GPU 노트북 선택, SSH 키 등록</td><td>목록에서 <b>GPU 노트북</b> 번호 선택 → GPU 노트북 계정 이름 → 그 계정 비밀번호 한 번</td></tr>
           <tr><td class="n">4/8</td><td>GPU 노트북의 내 계정에 학습·추론 서버 설치</td><td>처음이면 Y. GPU 노트북 쪽 질문도 Enter로 진행</td></tr>
           <tr><td class="n">5/8</td><td>LeRobot 0.6.1 환경(~/venv/il3) 설치</td><td>처음이면 Y. 20~40분 걸립니다(약 6GB)</td></tr>
           <tr><td class="n">6/8</td><td>로봇 장치 이름(OMX 1·2·3)과 USB 권한</td><td>sudo 비밀번호 입력</td></tr>
@@ -144,7 +145,7 @@ footer { color: var(--muted); font-size: 13px; padding-top: 20px; border-top: 1p
           <tr><td class="n">8/8</td><td>바탕화면 아이콘 "OMX Control Panel"</td><td>없음</td></tr>
         </tbody>
       </table></div>
-      <div class="good">마지막에 <b>설치 완료 (v3.4.1)</b>가 나오면 끝입니다.</div>
+      <div class="good">마지막에 <b>설치 완료 (v3.5.1)</b>가 나오면 끝입니다.</div>
     </div></div>
 
     <div class="step"><div>
@@ -221,7 +222,7 @@ footer { color: var(--muted); font-size: 13px; padding-top: 20px; border-top: 1p
   </div>
 </section>
 
-<footer>OMX Control Panel v3.4.1 · 제어 PC 설치 안내 · 저장소 github.com/tjkoobro-netizen/omx-control-panel · 설치 파일 install_control.sh · 문의: 제어판 관리자</footer>
+<footer>OMX Control Panel v3.5.1 · 제어 PC 설치 안내 · 저장소 github.com/tjkoobro-netizen/omx-control-panel · 설치 파일 install_control.sh · 문의: 제어판 관리자</footer>
 </div>
 
 <script>
