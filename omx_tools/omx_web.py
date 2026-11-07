@@ -1067,6 +1067,39 @@ class Preview:
         self.brightness: dict[str, float] = {}
         self.running = False
         self.thread: threading.Thread | None = None
+        # marker check on the front camera (display only, nothing is recorded here)
+        self.marker_show = False                 # outline every ArUco marker with its number
+        self.marker_target: int | None = None    # circle this one, exactly as the record/eval run will
+        self._marker_mark = None
+        self.markers: dict = {}                  # {"seen": [ids], "target": id, "found": bool}
+
+    def set_marker_view(self, show: bool, target: int | None) -> dict:
+        self.marker_show = bool(show)
+        if target != self.marker_target:
+            self.marker_target, self._marker_mark = target, None
+        if not self.marker_show and target is None:
+            self.markers = {}
+        return {"ok": True, "show": self.marker_show, "target": self.marker_target}
+
+    def _mark_front(self, frame):
+        """Front frame with the marker check drawn (RGB in, RGB out)."""
+        from target_mark import TargetMarker
+        out = frame
+        if self.marker_target is not None:
+            if self._marker_mark is None:
+                self._marker_mark = TargetMarker(self.marker_target)
+            out = self._marker_mark(out)
+        if getattr(self, "_marker_det", None) is None:
+            self._marker_det = TargetMarker(0).det
+        det = self._marker_det
+        corners, ids, _ = det.detectMarkers(cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY))
+        seen = sorted(int(i) for i in ids.flatten()) if ids is not None else []
+        if self.marker_show and ids is not None:
+            out = out.copy() if out is frame else out
+            cv2.aruco.drawDetectedMarkers(out, corners, ids, (0, 200, 0))
+        found = self.marker_target in seen if self.marker_target is not None else None
+        self.markers = {"seen": seen, "target": self.marker_target, "found": found}
+        return out
 
     def start(self) -> None:
         with self.lock:
@@ -1095,6 +1128,11 @@ class Preview:
                     frame = cam.async_read(timeout_ms=500)
                 except Exception:
                     continue
+                if name == "front" and (self.marker_show or self.marker_target is not None):
+                    try:
+                        frame = self._mark_front(frame)
+                    except Exception:
+                        pass  # the check is optional: never stop the preview over it
                 ok, jpg = cv2.imencode(".jpg", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
                                        [cv2.IMWRITE_JPEG_QUALITY, 75])
                 if ok:
@@ -1619,6 +1657,34 @@ def start_teleop(body: dict) -> dict:
     return {"ok": True}
 
 
+TARGET_FILE = SETUP_FILE.parent / "target_marker"  # the marker number omx_run.py re-reads (next to robot.json)
+
+
+def target_env(body: dict, info: dict) -> dict:
+    """Optional target marker (record / eval): omx_run.py circles it on the front camera.
+    Empty = off, the run is exactly as before."""
+    marker = str(body.get("target_marker", "")).strip()
+    if not marker:
+        return {}
+    marker = str(int(marker))
+    TARGET_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TARGET_FILE.write_text(marker)
+    info["target_marker"] = int(marker)
+    return {"OMX_TARGET_MARKER": marker, "OMX_TARGET_CAMERA": "front", "OMX_TARGET_FILE": str(TARGET_FILE)}
+
+
+def set_target(body: dict) -> dict:
+    """Change the target marker of the running record / eval (re-read by omx_run.py within 0.5 s)."""
+    marker = int(str(body.get("target_marker", "")).strip())
+    TARGET_FILE.parent.mkdir(parents=True, exist_ok=True)
+    TARGET_FILE.write_text(str(marker))
+    if JOB.running() and JOB.kind in ("record", "eval"):
+        JOB.info["target_marker"] = marker
+    if PREVIEW.marker_target is not None:  # the camera check follows the new number too
+        PREVIEW.set_marker_view(PREVIEW.marker_show, marker)
+    return {"ok": True, "target_marker": marker}
+
+
 def start_record(body: dict) -> dict:
     repo_id = body.get("repo_id", "").strip()
     if not repo_id:
@@ -1658,7 +1724,7 @@ def start_record(body: dict) -> dict:
     env = task_home_env(task, info)
     if env:
         env |= {"OMX_HOME_FILE": str(EVAL_HOME_FILE), "OMX_REPO_ID": repo_id}
-    env = (env or stop_home_env()) | wrist_offset_env()
+    env = (env or stop_home_env()) | wrist_offset_env() | target_env(body, info)
     JOB.start("record", cmd, info, env_extra=env)
     return {"ok": True, "repo_id": repo_id, "resume": resume}
 
@@ -2149,14 +2215,18 @@ def start_eval(body: dict) -> dict:
         # a few spare episodes so void attempts can be retried; the run stops once every position is done
         spare = min(max(int(body.get("spare", 3)), 0), 10)
         cmd = [a if not a.startswith("--dataset.num_episodes=") else f"--dataset.num_episodes={episodes + spare}" for a in cmd]
+    eval_info = {"phase": "모델 불러오는 중", "repo_id": repo_id, "target": episodes,
+                 "episode_s": episode_s, "reset_s": reset_s, "model": run["id"],
+                 "smooth": opts["smooth"], "threads": threads, "reset_home": reset_home,
+                 "open_gripper": open_gripper, **opts,
+                 "protocol": note.get("protocol")}
+    tenv = target_env(body, eval_info)
+    if tenv:
+        note["target_marker"] = eval_info["target_marker"]
     path.write_text(json.dumps(note, ensure_ascii=False, indent=2))
-    JOB.start("eval", cmd, {"phase": "모델 불러오는 중", "repo_id": repo_id, "target": episodes,
-                            "episode_s": episode_s, "reset_s": reset_s, "model": run["id"],
-                            "smooth": opts["smooth"], "threads": threads, "reset_home": reset_home,
-                            "open_gripper": open_gripper, **opts,
-                            "protocol": note.get("protocol")},
+    JOB.start("eval", cmd, eval_info,
               need_leader=False, env_extra=thread_env(threads) | home_env(reset_home, open_gripper, repo_id) | async_env
-              | ({"OMX_HOME_POSE": str(omx_home.write_run_file(home, RUN_HOME_FILE))} if home else {}))
+              | ({"OMX_HOME_POSE": str(omx_home.write_run_file(home, RUN_HOME_FILE))} if home else {}) | tenv)
     if preset:
         protocol_target(JOB)
         if preset["detector"] != "none":
@@ -2422,6 +2492,7 @@ class Handler(BaseHTTPRequestHandler):
                 "gpu_name": CFG.get("gpu_name"),
                 "ckpt_home": str(CKPT_HOME),
                 "preview": PREVIEW.running,
+                "markers": PREVIEW.markers if PREVIEW.running else {},
                 "camera_watch": camera_watch(),
                 "live": JOB.running() and JOB.kind in ("record", "eval"),
                 "brightness": PREVIEW.brightness,
@@ -2666,6 +2737,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(save_start_pose(body.get("kind", "start")))
             elif self.path == "/api/eval/start":
                 self._json(start_eval(body))
+            elif self.path == "/api/target":
+                self._json(set_target(body))
+            elif self.path == "/api/marker_view":
+                t = str(body.get("target", "")).strip()
+                self._json(PREVIEW.set_marker_view(bool(body.get("show")), int(t) if t else None))
             elif self.path == "/api/eval/report":
                 start_report(body.get("repo_id", ""))
                 self._json({"ok": True})

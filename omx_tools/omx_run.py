@@ -62,6 +62,47 @@ import omx_safe_start  # noqa: E402
 OBS, ACT = "observation", "action"
 
 
+# ---------------------------------------------------------------- target marker (optional)
+class TargetOverlay:
+    """Draws a circle around the commanded ArUco marker on one camera's frames (target_mark.py).
+    Off unless OMX_TARGET_MARKER is set, so runs without it behave exactly as before.
+    OMX_TARGET_FILE (optional): a file holding the marker number, re-read every 0.5 s (change the target mid-run)."""
+
+    def __init__(self, marker_id: int, camera: str, id_file: str | None):
+        from target_mark import TargetMarker
+        self._cls, self.camera, self.id_file = TargetMarker, camera, id_file
+        self.marker_id, self.mark, self._checked = marker_id, TargetMarker(marker_id), 0.0
+
+    def reset(self) -> None:
+        self.mark.reset()
+
+    def apply(self, obs: dict) -> dict:
+        if self.id_file and time.perf_counter() - self._checked > 0.5:
+            self._checked = time.perf_counter()
+            try:
+                want = int(Path(self.id_file).read_text().strip())
+                if want != self.marker_id:
+                    self.marker_id, self.mark = want, self._cls(want)
+                    _say(f"[omx] target marker -> {want}")
+            except (OSError, ValueError):
+                pass
+        img = obs.get(self.camera)
+        if img is not None:
+            obs[self.camera] = self.mark(img)
+        return obs
+
+
+def _make_target() -> TargetOverlay | None:
+    marker = os.environ.get("OMX_TARGET_MARKER", "").strip()
+    if not marker:
+        return None
+    return TargetOverlay(int(marker), os.environ.get("OMX_TARGET_CAMERA", "front"),
+                         os.environ.get("OMX_TARGET_FILE") or None)
+
+
+TARGET: TargetOverlay | None = None
+
+
 # ---------------------------------------------------------------- arguments
 @dataclass
 class DatasetArgs:
@@ -557,6 +598,8 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
             EVENTS["exit_early"] = False
             break
         obs = robot.get_observation()
+        if TARGET is not None:  # before the preview, the policy and the dataset: all see the same marked frame
+            obs = TARGET.apply(obs)
         _show(obs)
         if MOTOR_OUT is not None:
             MOTOR_OUT()
@@ -659,6 +702,8 @@ def run_episodes(cfg: RunConfig, robot, teleop, policy: Policy | None, dataset, 
             policy.new_episode(d.single_task, getattr(robot, "robot_type", robot.name))
         if filt is not None:
             filt.reset((dataset.features.get(ACT) or {}).get("names"))
+        if TARGET is not None:
+            TARGET.reset()
         ABORT["phase"], ABORT["in_loop"] = "record", True
         try:
             control_loop(robot, d.fps, d.episode_time_s, teleop=teleop, policy=policy, dataset=dataset,
@@ -734,7 +779,10 @@ def run(cfg: RunConfig) -> None:
     install_wrist_offset(teleop)
     ABORT["robot"] = robot
     install_live_view(robot)
-    global MOTOR_OUT
+    global MOTOR_OUT, TARGET
+    TARGET = _make_target()
+    if TARGET is not None:
+        _say(f"[omx] target marker {TARGET.marker_id} on camera '{TARGET.camera}'")
     try:
         MOTOR_OUT = MotorOutput(robot)
     except Exception as exc:  # the view is optional: never stop a run over it

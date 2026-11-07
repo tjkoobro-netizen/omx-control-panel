@@ -480,7 +480,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.6.1</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.7.0</span></div>
       </div>
     </div>
     <div class="status">
@@ -529,6 +529,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
           <span class="pill" id="camState">꺼짐</span>
           <label class="opt" style="grid-template-columns:16px auto;align-items:center;font-size:12.5px" title="아래로 스크롤해도 카메라 화면이 왼쪽 위에 붙어 따라옵니다"><input type="checkbox" id="camPin" checked><span>화면 고정</span></label>
           <button id="motorBtn" type="button" aria-pressed="false" aria-controls="motorPane" title="관절마다 지금 최대 토크의 몇 %를 내고 있는지 카메라 오른쪽에 보여줍니다 (텔레옵·녹화 중)" hidden>모터 출력</button>
+          <label style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap;margin:0"><input type="checkbox" id="camMarkers">마커 검출 보기<button type="button" class="qbtn help-open" data-help="target" title="마커 검출 설명" aria-label="마커 검출 설명">?</button></label>
           <button id="camBtn" type="button">카메라 켜기</button>
         </div>
       </div>
@@ -549,6 +550,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <p class="legend">막대: 지금 값 · 세로줄: 최근 3초 최고값 · 눈금 50%, 80%. 노랑 50% 이상, 빨강 80% 이상. 막대에 마우스를 올리면 모터가 보낸 원래 값이 나옵니다.</p>
       </aside>
       </div>
+      <p class="muted meta-line" id="markerLine" style="margin:0" hidden></p><!-- outside #camGrid: that grid is rebuilt from the setup -->
       <p class="muted cam-note" style="margin:0">카메라 보기는 카메라 없는 텔레옵과 동시에 쓸 수 있습니다. 녹화를 시작하면 녹화 프로그램이 카메라를 쓰고, 이 화면에는 그 프로그램이 읽는 영상이 그대로 나옵니다.</p>
       <details class="align" id="alignBox">
         <summary>카메라 위치 맞추기 (학습 때 화면과 겹쳐 보기)</summary>
@@ -718,6 +720,11 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
           <label class="f">에피소드 수<input type="number" id="episodes" min="1" value="10"></label>
           <label class="f">시연 시간(초)<input type="number" id="episodeS" min="5" value="30"></label>
           <label class="f">원위치 시간(초)<input type="number" id="resetS" min="0" value="15"></label>
+        </div>
+        <div class="opt"><input type="checkbox" id="recTgOn"><label for="recTgOn"><b>목표 마커 표시</b> (정면 카메라에서 이 번호의 ArUco 마커 둘레에 원을 그림 · 녹화되는 영상과 모델 입력에 들어감) <button type="button" class="qbtn help-open" data-help="target" title="목표 마커 표시 설명" aria-label="목표 마커 표시 설명">?</button></label></div>
+        <div class="fields" id="recTgFields" hidden>
+          <label class="f">마커 번호 (ArUco 4x4, 0~49)<input type="number" id="recTgId" min="0" max="49" value="15"></label>
+          <div class="row" style="align-items:flex-end"><button type="button" id="recTgSet" title="실행 중에도 바로 바뀜 (0.5초 안에 원이 옮겨감)">이 번호로 바꾸기</button></div>
         </div>
         <p class="muted meta-line" id="repoPreview" style="margin:0"></p>
         <div class="opt">
@@ -983,6 +990,12 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <label class="f">시도 시간(초)<input type="number" id="evEpisodeS" min="3" value="30"></label>
         <label class="f">원위치 시간(초)<input type="number" id="evResetS" min="0" value="15"></label>
       </div>
+        <div class="opt"><input type="checkbox" id="evTgOn"><label for="evTgOn"><b>목표 마커 표시</b> (정면 카메라에서 이 번호의 ArUco 마커 둘레에 원을 그림 · 녹화되는 영상과 모델 입력에 들어감) <button type="button" class="qbtn help-open" data-help="target" title="목표 마커 표시 설명" aria-label="목표 마커 표시 설명">?</button></label></div>
+        <div class="fields" id="evTgFields" hidden>
+          <label class="f">마커 번호 (ArUco 4x4, 0~49)<input type="number" id="evTgId" min="0" max="49" value="15"></label>
+          <div class="row" style="align-items:flex-end"><button type="button" id="evTgSet" title="실행 중에도 바로 바뀜 (0.5초 안에 원이 옮겨감)">이 번호로 바꾸기</button></div>
+          <div class="opt"><input type="checkbox" id="evTgView"><label for="evTgView">카메라 미리보기에서 마커 검출 보기 (시작 전에 원이 맞는 상자에 붙는지 확인)</label></div>
+        </div>
       <div class="opt" id="evSmoothRow">
         <input type="checkbox" id="evSmooth"><label for="evSmooth"><b>부드럽게 실행</b> (ACT 전용, 시간 앙상블: 매 스텝 예측해 겹치는 동작을 평균 · 3초마다 튀는 동작이 줄어듦 · 스텝당 약 10ms 더 걸림 · 비동기 실행과 함께 쓰지 않음)</label>
       </div>
@@ -1139,6 +1152,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
     <a href="#h-camera">카메라</a>
     <a href="#h-teleop">텔레옵</a>
     <a href="#h-record">학습 데이터 녹화</a>
+    <a href="#h-target">목표 마커 표시</a>
     <a href="#h-replay">녹화 다시보기</a>
     <a href="#h-train">② 학습 시키기</a>
     <a href="#h-train-runs">학습 기록</a>
@@ -1452,6 +1466,21 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <li><b>SmolVLA 전용</b>이에요(LeRobot의 RTC는 flow matching 모델인 SmolVLA·pi0·pi0.5에만 들어 있어요). <b>Diffusion은 지원하지 않아요</b>: Diffusion의 동작 생성 함수는 RTC의 "이어 붙이기 안내"를 받는 부분이 없어서, 켜도 아무 효과가 없어요. ACT도 마찬가지예요. Diffusion에서 묶음이 바뀔 때 튀면 <b>출력 부드럽게(필터)</b>를 켜거나 <b>다음 계산 시작 시점</b>을 키워(예: 0.7) 겹치는 구간을 늘려 보세요.</li>
         <li><b>이어 붙일 구간</b> (execution_horizon): 옛 묶음 중 몇 개 동작에 맞춰 이을지예요. 기본 10.</li>
         <li><b>이어 붙이는 세기</b> (max_guidance_weight): 클수록 옛 동작에 더 딱 맞춰 이어요. 기본 10. 너무 크면 새 판단이 늦게 반영돼요.</li>
+      </ul>
+    </section>
+
+    <section id="h-target">
+      <h3>목표 마커 표시</h3>
+      <p>여러 물체 중 <b>어느 것을 집을지</b>를 모델에 알려주는 방법이에요. 켜면 정면 카메라(front) 영상에서 지정한 번호의 ArUco 마커(4x4, 0~49번)를 찾아 <b>자홍색 원</b>을 그려요. 원이 그려진 영상이 <b>미리보기, 녹화되는 데이터, 모델 입력에 똑같이</b> 들어가요. 모델은 "원이 있는 물체를 집는다"를 배우고, 평가 때 번호만 바꾸면 같은 모델이 다른 물체를 집어요.</p>
+      <ul>
+        <li><b>끄면(기본)</b> 지금까지와 완전히 같아요. 이 기능을 쓰지 않는 사람은 아무것도 바뀌지 않아요.</li>
+        <li><b>녹화와 평가를 같게</b>: 원을 켜고 녹화한 데이터로 학습한 모델은 평가 때도 반드시 켜야 해요. 원이 없으면 어디로 갈지 몰라요. 반대로 원 없이 학습한 모델에는 켜지 마세요.</li>
+        <li><b>원은 영상에 영구히 들어가요</b>: 녹화된 front 영상에서 나중에 지울 수 없어요. 원 있는 데이터와 없는 데이터를 한 데이터셋에 섞지 마세요.</li>
+        <li><b>번호 바꾸기</b>: 실행 중에도 "이 번호로 바꾸기"를 누르면 0.5초 안에 원이 옮겨가요. 시연을 마커별로 나눠 녹화할 때 녹화를 멈추지 않아도 돼요.</li>
+        <li><b>가려질 때</b>: 그리퍼가 마커를 가려 못 찾으면 마지막으로 찾은 자리에 원을 계속 그려요. 시도(에피소드)가 시작될 때마다 새로 찾아요. 시작할 때 마커가 화면에 보이게 물체를 두세요.</li>
+        <li>시뮬레이션 학습 데이터도 같은 코드(<code>target_mark.py</code>)로 원을 그려서, 시뮬과 실물 데이터를 섞어 학습할 수 있어요.</li>
+        <li><b>마커 검출 보기</b>: ① 카메라 미리보기의 "마커 검출 보기"(③은 "카메라 미리보기에서 마커 검출 보기")를 켜면 화면에 보이는 모든 마커를 초록 테두리와 번호로 표시하고, 목표 마커 표시가 켜져 있으면 녹화·평가와 똑같은 원도 그려요. 아래 줄에 "보이는 마커: 15, 16, 17 · 목표 15번 찾음"처럼 나와요. 녹화나 평가를 시작하기 전에 목표가 보이는지 확인하세요. 초록 테두리와 번호는 미리보기에만 나오고 녹화되지 않아요.</li>
+        <li>관제 연동: <code>POST /api/target {"target_marker": 17}</code>로 목표를 바꿀 수 있어요.</li>
       </ul>
     </section>
 
@@ -1953,6 +1982,7 @@ function render(s) {
   $("camState").textContent = s.preview ? "켜짐" : "꺼짐";
   $("camState").className = "pill" + (s.preview ? " ok" : "");
   $("camBtn").textContent = s.preview ? "카메라 끄기" : "카메라 켜기";
+  renderMarkers(s);
   // measured frame rate and image brightness, top right of each camera view (camera view or running program)
   for (const name of CAMS.map(c => c.name)) {
     const st = (s.cam_stats || {})[name], b = st ? st.brightness : s.brightness[name];
@@ -2090,7 +2120,7 @@ async function act(fn, okMsg) {
   catch (e) { toast(e.message, "err"); }
 }
 
-$("camBtn").addEventListener("click", () => act(() => api("/api/preview", { on: !(state && state.preview) })));
+$("camBtn").addEventListener("click", () => act(async () => { const r = await api("/api/preview", { on: !(state && state.preview) }); markerView(); return r; }));
 
 $("checkBtn").addEventListener("click", async () => {
   $("checkBtn").disabled = true;
@@ -2328,6 +2358,42 @@ $("teleopBtn").addEventListener("click", () => {
 });
 $("teleopStop").addEventListener("click", () => act(() => urgent("/api/stop"), "텔레옵을 중지합니다."));
 
+// ---- Target marker (optional): omx_run.py circles this ArUco marker on the front camera ----
+function targetMarker(prefix) {
+  return $(prefix + "TgOn").checked ? String(Number($(prefix + "TgId").value)) : "";
+}
+for (const prefix of ["rec", "ev"]) {
+  const on = $(prefix + "TgOn"), id = $(prefix + "TgId");
+  try {  // remember the choice per browser (on/off and number)
+    on.checked = localStorage.getItem("omxTarget.on." + prefix) === "1";
+    const v = localStorage.getItem("omxTarget.id." + prefix); if (v !== null) id.value = v;
+  } catch (e) { /* storage blocked: defaults */ }
+  const sync = () => {
+    $(prefix + "TgFields").hidden = !on.checked;
+    try { localStorage.setItem("omxTarget.on." + prefix, on.checked ? "1" : "0"); localStorage.setItem("omxTarget.id." + prefix, id.value); } catch (e) { /* ignore */ }
+  };
+  on.addEventListener("change", sync); id.addEventListener("change", sync); sync();
+  $(prefix + "TgSet").addEventListener("click", () => act(() => api("/api/target", { target_marker: Number(id.value) }),
+    (r) => `목표 마커를 ${r.target_marker}번으로 바꿨습니다 (실행 중이면 0.5초 안에 반영)`));
+}
+
+// Camera check: outline every marker and circle the target in the preview (display only)
+function markerView() {
+  const evTab = !$("tab-eval").hidden;
+  const show = evTab ? $("evTgView").checked : $("camMarkers").checked;
+  const prefix = evTab ? "ev" : "rec";
+  return api("/api/marker_view", { show, target: show ? targetMarker(prefix) : "" }).catch(() => {});
+}
+for (const id of ["camMarkers", "evTgView", "recTgOn", "recTgId", "evTgOn", "evTgId"]) $(id).addEventListener("change", markerView);
+function renderMarkers(s) {
+  const m = s.markers || {}, line = $("markerLine");
+  line.hidden = !(s.preview && m.seen);
+  if (line.hidden) return;
+  const seen = m.seen.length ? m.seen.join(", ") : "없음";
+  line.textContent = `보이는 마커: ${seen}` + (m.target != null ? ` · 목표 ${m.target}번 ${m.found ? "찾음" : "안 보임"}` : "");
+  line.style.color = m.target != null && !m.found ? "var(--err, #e5484d)" : "";
+}
+
 $("recForm").addEventListener("submit", (ev) => {
   ev.preventDefault();
   if (needConfirm()) return;
@@ -2342,6 +2408,7 @@ $("recForm").addEventListener("submit", (ev) => {
     viewer_ip: viewerIp(),
     upload: $("autoUpload").checked,
     description: $("dsNote").value,
+    target_marker: targetMarker("rec"),
   }), (r) => {
     nameEdited = false;  // next recording gets a fresh MMDD_HHMM
     return (r.resume ? "이어서 녹화합니다: " : "녹화를 시작합니다: ") + r.repo_id;
@@ -2672,6 +2739,7 @@ $("evStart").addEventListener("click", async () => {
   } catch (e) { /* no training info: start anyway */ }
   act(() => api("/api/eval/start", {
     confirm: true, model_path: $("evCkpt").value || $("evModel").value, task: $("evTask").value,
+    target_marker: targetMarker("ev"),
     episodes: Number($("evEpisodes").value), episode_s: Number($("evEpisodeS").value), reset_s: Number($("evResetS").value),
     viewer_ip: viewerIp(), smooth: $("evSmooth").checked, threads: Number($("evThreads").value),
     async_mode: $("evAsync").checked, actions_per_chunk: Number($("evChunk").value), chunk_size_threshold: Number($("evThreshold").value),
