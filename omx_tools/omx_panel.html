@@ -202,6 +202,7 @@ details.align summary { cursor: pointer; font-weight: 650; font-size: 13.5px; }
 .toast:empty { display: none; }
 .toast.err { border-left-color: #ff6b5e; }
 .toast.ok { border-left-color: #3ddc84; }
+.toast.warn { border-left-color: #f0b45a; }
 
 /* ---------- logs, charts ---------- */
 pre.log { margin: 0; background: var(--code-bg); color: var(--code-fg); border-radius: 10px; padding: 12px 14px; font-family: var(--mono); font-size: 11.5px; line-height: 1.55; height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #0f1a28; }
@@ -479,7 +480,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.5.1</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.6.1</span></div>
       </div>
     </div>
     <div class="status">
@@ -489,6 +490,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       <button type="button" class="theme-btn" id="langBtn" title="상태 줄 언어: 한국어 / English">EN</button>
       <button type="button" class="theme-btn" id="themeBtn" title="밝은 화면 / 어두운 화면">밝게</button>
       <button type="button" id="errBadge" class="pill bad" hidden title="눌러서 오류 내용 보기"></button>
+      <button type="button" id="camBadge" class="pill warn" hidden title="눌러서 카메라 화면 확인"></button>
       <button type="button" class="help-open" data-help="start">사용법</button>
     </div>
   </div>
@@ -629,7 +631,9 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         </div>
         <div style="display:grid;gap:6px"><div><b style="font-size:12.5px">손목 회전 보정</b> <span class="muted" style="font-size:12px">리더 그리퍼가 팔로워 집게와 90° 돌아가게 조립된 세트만. 텔레옵·녹화에서 팔로워 손목 = 리더 손목 + 보정값(녹화되는 동작도 보정된 값), 평가에는 쓰지 않습니다.</span></div>
           <div class="fields" id="setupWrist"></div></div>
-        <div><b style="font-size:12.5px">카메라 지정</b> <span class="muted" style="font-size:12px">같은 모델 카메라는 USB 포트로 구분합니다. 카메라를 다른 포트에 옮기면 다시 지정하세요.</span></div>
+        <div><b style="font-size:12.5px">카메라 지정</b> <span class="muted" style="font-size:12px">같은 모델 카메라는 USB 포트로 구분합니다. 포트를 옮기면 패널이 자동으로 찾지만, 저장 전에 화면이 이름과 맞는지 확인하세요. 저장할 때의 글로벌 카메라 화면을 기준으로 기억합니다.</span></div>
+        <div class="row" style="gap:6px"><button type="button" id="setupDetect">자동으로 찾기</button><button type="button" id="setupSwap">front ↔ front_2 맞바꾸기</button></div>
+        <div id="setupCamNote" class="muted" style="font-size:12.5px" hidden></div>
         <div id="setupCams" style="display:grid;gap:6px"></div>
         <div class="row"><button class="primary" type="button" id="setupSave">저장하고 점검</button><button type="button" id="setupCancel">취소</button></div>
       </div>
@@ -1209,6 +1213,8 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       <ul>
         <li><b>카메라 켜기</b>: front(글로벌)와 wrist(팔로워 장착) 영상을 약 15fps로 보여줍니다.</li>
         <li>각 영상 아래 숫자는 밝기입니다. <b>"검은 화면"</b>이 뜨면 렌즈 캡, 가림, USB를 확인합니다.</li>
+        <li><b>USB 포트를 옮기면</b> 패널이 카메라를 자동으로 찾습니다. 손목 카메라는 모델과 같은 허브의 팔 보드로, 글로벌 카메라는 마지막으로 저장한 화면과 비교해 판별합니다. 판별하지 못한 것은 <b>확인 필요</b>로 표시합니다.</li>
+        <li>자동으로 바뀐 뒤에는 위쪽의 <b>카메라 화면 확인 필요</b>를 눌러 화면이 이름과 맞는지 보고 저장해야 녹화·평가를 시작할 수 있습니다. 이름이 뒤바뀐 채 녹화되면 데이터가 조용히 망가지기 때문입니다. 틀렸으면 역할을 고르거나 <b>front ↔ front_2 맞바꾸기</b>를 누르세요.</li>
         <li>카메라 보기는 <b>카메라 없는 텔레옵과 동시에</b> 쓸 수 있습니다.</li>
         <li><b>녹화를 시작하면 카메라 보기는 자동으로 꺼지고</b>, 녹화 프로그램이 읽는 영상이 같은 자리에 나옵니다.</li>
         <li><b>CPU (상단 표시줄)</b>: 이 PC의 CPU입니다. 막대 하나가 스레드 하나, "가동 3/8"은 사용률 25% 이상인 스레드 수, 온도는 5초 평균입니다. 마우스를 올리면 코어 수와 스레드별 사용률이 나옵니다. 녹화 중 막대가 빨갛게 꽉 차거나 "클럭 저하"가 뜨면 프레임이 빠질 수 있으니, 다른 무거운 작업을 멈추세요.</li>
@@ -1938,6 +1944,7 @@ function render(s) {
 
   // only the visible tab streams (two cameras = two of the browser's six connections)
   if (s.cameras) buildCamFrames(s.cameras);
+  watchCams(s);
   motor.avail = running && (job.kind === "teleop" || job.kind === "record");
   motorShow();
   renderSync(s);
@@ -2186,6 +2193,7 @@ function renderSetupCams() {
     return `<div class="cam-row" data-path="${esc(c.path)}">
       <div class="thumb" data-probe="${i}" title="눌러서 한 장 보기">미리보기</div>
       <div style="display:grid;gap:4px"><span><b>${esc(c.model || "카메라")}</b> <span class="muted mono">USB ${esc(c.usb_port)} · ${esc(c.device)}</span></span>
+        <span data-why style="font-size:12px"></span>
         <div class="cam-fields"><select data-role>${["", ...d.roles[m]].map(r => `<option value="${r}" ${r === (cur.name || "") ? "selected" : ""}>${r ? r + " · " + ROLE_KO[r] : "사용 안 함"}</option>`).join("")}</select>
         <input type="text" data-label maxlength="60" value="${esc(cur.label || "")}" placeholder="${cur.name ? esc(autoLabel(cur.name)) : "라벨 (역할을 고르면 자동)"}"></div></div></div>`;
   }).join("") : '<p class="muted">연결된 카메라가 없습니다.</p>';
@@ -2206,17 +2214,99 @@ for (const id of ["setSingle", "setLeft", "setRight"]) $(id).addEventListener("c
 });
 $("setupCams").addEventListener("change", (e) => {
   const sel = e.target.closest("[data-role]");
-  if (sel) sel.closest(".cam-row").querySelector("[data-label]").placeholder = sel.value ? autoLabel(sel.value) : "라벨 (역할을 고르면 자동)";
+  if (!sel) return;
+  const row = sel.closest(".cam-row"), label = row.querySelector("[data-label]");
+  label.placeholder = sel.value ? autoLabel(sel.value) : "라벨 (역할을 고르면 자동)";
+  if (sel.value && !label.value) label.value = savedCamLabel(sel.value);
+  row.querySelector("[data-why]").textContent = "";
 });
-$("setupCams").addEventListener("click", async (e) => {
-  const t = e.target.closest("[data-probe]");
-  if (!t) return;
+async function probeRow(t) {
   const path = t.closest(".cam-row").dataset.path;
   t.textContent = "읽는 중...";
   const r = await fetch("/api/camera_probe?path=" + encodeURIComponent(path) + "&t=" + Date.now());
   if (!r.ok) { t.textContent = "실패"; try { toast((await r.json()).error, "err"); } catch (x) {} return; }
   t.innerHTML = `<img alt="미리보기" src="${URL.createObjectURL(await r.blob())}">`;
+}
+$("setupCams").addEventListener("click", (e) => {
+  const t = e.target.closest("[data-probe]");
+  if (t) probeRow(t);
 });
+// ---- cameras moved to another USB port (server: omx_camauto.py): found by themselves, confirmed by eye
+const camAuto = { seen: "", since: 0, done: "", result: null };
+function savedCamLabel(role) {
+  const cams = ((setup.data.setup || {}).cameras || {})[setupMode()] || [];
+  return (cams.find(c => c.name === role) || {}).label || (camAuto.result && camAuto.result.labels[role]) || "";
+}
+function showCamPicks(res) {
+  const picks = res.picks, chosen = {};
+  for (const [role, p] of Object.entries(picks)) if (p.path) chosen[p.path] = role;
+  for (const row of document.querySelectorAll("#setupCams .cam-row")) {
+    const role = chosen[row.dataset.path] || "", p = picks[role];
+    row.querySelector("[data-role]").value = role;
+    row.querySelector("[data-label]").value = role ? res.labels[role] || "" : "";
+    row.querySelector("[data-label]").placeholder = role ? autoLabel(role) : "라벨 (역할을 고르면 자동)";
+    const why = row.querySelector("[data-why]");
+    why.textContent = p ? `${p.sure ? "확실" : "확인 필요"}: ${p.why}` : "";
+    why.style.color = p && !p.sure ? "var(--warn)" : "var(--muted)";
+  }
+  const lost = Object.entries(picks).filter(([, p]) => !p.path).map(([r, p]) => `${r}: ${p.why}`);
+  const notes = [...lost, ...(res.has_refs ? [] : ["기준 화면이 아직 없어 글로벌 카메라는 화면으로 판별하지 못했습니다. 저장하면 다음부터 판별합니다."])];
+  $("setupCamNote").hidden = !notes.length;
+  $("setupCamNote").textContent = notes.join(" · ");
+}
+async function probeAllCams() {  // one by one: these cameras reserve USB bandwidth while open
+  for (const row of document.querySelectorAll("#setupCams .cam-row")) {
+    if (!/True Vision|Integrated|Webcam|FaceTime/i.test(row.textContent)) await probeRow(row.querySelector("[data-probe]"));
+  }
+}
+async function detectCams() {
+  camAuto.result = await api("/api/camera_detect", { apply: false });
+  await showFreshPicks();
+}
+async function showFreshPicks() {  // rows of the cameras plugged in now: some may have come after the form opened
+  await loadSetup();
+  renderSetupCams();
+  showCamPicks(camAuto.result);
+  await probeAllCams();
+}
+async function openCamCheck() {
+  showTab("collect");
+  await loadSetup();
+  if (!setup.data) return;
+  fillSetupForm();
+  $("setupForm").hidden = false; $("setupEdit").hidden = true;
+  $("setupPanel").scrollIntoView({ block: "start" });
+  try { await detectCams(); } catch (e) { toast(e.message, "err"); }
+}
+$("camBadge").addEventListener("click", openCamCheck);
+$("setupDetect").addEventListener("click", () => detectCams().catch(e => toast(e.message, "err")));
+$("setupSwap").addEventListener("click", () => {
+  const rows = [...document.querySelectorAll("#setupCams .cam-row")];
+  const of = (role) => rows.find(r => r.querySelector("[data-role]").value === role);
+  const a = of("front"), b = of("front_2");
+  if (!a || !b) { toast("front와 front_2를 모두 지정한 뒤 맞바꾸세요.", "err"); return; }
+  const [la, lb] = [a, b].map(r => r.querySelector("[data-label]").value);
+  a.querySelector("[data-role]").value = "front_2"; a.querySelector("[data-label]").value = lb;
+  b.querySelector("[data-role]").value = "front"; b.querySelector("[data-label]").value = la;
+  for (const r of [a, b]) r.querySelector("[data-why]").textContent = "직접 맞바꿈";
+});
+async function watchCams(s) {
+  const w = s.camera_watch;
+  if (!w) return;
+  $("camBadge").hidden = !(w.missing.length || w.unconfirmed);
+  $("camBadge").textContent = w.unconfirmed ? "카메라 화면 확인 필요" : "카메라 포트 확인 필요";
+  if (w.sig !== camAuto.seen) { camAuto.seen = w.sig; camAuto.since = Date.now(); camAuto.done = ""; }
+  // once per USB change, after it settled; not while something holds the cameras
+  if (!w.missing.length || w.sig === camAuto.done || Date.now() - camAuto.since < 3000 || s.preview || (s.job || {}).running) return;
+  camAuto.done = w.sig;
+  try {
+    const res = camAuto.result = await api("/api/camera_detect", { apply: true });
+    await loadSetup();
+    if (res.applied) toast("카메라 포트가 바뀌어 자동으로 찾아 저장했습니다. 녹화·평가 전에 위쪽 표시를 눌러 화면을 확인하세요", "warn");
+    else if (!res.sure) toast("카메라 포트가 바뀌었는데 일부를 판별하지 못했습니다. 위쪽 표시를 눌러 확인하세요", "warn");
+    if (!$("setupForm").hidden) await showFreshPicks();
+  } catch (e) { toast(e.message, "err"); }
+}
 $("setupSave").addEventListener("click", async () => {
   const m = setupMode();
   const cameras = [...document.querySelectorAll("#setupCams .cam-row")].map(row => ({
@@ -2226,6 +2316,7 @@ $("setupSave").addEventListener("click", async () => {
   try { await api("/api/robot_setup", body); } catch (e) { toast(e.message, "err"); return; }
   toast("로봇 구성을 저장했습니다. 점검합니다.", "ok");
   $("setupForm").hidden = true; $("setupEdit").hidden = false;
+  camAuto.result = null; $("setupCamNote").hidden = true;
   await loadSetup(); poll();
   $("checkBtn").click();
 });

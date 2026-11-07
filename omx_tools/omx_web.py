@@ -41,6 +41,7 @@ import omx_data_notes as data_notes  # noqa: E402  (group and description of eac
 import omx_errors  # noqa: E402  (err_code_N of an abnormal end)
 import omx_home  # noqa: E402  (standard home pose from the training data; config "home_pose")
 import omx_camstats  # noqa: E402  (measured camera fps and brightness)
+import omx_camauto as camauto  # noqa: E402  (which camera is which after a USB replug)
 
 omx_camstats.install()
 
@@ -174,19 +175,89 @@ def camera_probe(path: str) -> bytes:
         raise RuntimeError("카메라 보기나 작업이 켜져 있어 따로 읽을 수 없습니다. 끈 뒤 다시 누르세요.")
     if not path.startswith("/dev/v4l/by-path/") or not Path(path).exists():
         raise RuntimeError("카메라를 찾을 수 없습니다.")
-    cap = cv2.VideoCapture(path, cv2.CAP_V4L2)
+    frame = camauto.grab_frame(path)
+    if frame is None:
+        raise RuntimeError("영상을 읽지 못했습니다.")
+    return cv2.imencode(".jpg", cv2.resize(frame, (320, 240)), [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
+
+
+CAM_REFS = SETUP_FILE.parent / "cam_refs"  # the views of the global cameras when the setup was last saved
+CAM_DETECT = threading.Lock()
+
+
+def camera_watch() -> dict:
+    """For the status poll (opens no camera): saved cameras that are gone, and whether the user still has to look.
+    Not without a board of this setup plugged in: the cameras that account could see are someone else's."""
+    setup = load_setup()
+    if not setup or not any(Path(p).exists() for _, p in FOLLOWERS + LEADERS):
+        return {"missing": [], "unconfirmed": False, "sig": ""}
+    return {"missing": [n for n, p in CAMERAS.items() if not Path(p).exists()],
+            "unconfirmed": ROBOT_MODE in setup.get("cameras_unconfirmed", []),
+            "sig": "|".join(sorted(p.name for p in Path("/dev/v4l/by-path").glob("*-video-index0")))}
+
+
+def required_camera_roles(mode: str) -> list:
+    return ["front", "wrist"] if mode == "single" else ["front", "wrist_left", "wrist_right"]
+
+
+def detect_cameras(apply: bool) -> dict:
+    """Propose the camera of each role. With apply, a result that is sure for every role is saved at once; a record
+    or evaluation then still waits for the user to look at the pictures (camera_gate)."""
+    setup = load_setup()
+    if not setup:
+        raise RuntimeError("저장된 로봇 구성이 없습니다. 카메라를 직접 지정하세요.")
+    if JOB.running() or PREVIEW.running or other_robot_processes():
+        raise RuntimeError("작업이나 카메라 보기를 끈 뒤 다시 찾으세요.")
+    if not CAM_DETECT.acquire(blocking=False):
+        raise RuntimeError("카메라를 찾는 중입니다.")
     try:
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        cap.set(3, 640)
-        cap.set(4, 480)
-        ok, frame = False, None
-        for _ in range(8):  # the first frames are often dark (auto exposure)
-            ok, frame = cap.read()
-        if not ok:
-            raise RuntimeError("영상을 읽지 못했습니다.")
-        return cv2.imencode(".jpg", cv2.resize(frame, (320, 240)), [cv2.IMWRITE_JPEG_QUALITY, 80])[1].tobytes()
+        mode = ROBOT_MODE
+        entries = {c["name"]: c for c in (setup.get("cameras") or {}).get(mode) or []}
+        roles = [r for r in CAMERA_ROLES[mode] if r in entries] or required_camera_roles(mode)
+        saved = {r: c["path"] for r, c in entries.items()}
+        role_sets = ({"wrist_left": setup["bimanual"]["left"], "wrist_right": setup["bimanual"]["right"]}
+                     if mode == "bimanual" else {"wrist": setup["single"]["set"]} if setup.get("single") else {})
+        set_hubs = {n: {h for h in map(camauto.board_hub, s.values()) if h} for n, s in ROBOT_SETS.items()}
+        cams = [{"path": c["path"], "model": c["model"], "hub": camauto.camera_hub(c["device"])} for c in list_cameras()]
+        refs = camauto.load_refs(CAM_REFS, mode, [r for r in roles if not r.startswith("wrist")])
+        frames = {c["path"]: camauto.grab_gray(c["path"]) for c in cams
+                  if refs and not camauto.BUILTIN.search(c["model"]) and not camauto.WRIST_MODEL.search(c["model"])}
+        picks = camauto.propose(roles, saved, cams, set_hubs, role_sets, frames, refs)
+        sure = all(p["path"] and p["sure"] for p in picks.values())
+        changed = any(p["path"] != saved.get(r) for r, p in picks.items())
+        applied = False
+        if apply and sure and changed:
+            setup.setdefault("cameras", {})[mode] = [
+                {"name": r, "path": picks[r]["path"], "label": entries.get(r, {}).get("label", "")} for r in roles]
+            setup["cameras_unconfirmed"] = sorted({*setup.get("cameras_unconfirmed", []), mode})
+            SETUP_FILE.write_text(json.dumps(setup, ensure_ascii=False, indent=2))
+            apply_setup(setup)
+            applied = True
+        return {"picks": picks, "sure": sure, "changed": changed, "applied": applied, "has_refs": bool(refs),
+                "labels": {r: c.get("label", "") for r, c in entries.items()}}
     finally:
-        cap.release()
+        CAM_DETECT.release()
+
+
+def camera_gate() -> None:
+    """Before a record or evaluation: names on the wrong pictures would silently spoil the data or feed the policy
+    the wrong views. Saving the setup answers both, it also takes the views now seen as the new reference."""
+    setup = load_setup()
+    if not setup:
+        return
+    if ROBOT_MODE in setup.get("cameras_unconfirmed", []):
+        raise RuntimeError("카메라 포트가 바뀌어 자동으로 다시 찾았습니다. 로봇 구성에서 화면을 확인하고 저장한 뒤 시작하세요.")
+    if JOB.running():
+        return
+    refs = camauto.load_refs(CAM_REFS, ROBOT_MODE, [n for n in CAMERAS if not n.startswith("wrist")])
+    cameras = {n: CAMERAS[n] for n in refs}
+    if len(refs) < 2:
+        return
+    PREVIEW.stop()  # the check needs the cameras itself
+    wrong = camauto.swapped(cameras, refs, {p: camauto.grab_gray(p) for p in cameras.values() if Path(p).exists()})
+    if wrong:
+        raise RuntimeError(f"{', '.join(wrong)} 화면이 다른 카메라의 기준 화면과 일치합니다. 케이블이 바뀐 것 같습니다. "
+                           "로봇 구성에서 화면을 확인하고 저장한 뒤 시작하세요.")
 
 
 WRIST_OFFSETS = (0, 90, -90)  # degrees; 180 would leave no range once clamped to one turn
@@ -258,9 +329,15 @@ def save_setup(body: dict) -> dict:
         raise RuntimeError("필요한 카메라를 모두 지정하세요: " + ", ".join(sorted(need - seen)))
     order = CAMERA_ROLES[mode]
     setup.setdefault("cameras", {})[mode] = sorted(cams, key=lambda c: order.index(c["name"]))
+    unconfirmed = [m for m in setup.get("cameras_unconfirmed", []) if m != mode]
+    if unconfirmed:
+        setup["cameras_unconfirmed"] = unconfirmed
+    else:
+        setup.pop("cameras_unconfirmed", None)
     SETUP_FILE.parent.mkdir(parents=True, exist_ok=True)
     SETUP_FILE.write_text(json.dumps(setup, ensure_ascii=False, indent=2))
     apply_setup(setup)
+    camauto.save_refs(CAM_REFS, mode, {c["name"]: c["path"] for c in cams if not c["name"].startswith("wrist")})
     return setup_status()
 
 SLOW_RE = re.compile(r"Record loop is running slower \(([0-9.]+) Hz\)")
@@ -358,6 +435,14 @@ def arms_to_check() -> list:
     return out
 
 
+def close_port(handler) -> None:
+    """Close a check's port even when its board is gone, so the panel does not keep it open."""
+    try:
+        handler.closePort()
+    except Exception:
+        pass
+
+
 def ping_motors() -> dict:
     from dynamixel_sdk import PacketHandler, PortHandler
 
@@ -370,21 +455,26 @@ def ping_motors() -> dict:
         if not handler.openPort():
             result[name] = {"ok": False, "msg": "포트를 열 수 없음 (다른 프로그램이 사용 중일 수 있음)"}
             continue
-        handler.setBaudRate(BAUDRATE)
         missing, hw_errors = [], []
-        for motor_id in ids:
-            _, comm, err = packet.ping(handler, motor_id)
-            if comm != 0:
-                missing.append(motor_id)
-            elif err & 0x80:
-                hw_errors.append(motor_id)
-        handler.closePort()
+        try:
+            handler.setBaudRate(BAUDRATE)
+            for motor_id in ids:
+                _, comm, err = packet.ping(handler, motor_id)
+                if comm != 0:
+                    missing.append(motor_id)
+                elif err & 0x80:
+                    hw_errors.append(motor_id)
+        except Exception as exc:  # the board went away during the check
+            result[name] = {"ok": False, "msg": f"점검 중 연결 끊김 ({exc}). USB 확인 후 다시 점검"}
+            continue
+        finally:
+            close_port(handler)
         if missing or hw_errors:
             parts = []
             if missing:
                 parts.append(f"응답 없음 ID {missing}")
             if hw_errors:
-                parts.append(f"하드웨어 에러 ID {hw_errors} (전원 껐다 켜기)")
+                parts.append(f"하드웨어 에러 ID {hw_errors} (모터 초기화, 안 되면 전원 껐다 켜기)")
             result[name] = {"ok": False, "msg": ", ".join(parts)}
         else:
             result[name] = {"ok": True, "msg": f"모터 {len(ids)}개 정상"}
@@ -404,18 +494,23 @@ def reset_motors() -> dict:
         if not handler.openPort():
             result[name] = {"ok": False, "msg": "포트를 열 수 없음 (강제 종료를 먼저 누르세요)"}
             continue
-        handler.setBaudRate(BAUDRATE)
-        for motor_id in ids:
-            packet.reboot(handler, motor_id)
-        time.sleep(1.0)
         missing, hw_errors = [], []
-        for motor_id in ids:
-            value, comm, _ = packet.read1ByteTxRx(handler, motor_id, 70)  # Hardware_Error_Status
-            if comm != 0:
-                missing.append(motor_id)
-            elif value:
-                hw_errors.append(motor_id)
-        handler.closePort()
+        try:
+            handler.setBaudRate(BAUDRATE)
+            for motor_id in ids:
+                packet.reboot(handler, motor_id)
+            time.sleep(1.0)
+            for motor_id in ids:
+                value, comm, _ = packet.read1ByteTxRx(handler, motor_id, 70)  # Hardware_Error_Status
+                if comm != 0:
+                    missing.append(motor_id)
+                elif value:
+                    hw_errors.append(motor_id)
+        except Exception as exc:  # the board went away during the reset
+            result[name] = {"ok": False, "msg": f"초기화 중 연결 끊김 ({exc}). USB 확인 후 다시"}
+            continue
+        finally:
+            close_port(handler)
         if missing or hw_errors:
             parts = []
             if missing:
@@ -1540,6 +1635,7 @@ def start_record(body: dict) -> dict:
     episodes = int(body.get("episodes", 10))
     episode_s = float(body.get("episode_s", 30))
     reset_s = float(body.get("reset_s", 15))
+    camera_gate()
     resume = (DATA_HOME / repo_id / "meta/info.json").exists()
     keywords = body.get("keywords", "").strip()
     description = body.get("description", "").strip()
@@ -1992,6 +2088,7 @@ def start_eval(body: dict) -> dict:
     reset_home, open_gripper = bool(body.get("reset_home", True)), bool(body.get("open_gripper", True))
     if not 1 <= threads <= (os.cpu_count() or 24):
         raise RuntimeError(f"CPU 스레드 수는 1~{os.cpu_count() or 24} 사이로 정하세요.")
+    camera_gate()
     local_model = remote.fetch_model(run["model_path"]) if CONTROL else Path(run["model_path"])
     check_model_fits(model_config(str(local_model)))
     extra_args, async_env, opts = policy_eval_options(str(local_model), body)
@@ -2325,6 +2422,7 @@ class Handler(BaseHTTPRequestHandler):
                 "gpu_name": CFG.get("gpu_name"),
                 "ckpt_home": str(CKPT_HOME),
                 "preview": PREVIEW.running,
+                "camera_watch": camera_watch(),
                 "live": JOB.running() and JOB.kind in ("record", "eval"),
                 "brightness": PREVIEW.brightness,
                 "cam_stats": camera_stats(),
@@ -2540,6 +2638,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(run_check())
             elif self.path == "/api/robot_setup":
                 self._json(save_setup(body))
+            elif self.path == "/api/camera_detect":
+                self._json(detect_cameras(bool(body.get("apply"))))
             elif self.path == "/api/sync" and CONTROL:
                 self._json(sync_retry(str(body.get("repo_id") or "")))
             elif self.path == "/api/preview":

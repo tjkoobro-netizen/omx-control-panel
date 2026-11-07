@@ -12,6 +12,8 @@ import re
 CODES = [
     (3, r"시작하지 않습니다", "시작 전 점검에서 거절", "시작하기 전 모터를 읽어 보니 값이 범위를 벗어났거나 응답이 없어, 토크를 켜지 않고 시작을 거절했습니다. 로봇은 움직이지 않았습니다.",
      "화면의 안내에 나온 팔과 모터를 확인합니다. 멈춘 보드면 USB를 다시 꽂고, 한 바퀴 넘은 모터면 모터 초기화 후 다시 시작합니다."),
+    (12, r"motor check failed|Missing motor IDs", "모터 응답 없음", "보드는 열렸지만 일부 모터가 응답하지 않아 연결을 거절했습니다. 로봇은 움직이지 않았습니다. 그 모터의 케이블이 빠졌거나 팔 전원(12V)이 꺼졌을 때 납니다.",
+     "오류 내용의 포트와 모터 번호(팔로워 11~16, 리더 1~6)를 보고 그 모터의 케이블과 팔 전원을 확인합니다. 모터 초기화 후 연결상태 점검에서 모터 6개가 정상인지 본 뒤 다시 시작합니다."),
     (2, r"Could not connect|could not open port|Failed to open port|Port is in use|No such file or directory: '/dev/|Input/output error|DeviceNotConnected|device disconnected", "보드 연결 끊김",
      "모터 보드의 포트를 열지 못했거나 작업 중 연결이 끊겼습니다. USB 케이블이나 허브가 빠졌거나, 다른 프로그램이 포트를 쓰고 있을 때 납니다.",
      "보드 USB와 전원을 확인하고, 시뮬레이터의 실물 연결을 끕니다. 로봇 구성 화면에서 팔이 인식되는지 본 뒤 다시 시작합니다."),
@@ -57,6 +59,14 @@ def classify(lines, returncode: int | None) -> dict | None:
     if refused:
         tail = [refused]
     text = "\n".join(tail)
+    port = re.search(r"motor check failed on port '([^']+)'", text)
+    if port:  # the IDs are on indented lines under "Missing motor IDs:", left out of the tail
+        block = "\n".join(lines[last:] if last is not None else lines)
+        ids = re.findall(r"^\s+- (\d+)", block.split("Missing motor IDs:")[-1].split("Full expected")[0], re.M)
+        detail = f"{port.group(1)}: 응답 없는 모터 ID {', '.join(ids) or '?'}"
+        if any(re.search(r"Overload|Overheat|[Hh]ardware error", x) for x in lines):
+            # a motor stopped by its own hardware error stays silent until it is rebooted
+            return next(_item(n, t, w, h, detail) for n, _, t, w, h in CODES if n == 6)
     for number, pattern, title, why, what in CODES:
         if re.search(pattern, text):
             return _item(number, title, why, what, detail)
