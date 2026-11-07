@@ -101,6 +101,22 @@ def _make_target() -> TargetOverlay | None:
 
 
 TARGET: TargetOverlay | None = None
+LAST_STATE: dict = {}  # motor values of the latest episode step (its end: before any reset move or safe stop)
+
+
+def _write_episode_end(repo_id: str, index: int) -> None:
+    """OMX_EPISODE_END (eval): where the arms were when the episode ended, for the panel's last_result."""
+    path = os.environ.get("OMX_EPISODE_END")
+    if not path or not LAST_STATE:
+        return
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"repo_id": repo_id, "episode": index, "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                       "aborted": bool(ABORT["on"]), "state": {k: round(float(v), 2) for k, v in LAST_STATE.items()}}, f)
+        os.replace(tmp, path)
+    except Exception as exc:  # the report is optional: never stop a run over it
+        _say(f"[omx] episode end: 저장하지 못함 ({exc})")
 
 
 # ---------------------------------------------------------------- arguments
@@ -598,6 +614,8 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
             EVENTS["exit_early"] = False
             break
         obs = robot.get_observation()
+        if dataset is not None:
+            LAST_STATE.update({k: v for k, v in obs.items() if k.endswith(".pos")})
         if TARGET is not None:  # before the preview, the policy and the dataset: all see the same marked frame
             obs = TARGET.apply(obs)
         _show(obs)
@@ -704,6 +722,7 @@ def run_episodes(cfg: RunConfig, robot, teleop, policy: Policy | None, dataset, 
             filt.reset((dataset.features.get(ACT) or {}).get("names"))
         if TARGET is not None:
             TARGET.reset()
+        LAST_STATE.clear()
         ABORT["phase"], ABORT["in_loop"] = "record", True
         try:
             control_loop(robot, d.fps, d.episode_time_s, teleop=teleop, policy=policy, dataset=dataset,
@@ -714,6 +733,7 @@ def run_episodes(cfg: RunConfig, robot, teleop, policy: Policy | None, dataset, 
                 _land_now()
         if policy is not None:
             _report_loop_rate(index, times)
+            _write_episode_end(d.repo_id, index)
         if not EVENTS["stop_recording"] and (recorded < d.num_episodes - 1 or EVENTS["rerecord_episode"]):
             logging.info("Reset the environment")
             ABORT["phase"], ABORT["in_loop"] = "reset", teleop is not None

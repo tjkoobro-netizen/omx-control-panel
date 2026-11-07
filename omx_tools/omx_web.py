@@ -115,9 +115,10 @@ def load_setup() -> dict | None:
 
 def apply_setup(setup: dict | None) -> None:
     """Ports, cameras and the lerobot arguments of the chosen robot setup."""
-    global FOLLOWER, LEADER, CAMERAS, CAMS_ARG, ROBOT_ARGS, TELEOP_ARGS, ROBOT_MODE, FOLLOWERS, LEADERS, CAMERA_LABELS
+    global FOLLOWER, LEADER, CAMERAS, CAMS_ARG, ROBOT_ARGS, TELEOP_ARGS, ROBOT_MODE, FOLLOWERS, LEADERS, CAMERA_LABELS, ARM_NAMES
     if not setup:
         ROBOT_MODE = "single"
+        ARM_NAMES = {"": CFG.get("robot_set") or "OMX"}
         FOLLOWERS, LEADERS = [("팔로워", CFG["follower_port"])], [("리더", CFG["leader_port"])]
         CAMERAS = dict(CFG["cameras"])
         CAMERA_LABELS = {n: {"front": "글로벌 카메라", "wrist": "팔로워 장착"}.get(n, n) for n in CAMERAS}
@@ -127,12 +128,14 @@ def apply_setup(setup: dict | None) -> None:
         CAMERAS = {c["name"]: c["path"] for c in cams}
         CAMERA_LABELS = {c["name"]: c.get("label") or camera_label(ROBOT_MODE, c["name"], setup) for c in cams}
         if ROBOT_MODE == "bimanual":
+            ARM_NAMES = {s: setup["bimanual"][s] for s in ("left", "right")}  # joint prefix -> set name
             left, right = (ROBOT_SETS[setup["bimanual"][s]] for s in ("left", "right"))
             FOLLOWERS = [(f"왼팔 팔로워 ({setup['bimanual']['left']})", left["follower"]),
                          (f"오른팔 팔로워 ({setup['bimanual']['right']})", right["follower"])]
             LEADERS = [(f"왼팔 리더 ({setup['bimanual']['left']})", left["leader"]),
                        (f"오른팔 리더 ({setup['bimanual']['right']})", right["leader"])]
         else:
+            ARM_NAMES = {"": setup["single"]["set"]}
             one = ROBOT_SETS[setup["single"]["set"]]
             FOLLOWERS = [(f"팔로워 ({setup['single']['set']})", one["follower"])]
             LEADERS = [(f"리더 ({setup['single']['set']})", one["leader"])]
@@ -1283,6 +1286,11 @@ class Job:
             self.log_file.close()
             self.log_file = None
         self._release_lock()
+        if self.info["err"]:
+            set_armed(False, f"이상 정지 {self.info['err']['name']}")
+        if self.kind == "eval":
+            LAST_RESULT.clear()
+            LAST_RESULT.update(eval_result(self))
         if self.kind == "eval" and self.info.get("protocol"):
             fill_auto_later(self.info["repo_id"], delay=0)
         if self.kind == "eval" and self.info.get("repo_id"):
@@ -1501,6 +1509,7 @@ class Job:
         killed = []
         if self.running():
             self.info["phase"] = "강제 종료"
+            self.info["killed"] = time.time()
             try:
                 os.killpg(self.proc.pid, signal.SIGKILL)
                 killed.append(str(self.proc.pid))
@@ -2136,6 +2145,73 @@ def remove_unstarted_eval(repo_id: str, lines: list | None = None) -> bool:
     return True
 
 
+# ---- armed: a control-tower (MQTT) command may start an evaluation only while a person has armed the panel
+ARMED = {"on": False, "since": None, "off_reason": "패널 시작"}  # off after every panel restart
+EPISODE_END_FILE = LOG_DIR / "episode_end.json"  # omx_run.py: the arms at the end of each episode (eval)
+EVAL_HOME_POSE: dict = {}  # the running / last eval's model home pose
+LAST_RESULT: dict = {}  # how the last evaluation ended (for the control tower), until the next one ends
+
+
+def set_armed(on: bool, reason: str = "") -> dict:
+    """Turned on only from the panel screen; any stop, abnormal end or restart turns it off."""
+    if on and not ARMED["on"]:
+        ARMED.update(on=True, since=dt.datetime.now().isoformat(timespec="seconds"), off_reason="")
+    elif not on and ARMED["on"]:
+        ARMED.update(on=False, since=None, off_reason=reason or "패널에서 끔")
+    return armed_status()
+
+
+def armed_status() -> dict:
+    return {"armed": ARMED["on"], "armed_since": ARMED["since"], "armed_off_reason": ARMED["off_reason"]}
+
+
+def arm_states(state: dict, home: dict | None) -> dict:
+    """Per arm (set name): joints at the end of the last episode, gripper, and whether it is at the model's
+    home pose (omx_home.diff, gripper left out). None where it was not measured: never a guess."""
+    out = {}
+    for side, name in ARM_NAMES.items():
+        pre = f"{side}_" if side else ""
+        joints = {k[len(pre):-4]: v for k, v in state.items() if k.startswith(pre) and k.endswith(".pos")}
+        g = joints.get("gripper")
+        grip = None if g is None else "open" if g >= omx_home.GRIP_OPEN else "closed" if g < omx_home.GRIP_CLOSED else "half"
+        at_home, far = None, []
+        hj = {k: v for k, v in ((home or {}).get("joints") or {}).items() if k.startswith(pre) and not k.endswith("gripper")}
+        if hj and joints:
+            rows = omx_home.diff({"joints": hj, "std": home.get("std") or {}}, {k: state.get(k + ".pos") for k in hj})
+            if all(r["current"] is not None for r in rows):
+                far = [r["joint"][len(pre):] for r in rows if r["flag"]]
+                at_home = not far
+        out[name] = {"side": side or None, "joints": joints or None, "gripper": g, "gripper_state": grip,
+                     "gripper_open": None if grip is None else grip == "open", "at_home": at_home, "far_joints": far}
+    return out
+
+
+def eval_result(job) -> dict:
+    """/api/status last_result: how the evaluation that just ended went, and where the arms were when its last
+    episode ended (before the safe stop moves them to the start pose and closes the grippers)."""
+    info = job.info
+    try:
+        end = json.loads(EPISODE_END_FILE.read_text())
+        if end.get("repo_id") != info.get("repo_id"):
+            end = None
+    except (OSError, ValueError):
+        end = None
+    home = EVAL_HOME_POSE.get("home") if EVAL_HOME_POSE.get("repo_id") == info.get("repo_id") else None
+    stopped = ("즉시 중단" if info.get("abort_sent") else "비상 정지" if info.get("frozen")
+               else "강제 종료" if info.get("killed") else "중지" if info.get("stopping") else None)
+    rc, err = info.get("returncode"), info.get("err")
+    arms = arm_states(end.get("state") or {}, home) if end else {}
+    checks = [a["at_home"] for a in arms.values()]
+    return {"kind": "eval", "source": info.get("source", "panel"), "repo_id": info.get("repo_id"),
+            "started_at": dt.datetime.fromtimestamp(job.started).isoformat(timespec="seconds"),
+            "ended_at": dt.datetime.now().isoformat(timespec="seconds"), "returncode": rc,
+            "exit_ok": rc == 0 and not err and stopped is None, "stopped_by": stopped, "err": err,
+            "target_marker": info.get("target_marker"),
+            "last_episode": {k: end.get(k) for k in ("episode", "at", "aborted")} if end else None,
+            "arms": arms or None,
+            "home_check": "unknown" if not checks or None in checks else "ok" if all(checks) else "far"}
+
+
 def start_eval(body: dict) -> dict:
     run = find_model(body.get("model_path", ""))
     task = str(body.get("task") or (run.get("tasks") or [""])[0]).strip()
@@ -2195,6 +2271,7 @@ def start_eval(body: dict) -> dict:
     PREVIEW.stop()  # the policy run needs the cameras itself
     fix_wrist_fps()
     EVAL_HOME_FILE.unlink(missing_ok=True)  # written again by this run before its first move
+    EPISODE_END_FILE.unlink(missing_ok=True)  # written by this run at the end of each episode
     cmd = [
         str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_run.py"),
         *ROBOT_ARGS, f"--robot.cameras={CAMS_ARG}",
@@ -2219,14 +2296,17 @@ def start_eval(body: dict) -> dict:
                  "episode_s": episode_s, "reset_s": reset_s, "model": run["id"],
                  "smooth": opts["smooth"], "threads": threads, "reset_home": reset_home,
                  "open_gripper": open_gripper, **opts,
-                 "protocol": note.get("protocol")}
+                 "protocol": note.get("protocol"), "source": "mqtt" if body.get("source") == "mqtt" else "panel"}
     tenv = target_env(body, eval_info)
     if tenv:
         note["target_marker"] = eval_info["target_marker"]
     path.write_text(json.dumps(note, ensure_ascii=False, indent=2))
     JOB.start("eval", cmd, eval_info,
               need_leader=False, env_extra=thread_env(threads) | home_env(reset_home, open_gripper, repo_id) | async_env
-              | ({"OMX_HOME_POSE": str(omx_home.write_run_file(home, RUN_HOME_FILE))} if home else {}) | tenv)
+              | ({"OMX_HOME_POSE": str(omx_home.write_run_file(home, RUN_HOME_FILE))} if home else {}) | tenv
+              | {"OMX_EPISODE_END": str(EPISODE_END_FILE)})
+    EVAL_HOME_POSE.clear()
+    EVAL_HOME_POSE.update(repo_id=repo_id, home=home)
     if preset:
         protocol_target(JOB)
         if preset["detector"] != "none":
@@ -2493,6 +2573,8 @@ class Handler(BaseHTTPRequestHandler):
                 "ckpt_home": str(CKPT_HOME),
                 "preview": PREVIEW.running,
                 "markers": PREVIEW.markers if PREVIEW.running else {},
+                **armed_status(),
+                "last_result": LAST_RESULT or None,
                 "camera_watch": camera_watch(),
                 "live": JOB.running() and JOB.kind in ("record", "eval"),
                 "brightness": PREVIEW.brightness,
@@ -2703,7 +2785,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._forward("POST", raw)
         body = json.loads(raw or b"{}")
         try:
-            if self.path in ("/api/teleop", "/api/record", "/api/eval/start") and not body.get("confirm"):
+            mqtt = body.get("source") == "mqtt"  # a control-tower command (the MQTT worker on this PC)
+            if mqtt and self.path in ("/api/teleop", "/api/record", "/api/armed"):
+                raise RuntimeError("관제 명령으로는 평가 시작만 할 수 있습니다. armed는 패널 화면에서 사람이 켭니다.")
+            if mqtt and self.path == "/api/eval/start" and not ARMED["on"]:
+                raise RuntimeError("armed가 꺼져 있어 관제 명령을 받지 않습니다. 패널 화면에서 사람이 켜야 합니다.")
+            if self.path in ("/api/teleop", "/api/record", "/api/eval/start") and not body.get("confirm") and not mqtt:
                 raise RuntimeError("로봇 옆에 사람이 있는지 확인하고 체크해주세요.")
             if self.path == "/api/check":
                 self._json(run_check())
@@ -2731,8 +2818,13 @@ class Handler(BaseHTTPRequestHandler):
                 JOB.send(body.get("cmd", ""))
                 self._json({"ok": True})
             elif self.path == "/api/stop":
+                set_armed(False, "중지 버튼")
                 JOB.stop()
                 self._json({"ok": True})
+            elif self.path == "/api/armed":
+                if body.get("on") and not body.get("confirm"):
+                    raise RuntimeError("로봇 옆에 사람이 있는지 확인하고 체크해주세요.")
+                self._json(set_armed(bool(body.get("on"))))
             elif self.path == "/api/start_pose/save":
                 self._json(save_start_pose(body.get("kind", "start")))
             elif self.path == "/api/eval/start":
@@ -2788,6 +2880,7 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/home/return":
                 self._json(home_return())
             elif self.path == "/api/kill":
+                set_armed(False, {"home": "즉시 중단", "freeze": "비상 정지"}.get(body.get("mode"), "강제 종료"))
                 if body.get("mode") == "home":  # 즉시 중단 (eval): stop and return to the start pose
                     self._json({"ok": True, "result": JOB.abort()})
                 elif body.get("mode") == "freeze":  # 비상 정지: hold in place, keep the records, wait for [홈 위치로 이동]
