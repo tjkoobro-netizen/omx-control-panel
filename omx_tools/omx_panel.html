@@ -488,7 +488,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.9.1</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.10.0</span></div>
       </div>
     </div>
     <div class="status">
@@ -993,6 +993,18 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
 
     <section class="panel">
       <div class="panel-head"><h2>평가 설정</h2></div>
+      <div id="evLink" hidden style="display:grid;gap:8px">
+        <div class="row" style="align-items:end">
+          <label class="f" style="flex:1 1 220px"><span>원격 추론 통신 <button type="button" class="qbtn help-open" data-help="ev-link" title="원격 추론 통신 설명" aria-label="원격 추론 통신 설명">?</button></span>
+            <select id="evLinkMode"><option value="http">HTTP (SSH 터널 · 기본)</option><option value="udp">UDP (같은 공유기에서 직접)</option></select></label>
+          <span class="pill" id="evLinkState">확인 중</span>
+        </div>
+        <div class="fields" id="evLinkUdp" hidden>
+          <label class="f">UDP 서버 (GPU 노트북 주소:포트)<input type="text" id="evLinkServer" autocomplete="off" placeholder="192.168.x.x:5600"></label>
+          <label class="f">공유 키 파일 (hex, 본인만 읽기)<input type="text" id="evLinkKey" autocomplete="off"></label>
+        </div>
+        <div class="row" style="gap:8px"><button type="button" id="evLinkSave" hidden>통신 방식 저장</button><span class="muted" id="evLinkNote" style="font-size:12.5px"></span></div>
+      </div>
       <div class="row" style="align-items:end">
         <label class="f" style="flex:1 1 220px"><span>평가 방식 <button type="button" class="qbtn help-open" data-help="ev-preset" title="평가 방식 설명" aria-label="평가 방식 설명">?</button></span>
           <select id="evPreset"><option value="">자유 위치</option></select></label>
@@ -1461,6 +1473,17 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <li>아래 줄에 모델별 성공률(무효 제외)과 실패 단계별 개수, 오른쪽 열에 위치별 성공 수가 있어요. 모든 모델이 실패하는 위치는 데이터가 부족한 위치일 가능성이 커요.</li>
         <li>터미널에서 <code>python omx_compare.py compare &lt;세트ID&gt; --save</code>로 CSV·JSON 파일도 만들 수 있어요.</li>
       </ul>
+    </section>
+
+    <section id="h-ev-link">
+      <h3>원격 추론 통신 (HTTP / UDP)</h3>
+      <p>이 PC(로봇 쪽)는 동작 묶음이 줄어들 때마다 최신 관절 값과 카메라 사진을 GPU 노트북에 보내고, 계산된 동작 묶음을 받아 실행해요. 그 주고받는 방식을 고를 수 있어요. 다음 평가부터 적용되고, 관제(MQTT)로 시작한 평가도 같은 설정을 따라요.</p>
+      <ul>
+        <li><b>HTTP (기본)</b>: SSH 터널(Tailscale) 안에서 HTTP로 보내요. 공유기가 달라도 되고, 지금까지 쓰던 방식이에요.</li>
+        <li><b>UDP</b>: 같은 공유기 안에서 GPU 노트북의 UDP 서버로 직접 보내요. 터널을 거치지 않아요. 메시지마다 공유 키로 서명하고, 조각이 하나라도 빠지면 그 메시지는 쓰지 않아요. 제때 답이 없으면 최신 관찰로 다시 보내고(최대 3번), 그래도 없으면 평가를 멈춰요.</li>
+      </ul>
+      <p>UDP를 쓰려면 GPU 노트북에서 UDP 추론 서버가 실행 중이어야 하고, <b>UDP 서버</b>에 그 노트북의 공유기 주소와 포트를, <b>공유 키 파일</b>에 이 PC의 키 파일 경로를 적어요. 키 파일은 본인만 읽을 수 있어야 하고(chmod 600) 저장소에 올리면 안 돼요. 저장하면 몇 초마다 연결을 확인해서 옆에 "UDP 연결됨 · 왕복 몇 ms"로 보여줘요.</p>
+      <p>평가 로그의 <code>[omx] async:</code> 줄에 "원격: 왕복 …ms (GPU 추론 …ms)"가 두 방식 모두 같은 형식으로 나와서 비교할 수 있어요. UDP에서 다시 보낸 횟수도 같이 나와요. 평가 기록에는 쓴 방식(transport)이 남아요.</p>
     </section>
 
     <section id="h-ev-async">
@@ -2027,6 +2050,7 @@ function render(s) {
   motor.avail = running && (job.kind === "teleop" || job.kind === "record");
   motorShow();
   renderSync(s);
+  renderInferLink(s);
   setStreams($("tab-collect").hidden ? false : s.preview ? "preview" : s.live ? "live" : false);
   renderEval(s);
   $("camState").textContent = s.preview ? "켜짐" : "꺼짐";
@@ -2223,6 +2247,42 @@ $("syncList").addEventListener("click", (e) => {
   if (b) act(() => api("/api/sync", { repo_id: b.dataset.sync }), "GPU 노트북으로 다시 보냅니다.");
 });
 $("syncAll").addEventListener("click", () => act(() => api("/api/sync", {}), "남은 데이터를 모두 GPU 노트북으로 보냅니다."));
+
+// control PC: HTTP (SSH tunnel) or UDP (same router) for the remote inference; the form keeps what the user is typing
+let linkDirty = false;
+function renderInferLink(s) {
+  const box = $("evLink");
+  const link = s.role === "control" && s.gpu_link && s.gpu_link.infer;
+  box.hidden = !link;
+  if (!link) return;
+  if (!linkDirty) {
+    $("evLinkMode").value = link.transport;
+    $("evLinkServer").value = link.udp_server || "";
+    $("evLinkKey").value = link.udp_key_file || "";
+  }
+  const udp = $("evLinkMode").value === "udp";
+  $("evLinkUdp").hidden = !udp;
+  $("evLinkSave").hidden = !linkDirty;
+  const st = $("evLinkState");
+  if (link.transport === "http") {
+    st.textContent = s.gpu_link.ok ? "HTTP · 터널 연결됨" : "HTTP · 터널 끊김";
+    st.className = "pill " + (s.gpu_link.ok ? "ok" : "bad");
+    $("evLinkNote").textContent = linkDirty ? "저장하면 다음 평가부터 바뀝니다." : "";
+  } else {
+    const u = link.udp || {};
+    st.textContent = u.ok === null || u.ok === undefined ? "UDP · 확인 중" : u.ok ? `UDP 연결됨 · 왕복 ${Math.round(u.round_ms)}ms` : "UDP 응답 없음";
+    st.className = "pill " + (u.ok ? "ok" : u.ok === false ? "bad" : "warn");
+    $("evLinkNote").textContent = linkDirty ? "저장하면 다음 평가부터 바뀝니다." : u.ok === false ? u.error : u.loaded && u.loaded.length ? "GPU에 올라간 모델: " + u.loaded.join(", ") : "";
+  }
+}
+for (const id of ["evLinkMode", "evLinkServer", "evLinkKey"]) {
+  $(id).addEventListener("input", () => { linkDirty = true; if (state) renderInferLink(state); });
+}
+$("evLinkSave").addEventListener("click", () => act(async () => {
+  const r = await api("/api/infer_link", { transport: $("evLinkMode").value, udp_server: $("evLinkServer").value.trim(), udp_key_file: $("evLinkKey").value.trim() });
+  linkDirty = false;
+  return r;
+}, (r) => `원격 추론 통신을 ${r.transport.toUpperCase()}로 저장했습니다. 다음 평가부터 적용됩니다.`));
 
 // ---- robot setup: one arm or a cooperative pair, robot sets and camera roles with labels ----
 const setup = { data: null };

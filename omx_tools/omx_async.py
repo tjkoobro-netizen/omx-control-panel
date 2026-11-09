@@ -97,6 +97,8 @@ class AsyncRunner:
             rt = sorted(n["round_ms"] for n in stats)
             inf = sorted(n["infer_ms"] or 0 for n in stats)
             net = f" · 원격: 왕복 {rt[len(rt) // 2]:.0f}ms (GPU 추론 {inf[len(inf) // 2]:.0f}ms, 보낸 영상 {stats[-1]['bytes'] // 1024}KB)"
+            if stats[-1].get("timeouts"):  # UDP: requests re-sent because no reply came in time
+                net += f" · 응답 없어 다시 보냄 {stats[-1]['timeouts']}회"
         _say(f"추론 {med:.0f}ms (묶음 {self.chunks}개), 큐 {len(self.queue)}, 큐가 비어 기다린 횟수 {self.stalls} ({self.stall_s:.1f}s)"
              + (" · RTC" if self.rtc else f" · {self.agg_name}") + net)
 

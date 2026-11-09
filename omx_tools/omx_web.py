@@ -1762,6 +1762,123 @@ def remote_preset(pid: str) -> dict:
     raise RuntimeError(f"평가 방식 {pid}을 GPU 노트북에서 찾지 못했습니다.")
 
 
+# Control PC: how the evaluation reaches the GPU laptop's models. "http" (default): POST /infer through the SSH
+# tunnel (Tailscale). "udp": wire RPI1 (infer_link) straight to the GPU laptop's UDP server on the same router, with
+# a shared key file (hex, chmod 600; never in a repository). ~/.config/omx/v3/infer_link.json, set on the panel.
+INFER_LINK_FILE = SETUP_FILE.parent / "infer_link.json"
+INFER_LINK_DEFAULT = {"transport": "http", "udp_server": "", "udp_key_file": "~/.config/roport/omx-udp.key"}
+
+
+def infer_link() -> dict:
+    out = dict(INFER_LINK_DEFAULT)
+    try:
+        out.update({k: v for k, v in json.loads(INFER_LINK_FILE.read_text()).items() if k in out})
+    except (OSError, ValueError):
+        pass
+    return out
+
+
+def check_udp(server: str, key_file: str) -> None:
+    import omx_infer
+
+    omx_infer.udp_peer(server)
+    try:
+        key = omx_infer.read_udp_key(key_file)
+    except FileNotFoundError:
+        raise RuntimeError(f"키 파일이 없습니다: {key_file}") from None
+    except ValueError as exc:
+        raise RuntimeError(f"키 파일을 쓸 수 없습니다 ({exc})") from None
+    if len(key) < 16:
+        raise RuntimeError("키가 너무 짧습니다 (16바이트 이상, hex)")
+
+
+def save_infer_link(body: dict) -> dict:
+    """Panel: HTTP or UDP for the remote inference. Takes effect from the next evaluation."""
+    if JOB.running() and JOB.kind == "eval":
+        raise RuntimeError("평가가 끝난 뒤 바꾸세요.")
+    cur = infer_link()
+    transport = body.get("transport")
+    if transport not in ("http", "udp"):
+        raise RuntimeError("통신 방식은 HTTP 또는 UDP 중에서 고르세요.")
+    server = str(body.get("udp_server", cur["udp_server"])).strip()
+    key_file = str(body.get("udp_key_file", cur["udp_key_file"])).strip()
+    if transport == "udp":
+        try:
+            check_udp(server, key_file)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from None
+    INFER_LINK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    INFER_LINK_FILE.write_text(json.dumps({"transport": transport, "udp_server": server, "udp_key_file": key_file},
+                                          ensure_ascii=False, indent=2) + "\n")
+    UDP_LINK.reset()
+    return infer_link_status()
+
+
+class UdpLink:
+    """While UDP is chosen: PING the GPU laptop's UDP server every few seconds (status: answer, round trip)."""
+
+    EVERY_S = 5.0
+
+    def __init__(self):
+        self.state = {"ok": None, "round_ms": None, "error": "", "loaded": [], "at": None}
+        self.client, self.key = None, None
+        self.wake = threading.Event()
+        self.thread = None
+
+    def start(self) -> None:
+        if self.thread is None:
+            self.thread = threading.Thread(target=self._run, daemon=True)
+            self.thread.start()
+
+    def reset(self) -> None:
+        self.key = None
+        self.state = {"ok": None, "round_ms": None, "error": "", "loaded": [], "at": None}
+        self.wake.set()
+
+    def _ping(self, cfg: dict) -> None:
+        import omx_infer
+        from infer_link.client import InferenceClient
+
+        key = (cfg["udp_server"], cfg["udp_key_file"])
+        if self.key != key:
+            if self.client is not None:
+                self.client.close()
+            self.client = None
+            check_udp(*key)
+            self.client = InferenceClient(omx_infer.udp_peer(cfg["udp_server"]),
+                                          omx_infer.read_udp_key(cfg["udp_key_file"]))
+            self.key = key
+        out = self.client.ping(timeout=1.0)
+        self.state = {"ok": True, "round_ms": self.client.last.get("round_ms"), "error": "",
+                      "loaded": [Path(m).parent.name if m.endswith("pretrained_model") else Path(m).name
+                                 for m in out.get("loaded") or []], "at": time.time()}
+
+    def _run(self) -> None:
+        while True:
+            cfg = infer_link()
+            if cfg["transport"] == "udp":
+                try:
+                    self._ping(cfg)
+                except Exception as exc:
+                    from infer_link.client import InferenceTimeout
+
+                    err = "응답 없음 (GPU 노트북의 UDP 서버, 같은 공유기인지 확인)" if isinstance(exc, InferenceTimeout) else str(exc)
+                    self.state = dict(self.state, ok=False, round_ms=None, error=err, at=time.time())
+            self.wake.wait(self.EVERY_S)
+            self.wake.clear()
+
+
+UDP_LINK = UdpLink()
+
+
+def infer_link_status() -> dict:
+    cfg = infer_link()
+    out = {"transport": cfg["transport"], "udp_server": cfg["udp_server"], "udp_key_file": cfg["udp_key_file"]}
+    if cfg["transport"] == "udp":
+        out["udp"] = UDP_LINK.state
+    return out
+
+
 def remote_eval_settings(local_model: Path, gpu_model: str, extra_args: list, async_env: dict, opts: dict, body: dict) -> dict:
     """Control PC: the inference settings for the GPU laptop's server, and the async engine (always on:
     "sync" = take the next chunk only when the last one is used up)."""
@@ -1792,6 +1909,11 @@ def remote_eval_settings(local_model: Path, gpu_model: str, extra_args: list, as
         env = {"OMX_ASYNC": "1", "OMX_ASYNC_CHUNK": str(chunk), "OMX_ASYNC_THRESHOLD": f"{threshold:.2f}",
                "OMX_ASYNC_AGG": "latest_only", "OMX_FPS": "30", "OMX_RTC": "0"}
     env.update(OMX_REMOTE_URL=remote.infer_url(), OMX_REMOTE_MODEL=gpu_model, OMX_REMOTE_OVERRIDES=json.dumps(overrides))
+    link = infer_link()
+    if link["transport"] == "udp":
+        check_udp(link["udp_server"], link["udp_key_file"])
+        env.update(OMX_REMOTE_URL=f"udp://{link['udp_server']}",
+                   OMX_UDP_KEY=str(Path(link["udp_key_file"]).expanduser()))
     return env
 
 
@@ -2244,6 +2366,7 @@ def start_eval(body: dict) -> dict:
         async_env = remote_eval_settings(local_model, run["model_path"], extra_args, async_env, opts, body)
         extra_args = [a for a in extra_args if a.startswith("--dataset.")] + ["--policy.device=cpu"]
         opts["remote_inference"] = remote.HOST
+        opts["transport"] = infer_link()["transport"]
     home = None
     if omx_home.eval_enabled():  # first move to the model's home pose (median of its training data's first frames)
         try:
@@ -2704,7 +2827,7 @@ class Handler(BaseHTTPRequestHandler):
                 "data_home": str(DATA_HOME),
                 "role": "control" if CONTROL else "gpu",
                 "sync": sync_status() if CONTROL else None,
-                "gpu_link": remote.TUNNEL.status() if CONTROL else None,
+                "gpu_link": dict(remote.TUNNEL.status(), infer=infer_link_status()) if CONTROL else None,
                 "hf_user": UPLOADER.hf_login(),
                 "upload": UPLOADER.status(),
             })
@@ -2913,7 +3036,7 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(raw or b"{}")
         try:
             mqtt = body.get("source") == "mqtt"  # a control-tower command (the MQTT worker on this PC)
-            if mqtt and self.path in ("/api/teleop", "/api/record", "/api/armed"):
+            if mqtt and self.path in ("/api/teleop", "/api/record", "/api/armed", "/api/infer_link"):
                 raise RuntimeError("관제 명령으로는 평가 시작만 할 수 있습니다. armed는 패널 화면에서 사람이 켭니다.")
             if mqtt and self.path == "/api/eval/start" and not ARMED["on"]:
                 raise RuntimeError("armed가 꺼져 있어 관제 명령을 받지 않습니다. 패널 화면에서 사람이 켜야 합니다.")
@@ -2954,6 +3077,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(set_armed(bool(body.get("on"))))
             elif self.path == "/api/cam_refs/save":
                 self._json(save_view_refs())
+            elif self.path == "/api/infer_link" and CONTROL:
+                self._json(save_infer_link(body))
             elif self.path == "/api/start_pose/save":
                 self._json(save_start_pose(body.get("kind", "start")))
             elif self.path == "/api/eval/start":
@@ -3109,6 +3234,7 @@ def main() -> None:
     server.daemon_threads = True
     if CONTROL:
         remote.TUNNEL.start()
+        UDP_LINK.start()
         threading.Thread(target=sync_loop, daemon=True).start()
         threading.Thread(target=close_watch, daemon=True).start()
         print(f"[omx] control PC: training and inference on {remote.HOST} (SSH tunnel)", flush=True)

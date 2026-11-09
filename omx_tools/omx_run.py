@@ -24,7 +24,7 @@ Signals: SIGUSR1 즉시 중단 (evaluation: land now), SIGUSR2 비상 정지 (ho
 SIGINT stop (a second SIGINT or SIGTERM: stop at once).
 
 Environment (set by the panel): OMX_REMOTE_URL / OMX_REMOTE_MODEL / OMX_REMOTE_OVERRIDES (policy on the
-GPU laptop), OMX_ASYNC* / OMX_RTC* (omx_async.py), OMX_FILTER_ALPHA / OMX_FILTER_GRIPPER (output filter),
+GPU laptop: http:// through the SSH tunnel, or udp://host:port with OMX_UDP_KEY), OMX_ASYNC* / OMX_RTC* (omx_async.py), OMX_FILTER_ALPHA / OMX_FILTER_GRIPPER (output filter),
 OMX_RESET_HOME=1 (return to the start pose in the reset period), OMX_TORCH_THREADS.
 """
 
@@ -185,12 +185,22 @@ def _stop_now() -> None:
     EVENTS["exit_early"] = True
 
 
+LAND_LOCK = threading.Lock()  # one safe stop at a time: 즉시 중단's thread and the run's own end could overlap
+
+
+def _disconnect(robot) -> None:
+    """Safe stop (patched by omx_safe_start: soft landing first) unless another thread already did it."""
+    with LAND_LOCK:
+        if robot.is_connected:
+            robot.disconnect()
+
+
 def _land_now() -> None:
     robot = ABORT["robot"]
     if robot is not None and robot.is_connected:
         _say("[omx] abort: returning the follower now")
         try:
-            robot.disconnect()  # patched by omx_safe_start: soft landing first
+            _disconnect(robot)
         except Exception as exc:
             _say(f"[omx] abort: landing failed ({exc})")
 
@@ -322,9 +332,14 @@ class Policy:
             _say(f"[omx] torch CPU threads: {torch.get_num_threads()}")
         t = time.perf_counter()
         if os.environ.get("OMX_REMOTE_URL"):
-            self.backend = omx_infer.RemoteClient(os.environ["OMX_REMOTE_URL"], os.environ["OMX_REMOTE_MODEL"],
-                                                  json.loads(os.environ.get("OMX_REMOTE_OVERRIDES") or "{}"))
-            _say(f"[omx] async: 원격 추론: {os.environ['OMX_REMOTE_URL']} · 모델 {os.environ['OMX_REMOTE_MODEL']}")
+            url, model = os.environ["OMX_REMOTE_URL"], os.environ["OMX_REMOTE_MODEL"]
+            overrides = json.loads(os.environ.get("OMX_REMOTE_OVERRIDES") or "{}")
+            if url.startswith("udp://"):  # the panel's transport setting: UDP straight to the GPU laptop
+                self.backend = omx_infer.UdpRemoteClient(url[len("udp://"):], os.environ["OMX_UDP_KEY"], model, overrides,
+                                                         float(os.environ.get("OMX_UDP_TIMEOUT") or 1.5))
+            else:
+                self.backend = omx_infer.RemoteClient(url, model, overrides)
+            _say(f"[omx] async: 원격 추론: {url} · 모델 {model}")
             _say("[omx] remote: GPU 노트북에서 모델을 불러옵니다 (처음엔 SmolVLA 10~30초)")
             info = self.backend.load()
             _say(f"[omx] remote: 모델 준비 완료 ({info.get('type')}, GPU 불러오기 {info.get('load_ms', 0):.0f}ms, "
@@ -781,8 +796,7 @@ def run_teleop(cfg: RunConfig, robot, teleop) -> None:
                 _say(f"Teleop loop time: {ms:.2f}ms ({1000 / ms:.0f} Hz)")
                 last, n, spent = time.perf_counter(), 0, 0.0
     finally:
-        if robot.is_connected:
-            robot.disconnect()  # safe stop (omx_safe_start)
+        _disconnect(robot)  # safe stop (omx_safe_start)
         if teleop.is_connected:
             teleop.disconnect()
 
@@ -829,8 +843,7 @@ def run(cfg: RunConfig) -> None:
     finally:
         logging.info("Stop recording")
         dataset.finalize()
-        if robot.is_connected:
-            robot.disconnect()  # safe stop; after 비상 정지 it waits here for [홈 위치로 이동]
+        _disconnect(robot)  # safe stop; after 비상 정지 it waits here for [홈 위치로 이동]
         if teleop is not None and teleop.is_connected:
             teleop.disconnect()
         if cfg.dataset.push_to_hub and dataset.num_episodes > 0:

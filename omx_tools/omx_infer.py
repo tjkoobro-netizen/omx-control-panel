@@ -352,6 +352,69 @@ class RemoteClient:
         return (torch.tensor(out["actions"], dtype=torch.float32), torch.tensor(out["original"], dtype=torch.float32))
 
 
+def udp_peer(server: str) -> tuple[str, int]:
+    """ "host:port" of the GPU laptop's UDP inference server (an IP on the same router)."""
+    host, sep, port = server.strip().rpartition(":")
+    if not sep or not host or not port.isdigit() or not 0 < int(port) < 65536:
+        raise ValueError(f"UDP 서버 주소는 '주소:포트' 형식이어야 합니다 ({server!r})")
+    return host, int(port)
+
+
+def read_udp_key(path: str) -> bytes:
+    """Shared key file (hex, owner-only); never in a repository."""
+    import stat
+
+    p = Path(path).expanduser()
+    if p.stat().st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        raise ValueError(f"{p} 는 본인만 읽을 수 있어야 합니다 (chmod 600)")
+    return bytes.fromhex(p.read_text().strip())
+
+
+class UdpRemoteClient(RemoteClient):
+    """The same calls as RemoteClient over UDP (wire RPI1, infer_link) straight to the GPU laptop on the same
+    router: no SSH tunnel, no TCP. A reply that does not come in time is not waited for: the newest observation
+    is sent again under a new request id (ATTEMPTS in all), then the run stops with an error."""
+
+    ATTEMPTS = 3
+
+    def __init__(self, server: str, key_file: str, model: str, overrides: dict | None = None, timeout: float = 1.5):
+        from infer_link.client import InferenceClient
+
+        super().__init__("http://127.0.0.1:1", model, overrides)
+        self.server, self.infer_timeout = server, timeout
+        self.client = InferenceClient(udp_peer(server), read_udp_key(key_file))
+        self.timeouts = 0  # attempts without a reply in time (each one re-sent)
+
+    def load(self) -> dict:
+        out = self.client.load(self.model, self.overrides)
+        self.image_size = out.get("image_size")
+        self.n_obs = int(out.get("n_obs") or 1)
+        self.rtc_capable = out.get("type") in ("smolvla", "pi0", "pi05")
+        return out
+
+    def infer(self, hist: list, task, robot_type, chunk: int, rtc_delay: int = 0, rtc_left=None):
+        import torch
+        from infer_link.client import InferenceTimeout
+
+        items, blobs = pack_observations(hist[-self.n_obs:], size=self.image_size)
+        header = {"model": self.model, "overrides": self.overrides, "task": task, "robot_type": robot_type,
+                  "obs": items, "chunk": chunk,
+                  "rtc": {"delay": rtc_delay, "left": rtc_left.tolist() if rtc_left is not None else None}}
+        data = b"".join(blobs)  # the items' [offset, length] already point into the joined blobs
+        for attempt in range(self.ATTEMPTS):
+            try:
+                out = self.client.infer(header, data, timeout=self.infer_timeout)
+                break
+            except InferenceTimeout:
+                self.timeouts += 1
+                if attempt == self.ATTEMPTS - 1:
+                    raise RuntimeError(f"UDP 추론 응답 없음 ({self.ATTEMPTS}번, 각 {self.infer_timeout:g}초): "
+                                       f"udp://{self.server} 와 GPU 노트북의 UDP 서버를 확인하세요") from None
+        self.net.append({"round_ms": self.client.last["round_ms"], "infer_ms": out.get("infer_ms"),
+                         "bytes": len(data), "timeouts": self.timeouts})
+        return (torch.tensor(out["actions"], dtype=torch.float32), torch.tensor(out["original"], dtype=torch.float32))
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
