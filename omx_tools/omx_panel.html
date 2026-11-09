@@ -163,6 +163,9 @@ figure { margin: 0; display: grid; gap: 6px; min-width: 0; }
 .align-cams { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
 .align-cam { display: grid; gap: 2px; font-size: 12.5px; line-height: 1.5; min-width: 0; }
 .align-cam .num { font: 600 12.5px var(--mono); }
+.align-pts { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.align-pt { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; }
+.align-pt i { width: 11px; height: 11px; border-radius: 50%; border: 2px solid #000; display: inline-block; }
 .align-cam .g { color: var(--ok); } .align-cam .y { color: var(--warn); } .align-cam .r { color: var(--bad); }
 figcaption { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 12.5px; color: var(--muted); }
 figcaption b { color: var(--fg); font-weight: 650; }
@@ -485,7 +488,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.9.0</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.9.1</span></div>
       </div>
     </div>
     <div class="status">
@@ -565,12 +568,12 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
             <select id="alignRepo"></select>
           </label>
           <label class="f" style="flex:1 1 160px">윤곽 진하기
-            <input type="range" id="alignOpacity" min="0" max="100" value="80" aria-label="학습 화면 윤곽 진하기">
+            <input type="range" id="alignOpacity" min="0" max="100" value="90" aria-label="학습 화면 윤곽 진하기">
           </label>
         </div>
         <div class="align-cams" id="alignCams"></div>
         <p class="meta-line" style="margin:0" id="alignResult">카메라를 켜고 기준을 고르면 front 카메라 화면 위에 학습 화면의 윤곽(빨간 선)이 겹쳐 보입니다.</p>
-        <p class="muted" style="margin:0">노란 화살표는 지금 장면이 학습 화면에서 밀린 방향과 크기를 5배로 보여 줍니다. 화살표가 짧아지도록 안내대로 카메라를 아주 조금씩 움직이세요. 목표는 모서리 최대 3px 이하(초록)이고, 8px 이하는 노랑입니다. 맞춘 뒤에는 카메라를 테이프나 거치대로 고정하세요.</p>
+        <p class="muted" style="margin:0">윤곽은 학습 화면의 것입니다. 긴 직선(선반 턱, 책상·테이프 모서리)은 하늘색 굵은 선, 나머지는 빨간 선입니다. 지금 화면의 같은 선이 이 선 위에 겹치면 맞은 것입니다. 중심과 네 모서리를 색으로 나눠 보여 줍니다(흰 중심, 빨강 왼쪽 위, 파랑 오른쪽 위, 초록 왼쪽 아래, 주황 오른쪽 아래). 십자는 학습 때 그 점의 자리, 동그라미는 지금 그 점이 보이는 자리, 화살표는 밀린 방향과 크기를 5배로 키운 것입니다. 화살표가 짧아지고 동그라미가 십자 가운데로 들어오도록 카메라를 아주 조금씩 움직이세요. 목표는 모서리 최대 3px 이하(초록)이고, 8px 이하는 노랑입니다. 맞춘 뒤에는 카메라를 테이프나 거치대로 고정하세요.</p>
         <div class="row"><button type="button" id="alignSaveRefs" title="연결상태 점검이 카메라 위치를 비교할 기준 사진을 지금 화면으로 바꿉니다 (로봇 구성 저장과 같은 기준)">지금 화면을 카메라 점검 기준으로 저장</button></div>
       </details>
     </section>
@@ -3385,6 +3388,8 @@ armed($("peDelete"), "한 번 더 = 지우기", async () => {
 
 // ---- Camera alignment (collect tab): the fixed cameras against the training view of a model or a dataset ----
 const align = { timer: null, busy: false, stats: {} };
+// the five points the server measures (same order): centre and the four corners, each with its own colour
+const ALIGN_PTS = [["중심", "#ffffff"], ["왼쪽 위", "#ff3b30"], ["오른쪽 위", "#2f8cff"], ["왼쪽 아래", "#34c759"], ["오른쪽 아래", "#ff9f0a"]];
 const alignCams = () => CAMS.map(c => c.name).filter(n => !n.startsWith("wrist"));
 function alignQuery(cam) {
   const v = $("alignRepo").value;
@@ -3412,7 +3417,11 @@ function updateGhost() {
     if (!box) continue;
     let ghost = box.querySelector("img.ghost"), svg = box.querySelector("svg.align-arrows");
     if (!on || name.startsWith("wrist")) { if (ghost) ghost.remove(); if (svg) svg.remove(); continue; }
-    if (!ghost) { ghost = document.createElement("img"); ghost.className = "ghost"; ghost.alt = "학습 화면 윤곽"; box.appendChild(ghost); }
+    if (!ghost) {
+      ghost = document.createElement("img"); ghost.className = "ghost"; ghost.alt = "학습 화면 윤곽";
+      ghost.onerror = () => { ghost.hidden = true; }; ghost.onload = () => { ghost.hidden = false; };  // no reference: the reason shows below
+      box.appendChild(ghost);
+    }
     const src = "/api/reference_edges?" + alignQuery(name);
     if (ghost.getAttribute("src") !== src) ghost.src = src;
     ghost.style.opacity = Number($("alignOpacity").value) / 100;
@@ -3422,10 +3431,19 @@ function updateGhost() {
       box.appendChild(svg);
     }
     const r = align.stats[name];
-    svg.innerHTML = r && r.ok ? r.vectors.map(([x, y, dx, dy]) => {
-      const x2 = x + dx * 5, y2 = y + dy * 5, a = Math.atan2(y2 - y, x2 - x), h = Math.min(12, Math.hypot(x2 - x, y2 - y) / 2);
-      return `<circle cx="${x}" cy="${y}" r="4" fill="#3ddc84"/><line x1="${x}" y1="${y}" x2="${x2}" y2="${y2}" stroke="#ffd400" stroke-width="3"/>`
-        + `<polygon fill="#ffd400" points="${x2},${y2} ${x2 - h * Math.cos(a - 0.45)},${y2 - h * Math.sin(a - 0.45)} ${x2 - h * Math.cos(a + 0.45)},${y2 - h * Math.sin(a + 0.45)}"/>`;
+    // per point: crosshair = where it was in the training view, dot = where it is now, arrow = the shift x5
+    svg.innerHTML = r && r.ok ? r.vectors.map(([x, y, dx, dy], i) => {
+      const [label, col] = ALIGN_PTS[i] || ["", "#ffd400"];
+      const x2 = x + dx * 5, y2 = y + dy * 5, len = Math.hypot(x2 - x, y2 - y), a = Math.atan2(y2 - y, x2 - x), h = Math.min(18, len / 2);
+      const head = `${x2},${y2} ${x2 - h * Math.cos(a - 0.5)},${y2 - h * Math.sin(a - 0.5)} ${x2 - h * Math.cos(a + 0.5)},${y2 - h * Math.sin(a + 0.5)}`;
+      const lx = Math.min(Math.max(x + (x < 320 ? 14 : -14), 6), 634), ly = y + (y < 240 ? 30 : -18), anchor = x < 320 ? "start" : x > 320 ? "end" : "middle";
+      return `<g stroke-linecap="round">`
+        + `<line x1="${x - 16}" y1="${y}" x2="${x + 16}" y2="${y}" stroke="#000" stroke-width="7"/><line x1="${x}" y1="${y - 16}" x2="${x}" y2="${y + 16}" stroke="#000" stroke-width="7"/>`
+        + `<line x1="${x - 16}" y1="${y}" x2="${x + 16}" y2="${y}" stroke="${col}" stroke-width="4"/><line x1="${x}" y1="${y - 16}" x2="${x}" y2="${y + 16}" stroke="${col}" stroke-width="4"/>`
+        + (len > 2 ? `<line x1="${x}" y1="${y}" x2="${x2}" y2="${y2}" stroke="#000" stroke-width="10"/><polygon points="${head}" fill="#000" stroke="#000" stroke-width="5" stroke-linejoin="round"/>`
+          + `<line x1="${x}" y1="${y}" x2="${x2}" y2="${y2}" stroke="${col}" stroke-width="6"/><polygon points="${head}" fill="${col}"/>` : "")
+        + `<circle cx="${x + dx}" cy="${y + dy}" r="7" fill="${col}" stroke="#000" stroke-width="3"/>`
+        + `<text x="${lx}" y="${ly}" text-anchor="${anchor}" font-size="22" font-weight="800" fill="${col}" stroke="#000" stroke-width="5" paint-order="stroke">${label} ${Math.hypot(dx, dy).toFixed(1)}px</text></g>`;
     }).join("") : "";
   }
 }
@@ -3459,7 +3477,9 @@ async function checkAlign() {
     const r = align.stats[cam] || {};
     if (r.error || !r.ok) return `<div class="align-cam"><b>${cam}</b><span class="r">${r.error || r.msg || "계산 중…"}</span></div>`;
     const cls = r.corner <= 3 ? "g" : r.corner <= 8 ? "y" : "r";
-    return `<div class="align-cam"><b>${cam}</b><span class="num"><span class="${cls}">모서리 최대 ${r.corner.toFixed(1)}px</span> · 중심 (${r.dx.toFixed(1)}, ${r.dy.toFixed(1)})px · 회전 ${r.rot.toFixed(2)}° · 크기 ${r.scale.toFixed(3)} · 일치점 ${r.inliers}${r.inliers < 40 ? ' <span class="y">(적음: 결과 불안정)</span>' : ""}</span><span>${alignHint(r)}</span></div>`;
+    const way = (dx, dy) => [Math.abs(dx) > 0.5 ? `${dx > 0 ? "오른쪽" : "왼쪽"} ${Math.abs(dx).toFixed(1)}` : "", Math.abs(dy) > 0.5 ? `${dy > 0 ? "아래" : "위"} ${Math.abs(dy).toFixed(1)}` : ""].filter(Boolean).join(", ") || "맞음";
+    const pts = r.vectors.map(([, , dx, dy], i) => `<span class="align-pt"><i style="background:${(ALIGN_PTS[i] || [])[1]}"></i>${(ALIGN_PTS[i] || [""])[0]} ${way(dx, dy)}${Math.hypot(dx, dy) > 0.5 ? "px" : ""}</span>`).join("");
+    return `<div class="align-cam"><b>${cam}</b><span class="num"><span class="${cls}">모서리 최대 ${r.corner.toFixed(1)}px</span> · 중심 (${r.dx.toFixed(1)}, ${r.dy.toFixed(1)})px · 회전 ${r.rot.toFixed(2)}° · 크기 ${r.scale.toFixed(3)} · 일치점 ${r.inliers}${r.inliers < 40 ? ' <span class="y">(적음: 결과 불안정)</span>' : ""}</span><span class="align-pts">${pts}</span><span>${alignHint(r)}</span></div>`;
   }).join("");
   updateGhost();
 }

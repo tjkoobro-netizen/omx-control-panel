@@ -1067,6 +1067,7 @@ class Preview:
         self.lock = threading.Lock()
         self.cams: dict[str, OpenCVCamera] = {}
         self.frames: dict[str, bytes] = {}
+        self.raw: dict[str, bytes] = {}  # the frame before the marker check drew on it (camera alignment)
         self.brightness: dict[str, float] = {}
         self.running = False
         self.thread: threading.Thread | None = None
@@ -1131,11 +1132,16 @@ class Preview:
                     frame = cam.async_read(timeout_ms=500)
                 except Exception:
                     continue
+                raw = None
                 if name == "front" and (self.marker_show or self.marker_target is not None):
                     try:
-                        frame = self._mark_front(frame)
+                        raw, frame = frame, self._mark_front(frame)
                     except Exception:
                         pass  # the check is optional: never stop the preview over it
+                if raw is not None:
+                    self.raw[name] = cv2.imencode(".jpg", cv2.cvtColor(raw, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 75])[1].tobytes()
+                else:
+                    self.raw.pop(name, None)
                 ok, jpg = cv2.imencode(".jpg", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR),
                                        [cv2.IMWRITE_JPEG_QUALITY, 75])
                 if ok:
@@ -1155,7 +1161,7 @@ class Preview:
                     cam.disconnect()
                 except Exception:
                     pass
-            self.cams, self.frames, self.brightness = {}, {}, {}
+            self.cams, self.frames, self.raw, self.brightness = {}, {}, {}, {}
 
 
 def output_lines(proc: subprocess.Popen, grace_s: float = 2.0):
@@ -2411,16 +2417,28 @@ REF_CACHE: dict = {}  # (repo, model, cam) -> {"jpg", "kp", "des", "edges"}
 ALIGN_PTS = ((320, 240), (40, 40), (600, 40), (40, 440), (600, 440))  # centre and corners of a 640x480 view
 
 
-def real_episodes(root: Path) -> list[int] | None:
-    """The real episodes of a real + sim mix (meta/omx_mix.json "real_episodes": "0..28" or a list), else None."""
+def real_episodes(root: Path, episodes: list[int]) -> list[int]:
+    """The real (recorded) ones among these episodes. A real + sim mix says which are real (meta/omx_mix.json
+    "real_episodes": "0..28" or a list) or which are sim (the episode keys of meta/omx_sim_physics.json); a
+    name with "sim" in it and neither file is refused: its sim views are renders, not this room."""
     try:
         r = json.loads((root / "meta/omx_mix.json").read_text())["real_episodes"]
+        if isinstance(r, list):
+            real = {int(x) for x in r}
+        else:
+            a, _, b = str(r).partition("..")
+            real = set(range(int(a), int(b or a) + 1))
+        return [e for e in episodes if e in real]
     except (OSError, ValueError, KeyError):
-        return None
-    if isinstance(r, list):
-        return [int(x) for x in r]
-    a, _, b = str(r).partition("..")
-    return list(range(int(a), int(b or a) + 1))
+        pass
+    try:
+        sim = {int(k) for k in json.loads((root / "meta/omx_sim_physics.json").read_text()) if str(k).isdigit()}
+        return [e for e in episodes if e not in sim]
+    except (OSError, ValueError):
+        pass
+    if "sim" in root.name.lower():
+        raise RuntimeError(f"{root.name}: 실물 에피소드를 알 수 없어(가상 데이터가 섞였을 수 있음) 기준 화면을 만들지 않습니다. 실물 녹화 데이터셋을 기준으로 고르세요.")
+    return episodes
 
 
 def reference_frame(repo: str, cam: str = "front", model: str = "") -> bytes:
@@ -2436,20 +2454,19 @@ def reference_frame(repo: str, cam: str = "front", model: str = "") -> bytes:
         repo, episodes = d["repo_id"], d.get("episodes")
     root = dataset_dir(repo)
     files = sorted((root / "meta/episodes").glob("*/*.parquet"))
-    stamp = int(max(f.stat().st_mtime for f in files))
-    cache = LOG_DIR / "ref_cache" / f"{repo.replace('/', '__')}__{cam}__{len(episodes or [])}_{stamp}.jpg"
-    if cache.exists():
-        return cache.read_bytes()
-    info = json.loads((root / "meta/info.json").read_text())
     rows = pd.concat([pd.read_parquet(f) for f in files]).sort_values("episode_index")
     if episodes is not None:
         rows = rows[rows.episode_index.isin(episodes)]
-    real = real_episodes(root)
-    if real is not None:  # a real + sim mix: the sim episodes are rendered views, not this room
-        rows = rows[rows.episode_index.isin(real)]
+    rows = rows[rows.episode_index.isin(real_episodes(root, [int(e) for e in rows.episode_index]))]
     if not len(rows):
-        raise RuntimeError("기준 장면을 만들 에피소드가 없습니다.")
+        raise RuntimeError("기준 장면을 만들 실물 에피소드가 없습니다.")
     pick = sorted({int(round(k)) for k in np.linspace(0, len(rows) - 1, min(REF_EPISODES, len(rows)))})
+    used = "-".join(str(int(e)) for e in rows.iloc[pick].episode_index)
+    stamp = int(max(f.stat().st_mtime for f in files))
+    cache = LOG_DIR / "ref_cache" / f"{repo.replace('/', '__')}__{cam}__ep{used}_{stamp}.jpg"
+    if cache.exists():
+        return cache.read_bytes()
+    info = json.loads((root / "meta/info.json").read_text())
     key, frames = f"observation.images.{cam}", []
     for _, row in rows.iloc[pick].iterrows():
         path = root / info["video_path"].format(video_key=key, chunk_index=int(row[f"videos/{key}/chunk_index"]),
@@ -2492,8 +2509,19 @@ def reference_entry(repo: str, model: str, cam: str) -> dict:
         gray = cv2.imdecode(np.frombuffer(body, np.uint8), cv2.IMREAD_GRAYSCALE)
         kp, des = cv2.ORB_create(3000).detectAndCompute(gray, None)
         edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 60, 140)
+        n, lab, st, _ = cv2.connectedComponentsWithStats(edges, connectivity=8)
+        keep = np.isin(lab, [i for i in range(1, n) if st[i, cv2.CC_STAT_AREA] >= 40])  # drop specks: outlines only
+        line = cv2.dilate(keep.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0  # 3 px wide
+        halo = cv2.dilate(line.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
         rgba = np.zeros(gray.shape + (4,), np.uint8)
-        rgba[edges > 0] = (40, 40, 255, 255)  # BGRA: red lines, the rest transparent
+        rgba[halo] = (0, 0, 0, 200)  # BGRA: a dark rim so the red reads on white shelves too
+        rgba[line] = (30, 30, 255, 255)
+        # long straight edges (shelf ledges, table and tape edges): thick cyan, the easiest to line up by eye
+        segs = cv2.HoughLinesP(keep.astype(np.uint8) * 255, 1, np.pi / 180, 60, minLineLength=70, maxLineGap=6)
+        for x1, y1, x2, y2 in (segs[:, 0] if segs is not None else []):
+            cv2.line(rgba, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 0, 230), 9, cv2.LINE_AA)
+        for x1, y1, x2, y2 in (segs[:, 0] if segs is not None else []):
+            cv2.line(rgba, (int(x1), int(y1)), (int(x2), int(y2)), (255, 230, 0, 255), 5, cv2.LINE_AA)
         REF_CACHE[k] = {"jpg": body, "kp": kp, "des": des, "edges": cv2.imencode(".png", rgba)[1].tobytes()}
     return REF_CACHE[k]
 
@@ -2503,7 +2531,7 @@ def alignment(repo: str, model: str = "", cam: str = "front") -> dict:
     rotation, scale, largest corner shift (px), the shift of the centre and the four corners, matches kept."""
     import numpy as np
 
-    live = PREVIEW.frames.get(cam)
+    live = PREVIEW.raw.get(cam) or PREVIEW.frames.get(cam)
     if not live:
         raise RuntimeError("카메라를 먼저 켜세요.")
     ref = reference_entry(repo, model, cam)
@@ -2534,9 +2562,10 @@ def save_view_refs() -> dict:
 
     saved = []
     for name in CAMERAS:
-        if name.startswith("wrist") or not PREVIEW.frames.get(name):
+        live = PREVIEW.raw.get(name) or PREVIEW.frames.get(name)
+        if name.startswith("wrist") or not live:
             continue
-        gray = cv2.imdecode(np.frombuffer(PREVIEW.frames[name], np.uint8), cv2.IMREAD_GRAYSCALE)
+        gray = cv2.imdecode(np.frombuffer(live, np.uint8), cv2.IMREAD_GRAYSCALE)
         if gray.mean() < camauto.DARK:
             continue
         CAM_REFS.mkdir(parents=True, exist_ok=True)
