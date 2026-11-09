@@ -480,7 +480,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.8.0</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.8.1</span></div>
       </div>
     </div>
     <div class="status">
@@ -1004,6 +1004,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         </div>
       <div class="opt" id="evSmoothRow">
         <input type="checkbox" id="evSmooth"><label for="evSmooth"><b>부드럽게 실행</b> (ACT 전용, 시간 앙상블: 매 스텝 예측해 겹치는 동작을 평균 · 3초마다 튀는 동작이 줄어듦 · 스텝당 약 10ms 더 걸림 · 비동기 실행과 함께 쓰지 않음)</label>
+        <p class="muted" id="evSmoothRemote" style="grid-column:2;margin:4px 0 0" hidden>이 PC는 원격 추론(제어 PC)이라 쓸 수 없어요. 매 스텝 GPU 노트북까지 왕복해야 해서 30Hz를 맞추지 못해요. 대신 <b>비동기 실행</b>을 켜고 <b>겹치는 구간 합치기</b>를 <b>가중 평균</b>으로 두면 묶음이 바뀔 때 겹치는 동작을 섞어서 이어 줘요. <b>출력 부드럽게(필터)</b>도 함께 쓸 수 있어요.</p>
       </div>
       <div class="opt"><input type="checkbox" id="evAsync"><label for="evAsync"><b>비동기 실행</b> (다음 동작을 계산하는 동안에도 로봇이 남은 동작을 계속 실행) <button type="button" class="qbtn help-open" data-help="ev-async" title="비동기 실행 설명" aria-label="비동기 실행 설명">?</button></label></div>
       <div class="fields" id="evAsyncFields" hidden>
@@ -2037,6 +2038,7 @@ function render(s) {
   voiceCue(job);
   renderError(job);
   renderArmed(s);
+  if (s.role !== render.role) { render.role = s.role; try { updateEvalOptions(); } catch (e) { /* eval tab not ready */ } }
   if (job.info?.refused && job.info.refused !== lastRefused) { lastRefused = job.info.refused; if (job.running === false) toast(lastRefused, "err"); }
   const teleopRunning = running && job.kind === "teleop";
   const recRunning = running && job.kind === "record";
@@ -2745,7 +2747,9 @@ function showEvalModel() {
 function updateEvalOptions() {
   const p = ev.policy, asyncOn = $("evAsync").checked;
   $("evSmoothRow").hidden = p !== "act";
-  $("evSmooth").disabled = asyncOn;
+  const remote = !!state && state.role === "control";  // inference on the GPU laptop: no per-step prediction
+  $("evSmooth").disabled = asyncOn || remote;
+  $("evSmoothRemote").hidden = !remote;
   $("evAsyncFields").hidden = !asyncOn;
   $("evRtcRow").hidden = !(asyncOn && p === "smolvla");
   $("evRtcFields").hidden = $("evRtcRow").hidden || !$("evRtc").checked;
@@ -2781,7 +2785,7 @@ $("evStart").addEventListener("click", async () => {
     confirm: true, model_path: $("evCkpt").value || $("evModel").value, task: $("evTask").value,
     target_marker: targetMarker("ev"),
     episodes: Number($("evEpisodes").value), episode_s: Number($("evEpisodeS").value), reset_s: Number($("evResetS").value),
-    viewer_ip: viewerIp(), smooth: $("evSmooth").checked, threads: Number($("evThreads").value),
+    viewer_ip: viewerIp(), smooth: $("evSmooth").checked && !$("evSmooth").disabled, threads: Number($("evThreads").value),
     async_mode: $("evAsync").checked, actions_per_chunk: Number($("evChunk").value), chunk_size_threshold: Number($("evThreshold").value),
     output_filter: $("evFilter").checked ? $("evFilterLevel").value : "", filter_gripper: $("evFilterGripper").checked,
     aggregate_fn: $("evAgg").value, rtc: $("evRtc").checked, rtc_horizon: Number($("evRtcHorizon").value), rtc_weight: Number($("evRtcWeight").value),
