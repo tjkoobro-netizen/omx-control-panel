@@ -159,6 +159,11 @@ figure { margin: 0; display: grid; gap: 6px; min-width: 0; }
 .frame { position: relative; aspect-ratio: 4 / 3; max-width: 100%; background: var(--code-bg); border-radius: 10px; overflow: hidden; display: grid; place-items: center; color: #6f8197; font-size: 12.5px; text-align: center; padding: 12px; border: 1px solid #0f1a28; }
 .frame img, .frame video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: block; background: var(--code-bg); }
 .frame img.ghost { background: transparent; pointer-events: none; }
+.frame svg.align-arrows { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.align-cams { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.align-cam { display: grid; gap: 2px; font-size: 12.5px; line-height: 1.5; min-width: 0; }
+.align-cam .num { font: 600 12.5px var(--mono); }
+.align-cam .g { color: var(--ok); } .align-cam .y { color: var(--warn); } .align-cam .r { color: var(--bad); }
 figcaption { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 12.5px; color: var(--muted); }
 figcaption b { color: var(--fg); font-weight: 650; }
 details.align { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; display: grid; gap: 10px; background: var(--surface-2); }
@@ -480,7 +485,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.8.1</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.9.0</span></div>
       </div>
     </div>
     <div class="status">
@@ -556,15 +561,17 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       <details class="align" id="alignBox">
         <summary>카메라 위치 맞추기 (학습 때 화면과 겹쳐 보기)</summary>
         <div class="row">
-          <label class="f" style="flex:1 1 220px">기준 장면 (이 데이터의 첫 화면)
+          <label class="f" style="flex:1 1 260px">기준 (모델이 학습한 실물 화면, 또는 데이터셋 첫 화면)
             <select id="alignRepo"></select>
           </label>
-          <label class="f" style="flex:1 1 160px">겹침 정도
-            <input type="range" id="alignOpacity" min="0" max="100" value="50" aria-label="기준 장면 투명도">
+          <label class="f" style="flex:1 1 160px">윤곽 진하기
+            <input type="range" id="alignOpacity" min="0" max="100" value="80" aria-label="학습 화면 윤곽 진하기">
           </label>
         </div>
-        <p class="meta-line" style="margin:0" id="alignResult">카메라를 켜고 기준 장면을 고르면 front 화면 위에 반투명으로 겹쳐 보입니다.</p>
-        <p class="muted" style="margin:0">기준 사진과 실제 화면의 책상 모서리, 로봇 베이스, 접시가 겹치도록 front 카메라를 움직이세요. 모델은 학습 때와 같은 구도에서만 제대로 동작합니다. 맞춘 뒤에는 카메라를 테이프나 거치대로 고정하세요.</p>
+        <div class="align-cams" id="alignCams"></div>
+        <p class="meta-line" style="margin:0" id="alignResult">카메라를 켜고 기준을 고르면 front 카메라 화면 위에 학습 화면의 윤곽(빨간 선)이 겹쳐 보입니다.</p>
+        <p class="muted" style="margin:0">노란 화살표는 지금 장면이 학습 화면에서 밀린 방향과 크기를 5배로 보여 줍니다. 화살표가 짧아지도록 안내대로 카메라를 아주 조금씩 움직이세요. 목표는 모서리 최대 3px 이하(초록)이고, 8px 이하는 노랑입니다. 맞춘 뒤에는 카메라를 테이프나 거치대로 고정하세요.</p>
+        <div class="row"><button type="button" id="alignSaveRefs" title="연결상태 점검이 카메라 위치를 비교할 기준 사진을 지금 화면으로 바꿉니다 (로봇 구성 저장과 같은 기준)">지금 화면을 카메라 점검 기준으로 저장</button></div>
       </details>
     </section>
 
@@ -1244,7 +1251,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <li><b>화면 고정</b>(기본 켜짐): 아래로 스크롤해도 카메라 칸이 왼쪽 위에 붙어 따라 내려옵니다. 녹화 버튼과 영상을 한 화면에서 보며 작업할 수 있습니다. 다시보기·로그를 볼 때 가리면 체크를 끄세요. 좁은 창(한 줄 배치)에서는 고정하지 않습니다.</li>
       </ul>
       <p class="tip">global 카메라에는 팔로워 전체와 물체 위치가 들어오고, 리더나 사람 손은 들어오지 않아야 합니다. 정해진 위치는 녹화와 실행 내내 바꾸지 않습니다.</p>
-      <p><b>카메라 위치 맞추기</b>: 카메라 칸 아래를 펼치고 기준 데이터(학습에 쓴 녹화)를 고르면, 그 첫 화면이 front 영상 위에 반투명으로 겹쳐 보입니다. 아래 문구가 "학습 때와 같은 위치입니다"가 될 때까지 카메라를 옮기세요. 카메라 위치가 바뀌면 모델은 처음 보는 장면으로 받아들여 성공률이 크게 떨어집니다.</p>
+      <p><b>카메라 위치 맞추기</b>: 카메라를 켜고 카메라 칸 아래를 펼친 뒤 기준을 고르세요. 기준은 <b>모델</b>(그 모델이 학습한 실물 에피소드 여러 개의 같은 순간 화면 중앙값)이나 <b>데이터셋</b>(첫 화면)입니다. 그러면 front 카메라들(손목 제외) 화면 위에 학습 화면의 윤곽이 빨간 선으로 겹치고, 노란 화살표가 지금 장면이 밀린 방향과 크기를 5배로 보여 줍니다. 숫자는 중심 이동, 회전, 크기, 모서리 최대 이동(px)입니다. 모서리 최대 3px 이하(초록)가 될 때까지 안내대로 카메라를 손으로 조금씩 옮기고 고정하세요. 영상을 소프트웨어로 보정하지는 않습니다. 카메라 위치가 바뀌면 모델은 처음 보는 장면으로 받아들여 성공률이 크게 떨어집니다. 맞춘 뒤 <b>지금 화면을 카메라 점검 기준으로 저장</b>을 누르면, 연결상태 점검이 이 화면을 기준으로 카메라를 비교합니다.</p>
     </section>
 
     <section id="h-teleop">
@@ -3376,56 +3383,101 @@ armed($("peDelete"), "한 번 더 = 지우기", async () => {
   await loadPresets(); $("presetDlg").close(); toast("평가 방식을 지웠습니다. 이미 한 평가 기록은 그대로입니다.", "ok");
 });
 
-// ---- Camera alignment overlay// ---- Camera alignment overlay (collect tab, front camera) ----
-const align = { timer: null };
+// ---- Camera alignment (collect tab): the fixed cameras against the training view of a model or a dataset ----
+const align = { timer: null, busy: false, stats: {} };
+const alignCams = () => CAMS.map(c => c.name).filter(n => !n.startsWith("wrist"));
+function alignQuery(cam) {
+  const v = $("alignRepo").value;
+  if (!v) return "";
+  return (v.startsWith("m:") ? "model=" : "repo=") + encodeURIComponent(v.slice(2)) + "&cam=" + encodeURIComponent(cam);
+}
 function fillAlignSelect(datasets) {
-  const opts = datasets.filter(d => d.kind !== "eval" && d.episodes > 0).map(d => `<option value="${d.repo_id}">${d.repo_id}</option>`);
-  const sig = opts.join("");
+  const esc = (t) => String(t ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const models = ev.models.map(r => `<option value="m:${esc(r.model_path)}">#${r.number} ${esc(r.display || r.id)}</option>`);
+  const sets = datasets.filter(d => d.kind !== "eval" && d.episodes > 0).map(d => `<option value="d:${esc(d.repo_id)}">${esc(d.repo_id)}</option>`);
+  const sig = models.join("") + "|" + sets.join("");
   if ($("alignRepo").dataset.sig === sig) return;
-  const cur = $("alignRepo").value || store.get("omx.alignRepo", "");
-  $("alignRepo").innerHTML = '<option value="">기준 장면 고르기</option>' + sig;
+  const cur = $("alignRepo").value || store.get("omx.alignRef", "");
+  $("alignRepo").innerHTML = '<option value="">기준 고르기</option>'
+    + (models.length ? `<optgroup label="모델의 학습 화면 (실물 에피소드 중앙값)">${models.join("")}</optgroup>` : "")
+    + (sets.length ? `<optgroup label="데이터셋 첫 화면">${sets.join("")}</optgroup>` : "");
   $("alignRepo").dataset.sig = sig;
-  if ([...$("alignRepo").options].some(o => o.value === cur)) $("alignRepo").value = cur;
+  if (cur && [...$("alignRepo").options].some(o => o.value === cur)) $("alignRepo").value = cur;
+  else if (models.length) $("alignRepo").value = $("alignRepo").querySelector("optgroup option").value;  // the newest model
 }
 function updateGhost() {
-  const box = $("frame-front"), repo = $("alignRepo").value, on = $("alignBox").open && repo && streamsOn;
-  let ghost = box.querySelector("img.ghost");
-  if (!on) { if (ghost) ghost.remove(); return; }
-  if (!ghost) { ghost = document.createElement("img"); ghost.className = "ghost"; ghost.alt = "기준 장면"; box.appendChild(ghost); }
-  const src = "/api/reference?repo=" + encodeURIComponent(repo) + "&cam=front";
-  if (ghost.getAttribute("src") !== src) ghost.src = src;
-  ghost.style.opacity = Number($("alignOpacity").value) / 100;
+  const on = $("alignBox").open && $("alignRepo").value && streamsOn;
+  for (const name of CAMS.map(c => c.name)) {
+    const box = $("frame-" + name);
+    if (!box) continue;
+    let ghost = box.querySelector("img.ghost"), svg = box.querySelector("svg.align-arrows");
+    if (!on || name.startsWith("wrist")) { if (ghost) ghost.remove(); if (svg) svg.remove(); continue; }
+    if (!ghost) { ghost = document.createElement("img"); ghost.className = "ghost"; ghost.alt = "학습 화면 윤곽"; box.appendChild(ghost); }
+    const src = "/api/reference_edges?" + alignQuery(name);
+    if (ghost.getAttribute("src") !== src) ghost.src = src;
+    ghost.style.opacity = Number($("alignOpacity").value) / 100;
+    if (!svg) {
+      svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+      svg.setAttribute("class", "align-arrows"); svg.setAttribute("viewBox", "0 0 640 480"); svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+      box.appendChild(svg);
+    }
+    const r = align.stats[name];
+    svg.innerHTML = r && r.ok ? r.vectors.map(([x, y, dx, dy]) => {
+      const x2 = x + dx * 5, y2 = y + dy * 5, a = Math.atan2(y2 - y, x2 - x), h = Math.min(12, Math.hypot(x2 - x, y2 - y) / 2);
+      return `<circle cx="${x}" cy="${y}" r="4" fill="#3ddc84"/><line x1="${x}" y1="${y}" x2="${x2}" y2="${y2}" stroke="#ffd400" stroke-width="3"/>`
+        + `<polygon fill="#ffd400" points="${x2},${y2} ${x2 - h * Math.cos(a - 0.45)},${y2 - h * Math.sin(a - 0.45)} ${x2 - h * Math.cos(a + 0.45)},${y2 - h * Math.sin(a + 0.45)}"/>`;
+    }).join("") : "";
+  }
+}
+// where the scene sits against the training view, said as the way the scene should come back
+function alignHint(r) {
+  const h = [];
+  if (Math.abs(r.dx) > 1) h.push(`장면이 ${r.dx > 0 ? "오른" : "왼"}쪽으로 ${Math.abs(r.dx).toFixed(1)}px 밀림 → ${r.dx > 0 ? "왼" : "오른"}쪽으로 돌아오게`);
+  if (Math.abs(r.dy) > 1) h.push(`장면이 ${r.dy > 0 ? "아래" : "위"}로 ${Math.abs(r.dy).toFixed(1)}px 밀림 → ${r.dy > 0 ? "위" : "아래"}로 돌아오게`);
+  if (Math.abs(r.rot) > 0.15) h.push(`장면이 ${r.rot > 0 ? "시계" : "반시계"} 방향으로 ${Math.abs(r.rot).toFixed(2)}° 돌아감 → ${r.rot > 0 ? "반시계" : "시계"} 방향으로 돌아오게`);
+  if (Math.abs(r.scale - 1) > 0.008) h.push(`장면이 ${((Math.abs(r.scale - 1)) * 100).toFixed(1)}% ${r.scale > 1 ? "커짐 → 카메라를 조금 멀리(높이)" : "작아짐 → 카메라를 조금 가까이(낮게)"}`);
+  return h.length ? h.join("<br>") : "잘 맞습니다";
 }
 async function checkAlign() {
-  const repo = $("alignRepo").value;
-  if (!$("alignBox").open || !repo || !(state && state.preview)) {
-    $("alignResult").textContent = !(state && state.preview) ? "카메라를 켜면 기준 장면과 비교합니다. (녹화·평가 중에는 계산하지 않습니다)" : "기준 장면을 고르세요.";
+  const ready = $("alignBox").open && $("alignRepo").value && state && state.preview;
+  if (!ready) {
+    $("alignCams").innerHTML = "";
+    $("alignResult").hidden = false;
+    $("alignResult").textContent = !(state && state.preview) ? "카메라를 켜면 학습 화면과 비교합니다. (녹화·평가 중에는 계산하지 않습니다)" : "기준을 고르세요.";
+    align.stats = {}; updateGhost();
     return;
   }
+  if (align.busy) return;
+  align.busy = true;
   try {
-    const r = await (await fetch("/api/align?repo=" + encodeURIComponent(repo))).json();
-    if (r.error || !r.ok) { $("alignResult").textContent = r.error || r.msg; return; }
-    if (r.match < 0.25) {  // too few consistent matches: the numbers would be noise
-      $("alignResult").textContent = `학습 때 화면과 많이 다릅니다 (일치도 ${Math.round(r.match * 100)}%). 겹쳐 보이는 기준 장면을 보며 카메라 위치와 방향을 크게 옮기세요.`;
-      $("alignResult").style.color = "var(--bad)";
-      return;
+    for (const cam of alignCams()) {
+      try { align.stats[cam] = await (await fetch("/api/align?" + alignQuery(cam))).json(); } catch (e) { align.stats[cam] = { error: "연결이 끊겼습니다." }; }
     }
-    const parts = [];
-    if (Math.abs(r.dx) >= 15) parts.push(`기준 장면이 ${r.dx > 0 ? "오른쪽" : "왼쪽"}으로 ${Math.abs(r.dx)}px 밀려 보임`);
-    if (Math.abs(r.dy) >= 15) parts.push(`${r.dy > 0 ? "아래" : "위"}로 ${Math.abs(r.dy)}px 밀려 보임`);
-    if (Math.abs(r.scale - 1) >= 0.04) parts.push(r.scale > 1 ? `지금이 ${Math.round((r.scale - 1) * 100)}% 더 가까움 (카메라를 멀리)` : `지금이 ${Math.round((1 - r.scale) * 100)}% 더 멂 (카메라를 가까이)`);
-    if (Math.abs(r.angle) >= 2) parts.push(`${Math.abs(r.angle)}° 돌아감`);
-    $("alignResult").textContent = r.aligned ? `✓ 학습 때와 같은 위치입니다 (일치도 ${Math.round(r.match * 100)}%)`
-      : `조정 필요: ${parts.join(", ") || "조금 더 맞추세요"} · 일치도 ${Math.round(r.match * 100)}%`;
-    $("alignResult").style.color = r.aligned ? "var(--ok)" : "";
-  } catch (e) { /* ignore */ }
-}
-$("alignRepo").addEventListener("change", () => { store.set("omx.alignRepo", $("alignRepo").value); updateGhost(); checkAlign(); });
-$("alignOpacity").addEventListener("input", updateGhost);
-$("alignBox").addEventListener("toggle", () => {
+  } finally { align.busy = false; }
+  $("alignResult").hidden = true;
+  $("alignCams").innerHTML = alignCams().map(cam => {
+    const r = align.stats[cam] || {};
+    if (r.error || !r.ok) return `<div class="align-cam"><b>${cam}</b><span class="r">${r.error || r.msg || "계산 중…"}</span></div>`;
+    const cls = r.corner <= 3 ? "g" : r.corner <= 8 ? "y" : "r";
+    return `<div class="align-cam"><b>${cam}</b><span class="num"><span class="${cls}">모서리 최대 ${r.corner.toFixed(1)}px</span> · 중심 (${r.dx.toFixed(1)}, ${r.dy.toFixed(1)})px · 회전 ${r.rot.toFixed(2)}° · 크기 ${r.scale.toFixed(3)} · 일치점 ${r.inliers}${r.inliers < 40 ? ' <span class="y">(적음: 결과 불안정)</span>' : ""}</span><span>${alignHint(r)}</span></div>`;
+  }).join("");
   updateGhost();
+}
+$("alignRepo").addEventListener("change", () => { store.set("omx.alignRef", $("alignRepo").value); align.stats = {}; updateGhost(); checkAlign(); });
+$("alignOpacity").addEventListener("input", updateGhost);
+$("alignSaveRefs").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/cam_refs/save", {});
+    toast(`카메라 점검 기준을 지금 화면으로 저장했습니다 (${r.saved.join(", ")}).`, "ok");
+  } catch (e) { toast(e.message, "err"); }
+});
+$("alignBox").addEventListener("toggle", () => {
   clearInterval(align.timer);
-  if ($("alignBox").open) { checkAlign(); align.timer = setInterval(checkAlign, 1500); }
+  if ($("alignBox").open) {
+    loadEvalModels().then(() => state && fillAlignSelect(state.datasets || []));
+    checkAlign(); align.timer = setInterval(checkAlign, 600);
+  } else { align.stats = {}; }
+  updateGhost();
 });
 
 // ---- Evaluation analysis report ----

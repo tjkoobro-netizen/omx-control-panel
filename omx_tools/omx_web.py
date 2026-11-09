@@ -2405,60 +2405,146 @@ def report_status(repo: str) -> dict:
             "dir": str(out), "files": files}
 
 
-def reference_frame(repo: str, cam: str = "front") -> bytes:
-    """First frame of the first episode of a dataset, as JPEG (for the camera alignment overlay)."""
+REF_TIME_S = 1.0  # the training view: 1 s into each episode (the first frames can still be dark)
+REF_EPISODES = 7  # median over this many episodes, spread over the dataset: arms and objects drop out
+REF_CACHE: dict = {}  # (repo, model, cam) -> {"jpg", "kp", "des", "edges"}
+ALIGN_PTS = ((320, 240), (40, 40), (600, 40), (40, 440), (600, 440))  # centre and corners of a 640x480 view
+
+
+def real_episodes(root: Path) -> list[int] | None:
+    """The real episodes of a real + sim mix (meta/omx_mix.json "real_episodes": "0..28" or a list), else None."""
+    try:
+        r = json.loads((root / "meta/omx_mix.json").read_text())["real_episodes"]
+    except (OSError, ValueError, KeyError):
+        return None
+    if isinstance(r, list):
+        return [int(x) for x in r]
+    a, _, b = str(r).partition("..")
+    return list(range(int(a), int(b or a) + 1))
+
+
+def reference_frame(repo: str, cam: str = "front", model: str = "") -> bytes:
+    """The training view of one camera as JPEG: the median of the frame REF_TIME_S into up to REF_EPISODES
+    episodes of a dataset, or of the dataset a model was trained on (its episodes only). Cached on disk."""
     import av
-
-    root = dataset_dir(repo)
-    info = json.loads((root / "meta/info.json").read_text())
+    import numpy as np
     import pandas as pd
+
+    episodes = None
+    if model:
+        d = json.loads((Path(model) / "train_config.json").read_text())["dataset"]
+        repo, episodes = d["repo_id"], d.get("episodes")
+    root = dataset_dir(repo)
     files = sorted((root / "meta/episodes").glob("*/*.parquet"))
-    row = pd.read_parquet(files[0]).sort_values("episode_index").iloc[0]
-    key = f"observation.images.{cam}"
-    path = root / info["video_path"].format(video_key=key, chunk_index=int(row[f"videos/{key}/chunk_index"]),
-                                            file_index=int(row[f"videos/{key}/file_index"]))
-    t0 = float(row[f"videos/{key}/from_timestamp"])
-    with av.open(str(path)) as c:
-        s = c.streams.video[0]
-        c.seek(int(max(t0 - 1, 0) / s.time_base), stream=s, backward=True)
-        for fr in c.decode(s):
-            if fr.time is not None and fr.time >= t0 - 1e-3:
-                ok, jpg = cv2.imencode(".jpg", fr.to_ndarray(format="bgr24"), [cv2.IMWRITE_JPEG_QUALITY, 85])
-                return jpg.tobytes()
-    raise RuntimeError("기준 장면을 읽지 못했습니다.")
+    stamp = int(max(f.stat().st_mtime for f in files))
+    cache = LOG_DIR / "ref_cache" / f"{repo.replace('/', '__')}__{cam}__{len(episodes or [])}_{stamp}.jpg"
+    if cache.exists():
+        return cache.read_bytes()
+    info = json.loads((root / "meta/info.json").read_text())
+    rows = pd.concat([pd.read_parquet(f) for f in files]).sort_values("episode_index")
+    if episodes is not None:
+        rows = rows[rows.episode_index.isin(episodes)]
+    real = real_episodes(root)
+    if real is not None:  # a real + sim mix: the sim episodes are rendered views, not this room
+        rows = rows[rows.episode_index.isin(real)]
+    if not len(rows):
+        raise RuntimeError("기준 장면을 만들 에피소드가 없습니다.")
+    pick = sorted({int(round(k)) for k in np.linspace(0, len(rows) - 1, min(REF_EPISODES, len(rows)))})
+    key, frames = f"observation.images.{cam}", []
+    for _, row in rows.iloc[pick].iterrows():
+        path = root / info["video_path"].format(video_key=key, chunk_index=int(row[f"videos/{key}/chunk_index"]),
+                                                file_index=int(row[f"videos/{key}/file_index"]))
+        t = float(row[f"videos/{key}/from_timestamp"]) + min(REF_TIME_S, float(row["length"]) / 30 - 0.1)
+        with av.open(str(path)) as c:
+            st = c.streams.video[0]
+            c.seek(int(max(t - 1, 0) / st.time_base), stream=st, backward=True)
+            for fr in c.decode(st):
+                if fr.time is not None and fr.time >= t - 1e-3:
+                    frames.append(fr.to_ndarray(format="bgr24"))
+                    break
+    if not frames:
+        raise RuntimeError("기준 장면을 읽지 못했습니다.")
+    if len(frames) >= 3:  # keep the views that agree with the most typical one (drops odd or augmented episodes)
+        v = np.stack([camauto.view_vector(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)) for f in frames])
+        sim = v @ v.T / v.shape[1]
+        mid = int(np.argmax(np.median(sim, axis=1)))
+        frames = [f for f, x in zip(frames, sim[mid]) if x >= 0.5]
+    ok, jpg = cv2.imencode(".jpg", np.median(np.stack(frames), axis=0).astype(np.uint8), [cv2.IMWRITE_JPEG_QUALITY, 90])
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_bytes(jpg.tobytes())
+    return jpg.tobytes()
 
 
-def alignment(repo: str) -> dict:
-    """How far the live front view is from the reference: shift (px), scale, rotation, match quality."""
+def reference_entry(repo: str, model: str, cam: str) -> dict:
+    """The training view with its ORB keypoints and red edge overlay, fetched once (from the GPU laptop on a
+    control PC, where the training data is)."""
     import numpy as np
 
-    live = PREVIEW.frames.get("front")
+    k = (repo, model, cam)
+    if k not in REF_CACHE:
+        if CONTROL and (model or not (DATA_HOME / repo).exists()):
+            q = urllib.parse.urlencode({"repo": repo, "model": model, "cam": cam})
+            status, _, body = remote.gpu_request("GET", "/api/reference?" + q, None, timeout=120)
+            if status != 200:
+                raise RuntimeError(json.loads(body or b"{}").get("error") or "GPU 노트북에서 기준 장면을 받지 못했습니다.")
+        else:
+            body = reference_frame(repo, cam, model)
+        gray = cv2.imdecode(np.frombuffer(body, np.uint8), cv2.IMREAD_GRAYSCALE)
+        kp, des = cv2.ORB_create(3000).detectAndCompute(gray, None)
+        edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 60, 140)
+        rgba = np.zeros(gray.shape + (4,), np.uint8)
+        rgba[edges > 0] = (40, 40, 255, 255)  # BGRA: red lines, the rest transparent
+        REF_CACHE[k] = {"jpg": body, "kp": kp, "des": des, "edges": cv2.imencode(".png", rgba)[1].tobytes()}
+    return REF_CACHE[k]
+
+
+def alignment(repo: str, model: str = "", cam: str = "front") -> dict:
+    """How far the live view of one camera sits from its training view (ORB + RANSAC similarity): centre shift,
+    rotation, scale, largest corner shift (px), the shift of the centre and the four corners, matches kept."""
+    import numpy as np
+
+    live = PREVIEW.frames.get(cam)
     if not live:
         raise RuntimeError("카메라를 먼저 켜세요.")
-    a = cv2.imdecode(np.frombuffer(reference_frame(repo), np.uint8), cv2.IMREAD_GRAYSCALE)
-    b = cv2.imdecode(np.frombuffer(live, np.uint8), cv2.IMREAD_GRAYSCALE)
-    orb = cv2.ORB_create(1500)
-    ka, da = orb.detectAndCompute(a, None)
-    kb, db = orb.detectAndCompute(b, None)
-    if da is None or db is None:
-        return {"ok": False, "msg": "특징점을 찾지 못했습니다. 조명을 확인하세요."}
-    matches = sorted(cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True).match(da, db), key=lambda m: m.distance)[:300]
-    if len(matches) < 12:
-        return {"ok": False, "msg": "기준 장면과 겹치는 부분이 거의 없습니다. 카메라를 기준 사진처럼 크게 옮겨보세요."}
-    src = np.float32([ka[m.queryIdx].pt for m in matches])
-    dst = np.float32([kb[m.trainIdx].pt for m in matches])
-    M, inliers = cv2.estimateAffinePartial2D(src, dst, ransacReprojThreshold=4.0)
+    ref = reference_entry(repo, model, cam)
+    gray = cv2.imdecode(np.frombuffer(live, np.uint8), cv2.IMREAD_GRAYSCALE)
+    kp, des = cv2.ORB_create(3000).detectAndCompute(gray, None)
+    if ref["des"] is None or des is None or len(kp) < 20:
+        return {"ok": False, "msg": "특징점이 부족합니다. 조명이나 화면을 가린 물체를 확인하세요."}
+    m = sorted(cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True).match(ref["des"], des), key=lambda x: x.distance)[:700]
+    if len(m) < 20:
+        return {"ok": False, "msg": "학습 화면과 겹치는 부분이 거의 없습니다. 겹쳐 보이는 빨간 윤곽을 보며 카메라를 크게 옮기세요."}
+    pa = np.float32([ref["kp"][x.queryIdx].pt for x in m])
+    pb = np.float32([kp[x.trainIdx].pt for x in m])
+    M, inl = cv2.estimateAffinePartial2D(pa, pb, ransacReprojThreshold=2.0)
     if M is None:
         return {"ok": False, "msg": "위치를 계산하지 못했습니다."}
-    scale = float(np.hypot(M[0, 0], M[1, 0]))
-    angle = float(np.degrees(np.arctan2(M[1, 0], M[0, 0])))
-    h, w = a.shape
-    cx, cy = M @ np.array([w / 2, h / 2, 1.0])
-    dx, dy = float(cx - w / 2), float(cy - h / 2)  # where the reference centre appears in the live view
-    ratio = float(inliers.sum()) / len(matches)
-    good = abs(dx) < 15 and abs(dy) < 15 and abs(scale - 1) < 0.04 and abs(angle) < 2 and ratio > 0.3
-    return {"ok": True, "dx": round(dx), "dy": round(dy), "scale": round(scale, 3), "angle": round(angle, 1),
-            "match": round(ratio, 2), "aligned": good}
+    pts = np.float32(ALIGN_PTS)
+    d = pts @ M[:, :2].T + M[:, 2] - pts
+    return {"ok": True, "dx": round(float(d[0, 0]), 1), "dy": round(float(d[0, 1]), 1),
+            "rot": round(float(np.degrees(np.arctan2(M[1, 0], M[0, 0]))), 2), "scale": round(float(np.hypot(M[0, 0], M[1, 0])), 3),
+            "corner": round(float(np.abs(d).max()), 1), "inliers": int(inl.sum()),
+            "vectors": [[int(p[0]), int(p[1]), round(float(v[0]), 1), round(float(v[1]), 1)] for p, v in zip(pts, d)]}
+
+
+def save_view_refs() -> dict:
+    """The live views of the fixed cameras become the camera check's reference pictures (cam_refs), as if the
+    setup had just been saved: after aligning to the training view, the daily check follows that view."""
+    import numpy as np
+
+    saved = []
+    for name in CAMERAS:
+        if name.startswith("wrist") or not PREVIEW.frames.get(name):
+            continue
+        gray = cv2.imdecode(np.frombuffer(PREVIEW.frames[name], np.uint8), cv2.IMREAD_GRAYSCALE)
+        if gray.mean() < camauto.DARK:
+            continue
+        CAM_REFS.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(camauto.ref_path(CAM_REFS, ROBOT_MODE, name)), cv2.resize(gray, (320, 240)), [cv2.IMWRITE_JPEG_QUALITY, 85])
+        saved.append(name)
+    if not saved:
+        raise RuntimeError("카메라를 먼저 켜세요.")
+    return {"ok": True, "saved": saved}
 
 
 def start_pose() -> dict:
@@ -2526,10 +2612,10 @@ class Handler(BaseHTTPRequestHandler):
         if CONTROL:
             if remote.proxied("GET", self.path):
                 return self._forward("GET")
-            if self.path.startswith(("/api/dataset?", "/api/reference?", "/api/align?")):
+            if self.path.startswith(("/api/dataset?", "/api/reference?")):  # /api/align: the cameras are here
                 q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                 repo = q.get("repo", [""])[0]
-                if repo and not (DATA_HOME / repo).exists():  # a dataset that is only on the GPU laptop
+                if q.get("model", [""])[0] or repo and not (DATA_HOME / repo).exists():  # training data: GPU laptop
                     return self._forward("GET")
             if self.path.startswith("/api/home?") and "model=" in self.path:
                 # the model's home pose is computed there (training data); whether to use it is this PC's setting
@@ -2598,7 +2684,7 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/reference?"):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             try:
-                body = reference_frame(q.get("repo", [""])[0], q.get("cam", ["front"])[0])
+                body = reference_frame(q.get("repo", [""])[0], q.get("cam", ["front"])[0], q.get("model", [""])[0])
                 self.send_response(200)
                 self.send_header("Content-Type", "image/jpeg")
                 self.send_header("Content-Length", str(len(body)))
@@ -2610,7 +2696,19 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/align?"):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             try:
-                self._json(alignment(q.get("repo", [""])[0]))
+                self._json(alignment(q.get("repo", [""])[0], q.get("model", [""])[0], q.get("cam", ["front"])[0]))
+            except Exception as exc:
+                self._json({"error": str(exc)}, 400)
+        elif self.path.startswith("/api/reference_edges?"):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            try:
+                body = reference_entry(q.get("repo", [""])[0], q.get("model", [""])[0], q.get("cam", ["front"])[0])["edges"]
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "max-age=300")
+                self.end_headers()
+                self.wfile.write(body)
             except Exception as exc:
                 self._json({"error": str(exc)}, 400)
         elif self.path.startswith("/api/home?") or self.path == "/api/home":
@@ -2825,6 +2923,8 @@ class Handler(BaseHTTPRequestHandler):
                 if body.get("on") and not body.get("confirm"):
                     raise RuntimeError("로봇 옆에 사람이 있는지 확인하고 체크해주세요.")
                 self._json(set_armed(bool(body.get("on"))))
+            elif self.path == "/api/cam_refs/save":
+                self._json(save_view_refs())
             elif self.path == "/api/start_pose/save":
                 self._json(save_start_pose(body.get("kind", "start")))
             elif self.path == "/api/eval/start":
