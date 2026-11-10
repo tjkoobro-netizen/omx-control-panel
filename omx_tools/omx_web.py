@@ -41,6 +41,7 @@ import omx_data_notes as data_notes  # noqa: E402  (group and description of eac
 import omx_errors  # noqa: E402  (err_code_N of an abnormal end)
 import omx_home  # noqa: E402  (standard home pose from the training data; config "home_pose")
 import omx_camstats  # noqa: E402  (measured camera fps and brightness)
+import omx_host  # noqa: E402  (control tower MQTT Host, started when armed turns on)
 import omx_camauto as camauto  # noqa: E402  (which camera is which after a USB replug)
 
 omx_camstats.install()
@@ -2275,6 +2276,7 @@ def remove_unstarted_eval(repo_id: str, lines: list | None = None) -> bool:
 
 # ---- armed: a control-tower (MQTT) command may start an evaluation only while a person has armed the panel
 ARMED = {"on": False, "since": None, "off_reason": "패널 시작"}  # off after every panel restart
+MQTT_HOST = omx_host.Host(LOG_DIR)  # armed on → started if configured; keeps running when armed goes off
 EPISODE_END_FILE = LOG_DIR / "episode_end.json"  # omx_run.py: the arms at the end of each episode (eval)
 EVAL_HOME_POSE: dict = {}  # the running / last eval's model home pose
 LAST_RESULT: dict = {}  # how the last evaluation ended (for the control tower), until the next one ends
@@ -2284,6 +2286,8 @@ def set_armed(on: bool, reason: str = "") -> dict:
     """Turned on only from the panel screen; any stop, abnormal end or restart turns it off."""
     if on and not ARMED["on"]:
         ARMED.update(on=True, since=dt.datetime.now().isoformat(timespec="seconds"), off_reason="")
+    if on:
+        MQTT_HOST.ensure()  # also when already armed: restarts a Host that exited
     elif not on and ARMED["on"]:
         ARMED.update(on=False, since=None, off_reason=reason or "패널에서 끔")
     return armed_status()
@@ -2314,6 +2318,57 @@ def arm_states(state: dict, home: dict | None) -> dict:
     return out
 
 
+ARMS_NOW = {"t": 0.0, "current": None, "error": None, "lock": threading.Lock()}
+ARMS_NOW_TTL_S = 10.0  # one bus read (about 3.5 s for two arms) serves readiness polls this long
+MODEL_HOMES: dict = {}  # model_path -> (time, home pose)
+MODEL_HOME_TTL_S = 300.0
+
+
+def model_home_pose(model_path: str) -> dict | None:
+    """The model's home pose (where an evaluation starts and its safe stop returns), cached."""
+    hit = MODEL_HOMES.get(model_path)
+    if hit and time.time() - hit[0] < MODEL_HOME_TTL_S:
+        return hit[1]
+    if CONTROL:
+        home = remote.gpu_json("/api/home?model=" + urllib.parse.quote(model_path)).get("home")
+    else:
+        home = omx_home.model_home(model_path)
+    MODEL_HOMES[model_path] = (time.time(), home)
+    return home
+
+
+def arms_now(model_path: str = "") -> dict:
+    """/api/arms: where the arms are now, for the control tower's readiness check (MQTT Host).
+    Read from the bus (no torque change) only while no robot program runs; otherwise unknown.
+    One read is reused for ARMS_NOW_TTL_S unless a robot program ran since.
+    at_home compares with the model's home pose when a model is given. Unknown stays None."""
+    out = {"source": None, "at": None, "arms": None, "error": None}
+    if JOB.running() or other_robot_processes():
+        return out | {"source": "busy", "error": "로봇 프로그램이 실행 중이라 팔 위치를 따로 읽지 않습니다."}
+    with ARMS_NOW["lock"]:
+        # a robot program that started after the last read may have moved the arms: read again
+        moved = (getattr(JOB, "started", 0) or 0) > ARMS_NOW["t"]
+        if moved or time.time() - ARMS_NOW["t"] >= ARMS_NOW_TTL_S:
+            try:
+                ARMS_NOW.update(current=home_current()["current"], error=None)
+            except Exception as exc:
+                ARMS_NOW.update(current=None, error=str(exc)[:200])
+            ARMS_NOW["t"] = time.time()
+        current, error, at = ARMS_NOW["current"], ARMS_NOW["error"], ARMS_NOW["t"]
+    out.update(source="bus", at=dt.datetime.fromtimestamp(at).isoformat(timespec="seconds"), error=error)
+    if current is None:
+        return out
+    home = None
+    if model_path:
+        try:
+            home = model_home_pose(model_path)
+        except Exception as exc:
+            out["error"] = f"모델 홈 자세를 알 수 없습니다: {exc}"[:200]
+    out["arms"] = arm_states({f"{k}.pos": v for k, v in current.items()}, home)
+    out["home_known"] = bool(home)
+    return out
+
+
 def eval_result(job) -> dict:
     """/api/status last_result: how the evaluation that just ended went, and where the arms were when its last
     episode ended (before the safe stop moves them to the start pose and closes the grippers)."""
@@ -2335,7 +2390,7 @@ def eval_result(job) -> dict:
             "ended_at": dt.datetime.now().isoformat(timespec="seconds"), "returncode": rc,
             "exit_ok": rc == 0 and not err and stopped is None, "stopped_by": stopped, "err": err,
             "target_marker": info.get("target_marker"),
-            "last_episode": {k: end.get(k) for k in ("episode", "at", "aborted")} if end else None,
+            "last_episode": {k: end.get(k) for k in ("episode", "at", "aborted", "returned", "elapsed_s")} if end else None,
             "arms": arms or None,
             "home_check": "unknown" if not checks or None in checks else "ok" if all(checks) else "far"}
 
@@ -2421,7 +2476,8 @@ def start_eval(body: dict) -> dict:
         # a few spare episodes so void attempts can be retried; the run stops once every position is done
         spare = min(max(int(body.get("spare", 3)), 0), 10)
         cmd = [a if not a.startswith("--dataset.num_episodes=") else f"--dataset.num_episodes={episodes + spare}" for a in cmd]
-    eval_info = {"phase": "모델 불러오는 중", "repo_id": repo_id, "target": episodes,
+    end_on_return = bool(body.get("end_on_return"))
+    eval_info = {"phase": "모델 불러오는 중", "repo_id": repo_id, "target": episodes, "end_on_return": end_on_return,
                  "episode_s": episode_s, "reset_s": reset_s, "model": run["id"],
                  "smooth": opts["smooth"], "threads": threads, "reset_home": reset_home,
                  "open_gripper": open_gripper, **opts,
@@ -2433,7 +2489,7 @@ def start_eval(body: dict) -> dict:
     JOB.start("eval", cmd, eval_info,
               need_leader=False, env_extra=thread_env(threads) | home_env(reset_home, open_gripper, repo_id) | async_env
               | ({"OMX_HOME_POSE": str(omx_home.write_run_file(home, RUN_HOME_FILE))} if home else {}) | tenv
-              | {"OMX_EPISODE_END": str(EPISODE_END_FILE)})
+              | {"OMX_EPISODE_END": str(EPISODE_END_FILE)} | ({"OMX_END_ON_RETURN": "1"} if end_on_return else {}))
     EVAL_HOME_POSE.clear()
     EVAL_HOME_POSE.update(repo_id=repo_id, home=home)
     if preset:
@@ -2812,6 +2868,7 @@ class Handler(BaseHTTPRequestHandler):
                 "preview": PREVIEW.running,
                 "markers": PREVIEW.markers if PREVIEW.running else {},
                 **armed_status(),
+                "mqtt_host": MQTT_HOST.status(),
                 "last_result": LAST_RESULT or None,
                 "camera_watch": camera_watch(),
                 "live": JOB.running() and JOB.kind in ("record", "eval"),
@@ -2866,6 +2923,9 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/home?") or self.path == "/api/home":
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             self._json(home_status(q.get("model", [""])[0]))
+        elif self.path.startswith("/api/arms?") or self.path == "/api/arms":
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            self._json(arms_now(q.get("model", [""])[0]))
         elif self.path.startswith("/api/eval/report?"):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             self._json(report_status(q.get("repo", [""])[0]))
@@ -3244,6 +3304,7 @@ def main() -> None:
     try:
         server.serve_forever()
     finally:
+        MQTT_HOST.stop()
         JOB.stop()
         PREVIEW.stop()
         if CONTROL:

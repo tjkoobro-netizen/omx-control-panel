@@ -102,6 +102,52 @@ def _make_target() -> TargetOverlay | None:
 
 TARGET: TargetOverlay | None = None
 LAST_STATE: dict = {}  # motor values of the latest episode step (its end: before any reset move or safe stop)
+EPISODE_END: dict = {}  # how the latest evaluation episode ended: {"returned": bool, "elapsed_s": float}
+
+
+class ReturnWatch:
+    """OMX_END_ON_RETURN=1 (evaluation): end the episode once the task is done instead of waiting for
+    episode_time_s, so the policy does not start the task again. Done = the arms moved away from where
+    the episode started (some joint more than LEAVE) and came back (every joint within TOL) with every
+    gripper at or below GRIP_MAX (released: fully closed on nothing, never stopped open on a box edge),
+    held for HOLD_S. Defaults from model 22's 2026-11-09 evaluations (all values in motor units)."""
+
+    def __init__(self):
+        env = os.environ
+        self.on = env.get("OMX_END_ON_RETURN") == "1"
+        self.leave = float(env.get("OMX_RETURN_LEAVE", 20.0))
+        self.tol = float(env.get("OMX_RETURN_TOL", 8.0))
+        self.grip_max = float(env.get("OMX_RETURN_GRIP_MAX", 54.6))
+        self.hold_s = float(env.get("OMX_RETURN_HOLD_S", 0.3))
+        self.reset()
+
+    def reset(self) -> None:
+        self.start: dict | None = None
+        self.firsts: list[dict] = []
+        self.left = False
+        self.since: float | None = None
+
+    def __call__(self, state: dict, now: float) -> bool:
+        if not self.on:
+            return False
+        joints = {k: float(v) for k, v in state.items() if k.endswith(".pos") and "gripper" not in k}
+        grips = [float(v) for k, v in state.items() if k.endswith(".pos") and "gripper" in k]
+        if self.start is None:  # the start pose: mean of the first 5 steps
+            self.firsts.append(joints)
+            if len(self.firsts) == 5:
+                self.start = {k: sum(f[k] for f in self.firsts) / 5 for k in joints}
+            return False
+        dev = max((abs(v - self.start.get(k, v)) for k, v in joints.items()), default=0.0)
+        if dev > self.leave:
+            self.left = True
+        if self.left and dev <= self.tol and grips and all(g <= self.grip_max for g in grips):
+            self.since = self.since or now
+            return now - self.since >= self.hold_s
+        self.since = None
+        return False
+
+
+RETURN = ReturnWatch()
 
 
 def _write_episode_end(repo_id: str, index: int) -> None:
@@ -113,7 +159,8 @@ def _write_episode_end(repo_id: str, index: int) -> None:
         tmp = path + ".tmp"
         with open(tmp, "w") as f:
             json.dump({"repo_id": repo_id, "episode": index, "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                       "aborted": bool(ABORT["on"]), "state": {k: round(float(v), 2) for k, v in LAST_STATE.items()}}, f)
+                       "aborted": bool(ABORT["on"]), **EPISODE_END,
+                       "state": {k: round(float(v), 2) for k, v in LAST_STATE.items()}}, f)
         os.replace(tmp, path)
     except Exception as exc:  # the report is optional: never stop a run over it
         _say(f"[omx] episode end: 저장하지 못함 ({exc})")
@@ -623,6 +670,11 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
 
     interval = 1 / fps
     start = due = time.perf_counter()  # frames on a fixed schedule (start + k / fps): no drift over an episode
+    watch = policy is not None and dataset is not None and RETURN.on
+    if watch:
+        RETURN.reset()
+        EPISODE_END.clear()
+        EPISODE_END.update(returned=False, elapsed_s=None)
     while time.perf_counter() - start < seconds:
         t0 = time.perf_counter()
         if EVENTS["exit_early"]:
@@ -631,6 +683,10 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
         obs = robot.get_observation()
         if dataset is not None:
             LAST_STATE.update({k: v for k, v in obs.items() if k.endswith(".pos")})
+        if watch and RETURN(LAST_STATE, t0):
+            EPISODE_END.update(returned=True, elapsed_s=round(t0 - start, 1))
+            _say(f"[omx] 작업 끝 감지: 처음 자세로 복귀, 그리퍼 놓음 ({t0 - start:.1f}초) - 이 시도를 마칩니다")
+            break
         if TARGET is not None:  # before the preview, the policy and the dataset: all see the same marked frame
             obs = TARGET.apply(obs)
         _show(obs)
