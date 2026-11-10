@@ -1894,8 +1894,8 @@ def remote_eval_settings(local_model: Path, gpu_model: str, extra_args: list, as
         overrides["diffusion_steps"] = int(opts["diffusion_steps"])
     if opts.get("rtc"):
         overrides["rtc"] = {"horizon": int(body.get("rtc_horizon") or 10), "weight": float(body.get("rtc_weight") or 10.0)}
-    env = dict(async_env)
-    if not env:  # synchronous: the whole chunk, then the next one
+    env = dict(async_env)  # may hold only the output filter's settings
+    if "OMX_ASYNC" not in env:  # synchronous: the whole chunk, then the next one
         cfg = model_config(str(local_model))
         if cfg.get("type") == "diffusion":
             # its 8 actions (0.27 s) run out before the next ones come back over the network: take what the horizon covers
@@ -1906,8 +1906,8 @@ def remote_eval_settings(local_model: Path, gpu_model: str, extra_args: list, as
         # ask for the next chunk about 0.5 s (one network round trip) before this one runs out, so the arm does not
         # stop at every chunk boundary waiting for the GPU laptop
         threshold = min(0.9, 15 / chunk)
-        env = {"OMX_ASYNC": "1", "OMX_ASYNC_CHUNK": str(chunk), "OMX_ASYNC_THRESHOLD": f"{threshold:.2f}",
-               "OMX_ASYNC_AGG": "latest_only", "OMX_FPS": "30", "OMX_RTC": "0"}
+        env.update({"OMX_ASYNC": "1", "OMX_ASYNC_CHUNK": str(chunk), "OMX_ASYNC_THRESHOLD": f"{threshold:.2f}",
+                    "OMX_ASYNC_AGG": "latest_only", "OMX_FPS": "30", "OMX_RTC": "0"})
     env.update(OMX_REMOTE_URL=remote.infer_url(), OMX_REMOTE_MODEL=gpu_model, OMX_REMOTE_OVERRIDES=json.dumps(overrides))
     link = infer_link()
     if link["transport"] == "udp":
