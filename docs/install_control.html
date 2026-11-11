@@ -85,7 +85,7 @@ footer { color: var(--muted); font-size: 13px; padding-top: 20px; border-top: 1p
 
 <div class="wrap">
 <header>
-  <span class="eyebrow">OMX-AI · 팀원 설치 안내 · v3.12.0</span>
+  <span class="eyebrow">OMX-AI · 팀원 설치 안내 · v3.13.0</span>
   <h1>OMX Control Panel 설치</h1>
   <p class="lede">설치 전에 받을 권한, Tailscale 초대, GPU 노트북이 다를 때는 저장소의 <b>INSTALL.md</b>를 먼저 보세요.</p>
   <p class="lede">내 우분투 PC에 로봇팔과 카메라를 연결하고, 학습과 AI 추론은 GPU 노트북에 맡기는 제어판입니다. 아래 순서대로 한 번만 설치하면 바탕화면 아이콘으로 바로 씁니다.</p>
@@ -145,7 +145,14 @@ footer { color: var(--muted); font-size: 13px; padding-top: 20px; border-top: 1p
           <tr><td class="n">8/8</td><td>바탕화면 아이콘 "OMX Control Panel"</td><td>없음</td></tr>
         </tbody>
       </table></div>
-      <div class="good">마지막에 <b>설치 완료 (v3.12.0)</b>가 나오면 끝입니다.</div>
+      <div class="good">마지막에 <b>설치 완료 (v3.13.0)</b>가 나오면 끝입니다.</div>
+    </div></div>
+
+    <div class="step"><div>
+      <h3>평가 전에: AI 추론 통신(UDP) 설정</h3>
+      <p>평가 중 동작 계산(AI 추론)은 GPU 노트북과 <b>같은 공유기 안에서 UDP로만</b> 주고받습니다. 제어판 ③ 평가 탭 맨 위 <b>AI 추론 통신 · UDP</b>에 GPU 노트북의 공유기 주소와 포트(빈 칸의 예시 포트, 계정마다 다름)를 적고, <b>키 만들기·GPU에 복사</b>를 누른 뒤 <b>저장</b>합니다. "연결됨 · 왕복 몇 ms"가 나오면 끝입니다. GPU 노트북의 UDP 서버는 그쪽 제어판이 자동으로 켭니다.</p>
+      <div class="note"><b>연결이 안 되면 화면에 원인이 나옵니다.</b>
+        <span>방화벽 때문이면 화면에 나온 <code>sudo ufw allow …</code> 명령을 GPU 노트북 관리자에게 전달하세요. 키 파일은 저장소나 메신저에 올리지 마세요.</span></div>
     </div></div>
 
     <div class="step"><div>
@@ -222,7 +229,7 @@ footer { color: var(--muted); font-size: 13px; padding-top: 20px; border-top: 1p
   </div>
 </section>
 
-<footer>OMX Control Panel v3.12.0 · 제어 PC 설치 안내 · 저장소 github.com/tjkoobro-netizen/omx-control-panel · 설치 파일 install_control.sh · 문의: 제어판 관리자</footer>
+<footer>OMX Control Panel v3.13.0 · 제어 PC 설치 안내 · 저장소 github.com/tjkoobro-netizen/omx-control-panel · 설치 파일 install_control.sh · 문의: 제어판 관리자</footer>
 </div>
 
 <script>

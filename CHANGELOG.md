@@ -1,5 +1,19 @@
 # OMX 제어판 버전 기록
 
+## 3.13.0 (2026-11-11) - AI 추론 통신을 UDP로 통일, 미션에 SSH 터널이 필요 없음
+
+- 제어 PC의 AI 추론(평가 중 관찰 → 동작 묶음)은 **UDP 하나로만**. HTTP/UDP 선택 칸을 없애고 ③ 평가 설정 맨 위에 **AI 추론 통신 · UDP**(GPU 노트북 UDP 서버 주소:포트, 공유 키 파일, 연결 상태)만 둠. 관제(MQTT) 평가도 같음
+- 평가 준비도 UDP로: 모델 설정 파일(config.json, train_config.json)과 모델 시작 자세를 GPU 노트북 UDP 서버에서 받아(LOAD에 overrides `{"_info_only": true}`: GPU에 모델을 올리지 않고 파일과 시작 자세만) 이 PC(`~/.cache/omx/models`)에 저장하고, 이후에는 다시 묻지 않음. 평가 시작, 시작 자세 이동, Host의 팔 준비 확인(`/api/arms`)에 SSH 터널을 쓰지 않음
+- GPU 학습 기록(`/api/train/runs`, Host의 모델 준비 확인)은 터널이 될 때마다 이 PC에 사본을 두고(`~/.config/omx/v3/gpu_runs_cache.json`), 터널이 끊기면 사본으로 답함(`stale: true`). 사본에도 없으면 모델 경로로 판단하고 UDP 모델 확인이 실제로 있는지 가림. SSH 터널은 학습, 데이터 동기화, 평가 보고서, 화면의 모델 목록에만 씀
+- GPU 노트북의 UDP 서버는 그쪽 제어판이 켬. 제어 PC가 터널이 될 때 5초마다 요청하고(주소, 자기 주소, 키 지문), GPU 제어판은 그 요청을 `~/.config/omx/v3/udp_server.json`에 기억해 다시 시작해도 터널 없이 바로 서버를 켬. 서버는 요청한 PC 주소와 GPU 자신만 받아들이고, 꺼지면 5초 뒤(3번 넘으면 1분 뒤) 다시 켬. GPU 제어판이 다시 시작되면 띄워 둔 서버를 이어받음. 직접 켠 서버가 포트를 쓰고 있으면 그것을 그대로 씀. 기록은 GPU 노트북 `logs/udp_server.log`. GPU 노트북 API `POST /api/udp_server` (`action: ensure|release`)
+- 서버를 켜기 전에 GPU 노트북에서 확인: 키 파일 있음·chmod 600, 두 PC 키가 같은지(키 SHA-256 앞 12자리 지문만 보냄), 적은 주소가 GPU 노트북에 있는지, 포트가 비었는지
+- **키 만들기·GPU에 복사** 버튼(`POST /api/infer_link/key`): 이 PC에 키가 없으면 만들고(chmod 600), GPU 노트북에 없으면 SSH로 같은 키를 복사. GPU 노트북에 다른 키가 있으면 덮어쓰지 않고 알림
+- 연결이 안 되면 어디서 막혔는지 표시: 설정 필요 / 응답 없음 · GPU 제어판 연결 안 됨 / GPU 서버 문제(키 없음·키 다름·주소 없음·꺼짐과 종료 코드) / 닿지 않음(GPU 안에서는 응답, 이 PC에서만 안 됨: `sudo ufw allow from <이 PC> to any port <포트> proto udp` 제시). GPU 서버 상태와 서버 기록 마지막 줄을 펼쳐 볼 수 있음. 터널만 끊기고 UDP가 되면 "추론 통신은 정상"으로 표시
+- UDP 연결이 안 된 상태에서는 평가를 바로 거절하고 이유를 알려 줌(관제 평가도 같음). 평가 중에는 연결 확인 PING을 보내지 않음
+- 포트 예시는 계정마다 다름: 5600 + (그 계정 GPU 제어판 포트 − 8865)
+- GPU 쪽 서버 코드 `infer_link/server.py`, `infer_link/panel_policy.py`를 팀 AI 서버 저장소(roport-ai-server omx_udp)에서 복사. `panel_policy`의 LOAD 답장에 `files`, `home`(`home_error`)을 더함(옛 클라이언트는 무시). 서버는 `python -m`이 아니라 `main()`을 불러 띄움: `-m`으로 띄우면 모듈이 두 번 불려 MODEL_NOT_ALLOWED 거절이 INFER_FAILED로 나가던 문제
+- status `gpu_link.infer`: `transport`는 항상 `udp`, `port_hint`, `udp`에 `stage`, `hint`, `server`, `peer` 추가
+
 ## 3.12.0 (2026-11-10) - 작업을 끝내고 돌아오면 평가 시도 종료
 
 - 평가 시작 요청에 `end_on_return: true`(관제 Host가 보냄)가 있으면, 팔이 시도 시작 자세에서 크게 벗어났다가(관절 20 초과) 돌아오고(모든 관절 8 이내) 양쪽 그리퍼가 54.6 이하로 0.3초 유지될 때 시도를 바로 끝냄. 시간이 남으면 정책이 같은 작업을 다시 시작하던 문제 대응. 값은 `OMX_RETURN_*` 환경변수로 조정, 기준은 11/9 22번 모델 평가 23개 에피소드로 확인(복귀 4개 감지, 작업 중 오감지 없음)

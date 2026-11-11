@@ -13,6 +13,7 @@ import collections
 import datetime as dt
 import fcntl
 import getpass
+import hashlib
 import json
 import os
 import re
@@ -1747,13 +1748,19 @@ def start_record(body: dict) -> dict:
 
 def find_model_remote(model_path: str) -> dict:
     """Control PC: a policy of the GPU laptop's training index (final model or an intermediate save)."""
-    for r in remote.gpu_json("/api/train/runs").get("runs", []):
+    try:
+        runs = gpu_runs().get("runs", [])
+    except Exception:  # no tunnel and no copy here yet: the UDP model check below decides
+        runs = []
+    for r in runs:
         if r["model_path"] == model_path:
             return r
         for c in r.get("checkpoints") or []:
             if c["model_path"] == model_path:
                 return dict(r, model_path=model_path, step=c["step"])
-    raise RuntimeError("GPU 노트북의 학습 기록에 있는 모델을 고르세요.")
+    if not model_path.rstrip("/").endswith("pretrained_model"):
+        raise RuntimeError("GPU 노트북의 학습 기록에 있는 모델을 고르세요.")
+    return run_from_path(model_path)  # the UDP model check (fetch_model_udp) confirms it exists there
 
 
 def remote_preset(pid: str) -> dict:
@@ -1763,11 +1770,17 @@ def remote_preset(pid: str) -> dict:
     raise RuntimeError(f"평가 방식 {pid}을 GPU 노트북에서 찾지 못했습니다.")
 
 
-# Control PC: how the evaluation reaches the GPU laptop's models. "http" (default): POST /infer through the SSH
-# tunnel (Tailscale). "udp": wire RPI1 (infer_link) straight to the GPU laptop's UDP server on the same router, with
-# a shared key file (hex, chmod 600; never in a repository). ~/.config/omx/v3/infer_link.json, set on the panel.
+# Control PC: the AI inference (the GPU laptop's models) is reached only over UDP: wire RPI1 (infer_link) straight to
+# the GPU laptop's UDP server on the same router, with a shared key file (hex, chmod 600; never in a repository).
+# The evaluation's preparation (model files, home pose) goes the same way, so a mission needs no SSH tunnel.
+# ~/.config/omx/v3/infer_link.json, set on the panel.
 INFER_LINK_FILE = SETUP_FILE.parent / "infer_link.json"
-INFER_LINK_DEFAULT = {"transport": "http", "udp_server": "", "udp_key_file": "~/.config/roport/omx-udp.key"}
+INFER_LINK_DEFAULT = {"udp_server": "", "udp_key_file": "~/.config/roport/omx-udp.key"}
+UDP_BASE_PORT = 5600  # + this account's offset of its GPU panel port from 8865, so accounts never share a port
+
+
+def udp_port_hint() -> int:
+    return UDP_BASE_PORT + max(0, remote.REMOTE_PANEL - 8865)
 
 
 def infer_link() -> dict:
@@ -1782,11 +1795,16 @@ def infer_link() -> dict:
 def check_udp(server: str, key_file: str) -> None:
     import omx_infer
 
-    omx_infer.udp_peer(server)
+    if not server:
+        raise RuntimeError(f"③ 평가 설정의 AI 추론 통신에 GPU 노트북 UDP 서버 주소를 적으세요 (예: 192.168.x.x:{udp_port_hint()})")
+    try:
+        omx_infer.udp_peer(server)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from None
     try:
         key = omx_infer.read_udp_key(key_file)
     except FileNotFoundError:
-        raise RuntimeError(f"키 파일이 없습니다: {key_file}") from None
+        raise RuntimeError(f"키 파일이 없습니다: {key_file} (③ 평가 설정의 '키 만들기·GPU에 복사')") from None
     except ValueError as exc:
         raise RuntimeError(f"키 파일을 쓸 수 없습니다 ({exc})") from None
     if len(key) < 16:
@@ -1794,37 +1812,172 @@ def check_udp(server: str, key_file: str) -> None:
 
 
 def save_infer_link(body: dict) -> dict:
-    """Panel: HTTP or UDP for the remote inference. Takes effect from the next evaluation."""
+    """Panel: the GPU laptop's UDP server address and the key file. Takes effect from the next evaluation."""
     if JOB.running() and JOB.kind == "eval":
         raise RuntimeError("평가가 끝난 뒤 바꾸세요.")
     cur = infer_link()
-    transport = body.get("transport")
-    if transport not in ("http", "udp"):
-        raise RuntimeError("통신 방식은 HTTP 또는 UDP 중에서 고르세요.")
     server = str(body.get("udp_server", cur["udp_server"])).strip()
-    key_file = str(body.get("udp_key_file", cur["udp_key_file"])).strip()
-    if transport == "udp":
-        try:
-            check_udp(server, key_file)
-        except ValueError as exc:
-            raise RuntimeError(str(exc)) from None
+    key_file = str(body.get("udp_key_file", cur["udp_key_file"])).strip() or INFER_LINK_DEFAULT["udp_key_file"]
+    check_udp(server, key_file)
     INFER_LINK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    INFER_LINK_FILE.write_text(json.dumps({"transport": transport, "udp_server": server, "udp_key_file": key_file},
+    INFER_LINK_FILE.write_text(json.dumps({"udp_server": server, "udp_key_file": key_file},
                                           ensure_ascii=False, indent=2) + "\n")
     UDP_LINK.reset()
     return infer_link_status()
 
 
+def provision_udp_key() -> dict:
+    """Make the shared key if this PC has none, and put the same key on the GPU laptop (over SSH, once, if it has
+    none there). A different key already on the GPU laptop is never overwritten: that is reported instead."""
+    import omx_infer
+    import omx_udp_keeper
+
+    if JOB.running() and JOB.kind == "eval":
+        raise RuntimeError("평가가 끝난 뒤 하세요.")
+    path = Path(infer_link()["udp_key_file"]).expanduser()
+    made = False
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(os.urandom(32).hex() + "\n")
+        made = True
+    try:
+        key = omx_infer.read_udp_key(str(path))
+    except ValueError as exc:
+        raise RuntimeError(f"이 PC의 키 파일을 쓸 수 없습니다 ({exc})") from None
+    fp = omx_udp_keeper.key_fingerprint(key)
+    script = ('f="$HOME/.config/roport/omx-udp.key"; if [ -e "$f" ]; then cat >/dev/null; echo EXISTS; '
+              'python3 -c "import hashlib,sys; print(hashlib.sha256(bytes.fromhex(open(sys.argv[1]).read().strip())).hexdigest()[:12])" "$f"; '
+              'else umask 077; mkdir -p "$HOME/.config/roport"; cat > "$f"; chmod 600 "$f"; echo CREATED; fi')
+    r = subprocess.run(["ssh", *remote.SSH_OPTS, remote.HOST, script], input=key.hex() + "\n",
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        raise RuntimeError(f"GPU 노트북({remote.HOST})에 SSH로 연결하지 못했습니다: {r.stderr.strip()[-160:]}")
+    out = r.stdout.split()
+    if out[:1] == ["EXISTS"] and out[1:2] != [fp]:
+        raise RuntimeError("GPU 노트북에 다른 키가 이미 있습니다 (~/.config/roport/omx-udp.key). 덮어쓰지 않았습니다. "
+                           "같은 키를 쓰려면 두 PC 중 한쪽 키 파일을 다른 쪽과 같게 맞추세요.")
+    UDP_LINK.reset()
+    gpu = "GPU 노트북에 복사함" if out[:1] == ["CREATED"] else "GPU 노트북 키와 같음"
+    return {"ok": True, "made": made, "fingerprint": fp,
+            "message": ("이 PC에 새 키를 만들고 " if made else "이 PC의 키가 ") + gpu + f" (지문 {fp})"}
+
+
+# ---- the GPU laptop's training index, kept here so a mission (Host: GET /api/train/runs, then eval start) does
+# not need the SSH tunnel; refreshed whenever the tunnel answers
+RUNS_CACHE_FILE = SETUP_FILE.parent / "gpu_runs_cache.json"
+
+
+def gpu_runs() -> dict:
+    """{"runs": [...]} from the GPU laptop, or the last copy here (with "cached_at") when the tunnel is down."""
+    try:
+        out = remote.gpu_json("/api/train/runs", timeout=15)
+    except Exception as exc:
+        try:
+            cached = json.loads(RUNS_CACHE_FILE.read_text())
+        except (OSError, ValueError):
+            raise RuntimeError(str(exc)) from None
+        return cached | {"stale": True, "stale_reason": str(exc)[:200]}
+    try:
+        RUNS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        RUNS_CACHE_FILE.write_text(json.dumps(out | {"cached_at": time.time()}, ensure_ascii=False))
+    except OSError:
+        pass
+    return out
+
+
+# ---- model files and home pose over UDP (LOAD with overrides {"_info_only": true}: nothing is loaded on the GPU)
+def udp_ready() -> dict:
+    """Before an evaluation: the settings, and a fresh PING when the last check failed (refuse at once, with where)."""
+    link = infer_link()
+    check_udp(link["udp_server"], link["udp_key_file"])
+    st = UDP_LINK.state
+    if st.get("ok") is False:
+        try:
+            UDP_LINK.probe(link)
+        except Exception:
+            raise RuntimeError("AI 추론 서버와 UDP 연결이 안 되어 평가를 시작하지 않습니다: " + (st.get("error") or "응답 없음")
+                               + (f" ({st['hint']})" if st.get("hint") else "")
+                               + " · ③ 평가 설정 맨 위 AI 추론 통신 표시를 보세요") from None
+        UDP_LINK.wake.set()
+    return link
+
+
+def udp_model_info(model_path: str, timeout: float = 10.0) -> dict:
+    import omx_infer
+    from infer_link.client import InferenceClient, InferenceError, InferenceTimeout
+
+    cfg = infer_link()
+    check_udp(cfg["udp_server"], cfg["udp_key_file"])
+    client = InferenceClient(omx_infer.udp_peer(cfg["udp_server"]), omx_infer.read_udp_key(cfg["udp_key_file"]))
+    try:
+        out = client.load(model_path, {"_info_only": True}, timeout=timeout, attempts=2)
+    except InferenceTimeout:
+        raise RuntimeError("GPU 노트북 UDP 서버가 모델 정보 요청에 답하지 않습니다. ③ 평가 설정 맨 위 AI 추론 통신 표시를 보세요.") from None
+    except InferenceError as exc:
+        if getattr(exc, "code", "") == "MODEL_NOT_ALLOWED":
+            raise RuntimeError(f"GPU 노트북에 이 모델이 없습니다: {model_path}") from None
+        raise RuntimeError(f"GPU 노트북이 모델 정보 요청을 거절했습니다 ({exc})") from None
+    finally:
+        client.close()
+    if "files" not in out:
+        raise RuntimeError("GPU 노트북 제어판이 옛 버전이라 UDP로 모델 정보를 주지 않습니다 (3.13.0 이상으로 업데이트)")
+    return out
+
+
+def model_local(model_path: str) -> Path:
+    """This PC's copy of a model's config files and home pose (the weights stay on the GPU laptop)."""
+    return remote.MODEL_CACHE / hashlib.sha1(model_path.encode()).hexdigest()[:16]
+
+
+def fetch_model_udp(model_path: str) -> Path:
+    """Local config.json/train_config.json (omx_run.py reads the policy settings from them), from the GPU laptop
+    over UDP the first time; the home pose comes in the same reply and is kept too."""
+    local = model_local(model_path)
+    if all((local / n).exists() for n in ("config.json", "train_config.json")):
+        return local
+    info = udp_model_info(model_path)
+    local.mkdir(parents=True, exist_ok=True)
+    for name, text in info["files"].items():
+        if name in ("config.json", "train_config.json"):
+            (local / name).write_text(text)
+    if not (local / "config.json").exists():
+        raise RuntimeError(f"GPU 노트북이 모델 설정 파일(config.json)을 보내지 않았습니다: {model_path}")
+    if info.get("home") and not (local / "home_pose.json").exists():
+        (local / "home_pose.json").write_text(json.dumps(info["home"], ensure_ascii=False))
+    (local / "SOURCE").write_text(f"{remote.HOST}:{model_path}\n")
+    return local
+
+
+def run_from_path(model_path: str) -> dict:
+    """A run entry made from the model path alone (the GPU index was never reached): .../<run>/pretrained_model or
+    .../<run>/checkpoints/<step>/pretrained_model."""
+    p = Path(model_path)
+    parts = p.parts
+    step = names.checkpoint_step(model_path)
+    run = parts[-4] if step is not None and len(parts) >= 4 else (p.parent.name if p.name == "pretrained_model" else p.name)
+    return {"id": run, "model_path": model_path, "step": step}
+
+
 class UdpLink:
-    """While UDP is chosen: PING the GPU laptop's UDP server every few seconds (status: answer, round trip)."""
+    """Every few seconds: while the SSH tunnel is up, ask the GPU laptop's panel to keep its UDP server running (it
+    remembers the request and starts the server by itself after a restart, so the tunnel is not needed later);
+    then PING the server straight over UDP. When it fails, say where: settings, the GPU panel, the server, or the
+    network."""
 
     EVERY_S = 5.0
 
     def __init__(self):
-        self.state = {"ok": None, "round_ms": None, "error": "", "loaded": [], "at": None}
+        self.state = self._blank()
         self.client, self.key = None, None
         self.wake = threading.Event()
         self.thread = None
+
+    @staticmethod
+    def _blank() -> dict:
+        return {"ok": None, "round_ms": None, "error": "", "hint": "", "stage": "", "loaded": [], "at": None,
+                "server": None, "peer": ""}
 
     def start(self) -> None:
         if self.thread is None:
@@ -1833,10 +1986,53 @@ class UdpLink:
 
     def reset(self) -> None:
         self.key = None
-        self.state = {"ok": None, "round_ms": None, "error": "", "loaded": [], "at": None}
+        self.state = self._blank()
         self.wake.set()
 
-    def _ping(self, cfg: dict) -> None:
+    @staticmethod
+    def own_address(host: str, port: int) -> str:
+        """This PC's address on the way to the GPU laptop (the one its UDP server must allow)."""
+        import socket
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect((host, port))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+
+    def _ask_gpu(self, cfg: dict) -> tuple[dict | None, str]:
+        import omx_infer
+        import omx_udp_keeper
+
+        host, port = omx_infer.udp_peer(cfg["udp_server"])
+        peer = self.own_address(host, port)
+        self.state["peer"] = peer
+        body = {"action": "ensure", "bind": host, "port": port, "peer": peer,
+                "key_fp": omx_udp_keeper.key_fingerprint(omx_infer.read_udp_key(cfg["udp_key_file"]))}
+        if not remote.TUNNEL.status()["ok"]:
+            return None, "SSH 터널 끊김 (" + (remote.TUNNEL.error or "연결 중") + ")"
+        try:
+            return remote.gpu_json("/api/udp_server", body, timeout=8.0), ""
+        except Exception as exc:
+            msg = str(exc)
+            if msg == "not found":
+                msg = "GPU 노트북 제어판이 옛 버전이라 UDP 서버를 자동으로 켜지 못합니다 (3.13.0 이상 필요: GPU에 새 버전 설치)"
+            return None, msg
+
+    @staticmethod
+    def probe(cfg: dict) -> None:
+        """One PING on its own socket (the watch thread keeps its own client)."""
+        import omx_infer
+        from infer_link.client import InferenceClient
+
+        client = InferenceClient(omx_infer.udp_peer(cfg["udp_server"]), omx_infer.read_udp_key(cfg["udp_key_file"]))
+        try:
+            client.ping(timeout=1.5)
+        finally:
+            client.close()
+
+    def _ping(self, cfg: dict) -> dict:
         import omx_infer
         from infer_link.client import InferenceClient
 
@@ -1845,26 +2041,68 @@ class UdpLink:
             if self.client is not None:
                 self.client.close()
             self.client = None
-            check_udp(*key)
             self.client = InferenceClient(omx_infer.udp_peer(cfg["udp_server"]),
                                           omx_infer.read_udp_key(cfg["udp_key_file"]))
             self.key = key
-        out = self.client.ping(timeout=1.0)
-        self.state = {"ok": True, "round_ms": self.client.last.get("round_ms"), "error": "",
-                      "loaded": [Path(m).parent.name if m.endswith("pretrained_model") else Path(m).name
-                                 for m in out.get("loaded") or []], "at": time.time()}
+        return self.client.ping(timeout=1.0)
+
+    @staticmethod
+    def diagnose(exc: Exception, srv: dict | None, gpu_err: str, cfg: dict, peer: str) -> tuple[str, str, str, bool | None]:
+        """(stage, error, hint, ok) for a PING that failed; ok None = still starting (not an error yet)."""
+        from infer_link.client import InferenceError, InferenceTimeout
+
+        port = cfg["udp_server"].rsplit(":", 1)[-1]
+        if not isinstance(exc, (InferenceTimeout, InferenceError)):
+            return "settings", str(exc), "③ 평가 설정의 UDP 서버 주소와 키 파일을 확인하세요", False
+        if isinstance(exc, InferenceError):
+            return "server", f"GPU 노트북의 UDP 서버가 거절했습니다 ({exc})", "", False
+        if srv is None:
+            if gpu_err:
+                return "gpu_panel", f"UDP 응답 없음. GPU 노트북 제어판에도 닿지 않아 서버 상태를 알 수 없습니다: {gpu_err}", \
+                    "GPU 노트북이 켜져 있는지, 그 제어판이 켜져 있는지(제어판이 UDP 서버를 켬), 두 PC가 같은 공유기인지 확인하세요", False
+            return "network", "UDP 응답 없음", "", False
+        if srv.get("error"):
+            return "server", srv["error"], srv.get("hint", ""), False
+        if srv.get("starting"):
+            return "starting", "GPU 노트북에서 UDP 서버를 켜는 중입니다 (처음 몇십 초)", "", None
+        if srv.get("external"):
+            return "network", "UDP 응답 없음 (GPU 노트북에서 직접 켠 서버를 쓰는 중)", srv.get("hint", ""), False
+        if not srv.get("running"):
+            return "server", "GPU 노트북의 UDP 서버가 꺼져 있습니다", "잠시 뒤 다시 켭니다. 계속되면 아래 서버 기록을 보세요", False
+        if (srv.get("self_ping") or {}).get("ok") is False:
+            return "server", "GPU 노트북의 UDP 서버가 응답하지 않습니다 (모델을 불러오는 중이거나 멈춤)", \
+                "계속되면 아래 서버 기록을 보세요", False
+        if peer and peer not in (srv.get("peers") or []):
+            return "network", f"GPU 노트북 서버가 이 PC 주소({peer})를 허용 목록에 아직 넣지 않았습니다", "잠시 뒤 다시 확인합니다", None
+        return "network", "GPU 노트북의 UDP 서버는 켜져 있지만 이 PC에서 닿지 않습니다 (방화벽 또는 다른 공유기)", \
+            f"GPU 노트북 터미널에서: sudo ufw allow from {peer or '이 PC 주소'} to any port {port} proto udp " \
+            "· 두 PC가 같은 공유기(같은 Wi-Fi)인지도 확인", False
 
     def _run(self) -> None:
         while True:
             cfg = infer_link()
-            if cfg["transport"] == "udp":
+            srv, gpu_err = None, ""
+            try:
+                srv, gpu_err = self._ask_gpu(cfg)
+            except Exception as exc:  # settings: address or key file
+                gpu_err = str(exc)
+            busy = JOB.running() and JOB.kind == "eval"
+            if busy and self.state.get("ok"):
+                # the evaluation is using the server; its own log shows the round trips
+                self.state = dict(self.state, server=srv, at=time.time())
+            else:
                 try:
-                    self._ping(cfg)
+                    out = self._ping(cfg)
+                    self.state = {**self._blank(), "ok": True, "round_ms": self.client.last.get("round_ms"),
+                                  "stage": "ok", "server": srv, "peer": self.state.get("peer", ""),
+                                  "hint": (srv or {}).get("hint", "") if srv and srv.get("external") else
+                                  (f"추론 통신은 정상입니다. GPU 노트북 서버 상태만 확인하지 못했습니다: {gpu_err}" if gpu_err else ""),
+                                  "loaded": [Path(m).parent.name if m.endswith("pretrained_model") else Path(m).name
+                                             for m in out.get("loaded") or []], "at": time.time()}
                 except Exception as exc:
-                    from infer_link.client import InferenceTimeout
-
-                    err = "응답 없음 (GPU 노트북의 UDP 서버, 같은 공유기인지 확인)" if isinstance(exc, InferenceTimeout) else str(exc)
-                    self.state = dict(self.state, ok=False, round_ms=None, error=err, at=time.time())
+                    stage, err, hint, ok = self.diagnose(exc, srv, gpu_err, cfg, self.state.get("peer", ""))
+                    self.state = {**self._blank(), "ok": ok, "stage": stage, "error": err, "hint": hint,
+                                  "server": srv, "peer": self.state.get("peer", ""), "at": time.time()}
             self.wake.wait(self.EVERY_S)
             self.wake.clear()
 
@@ -1874,10 +2112,8 @@ UDP_LINK = UdpLink()
 
 def infer_link_status() -> dict:
     cfg = infer_link()
-    out = {"transport": cfg["transport"], "udp_server": cfg["udp_server"], "udp_key_file": cfg["udp_key_file"]}
-    if cfg["transport"] == "udp":
-        out["udp"] = UDP_LINK.state
-    return out
+    return {"transport": "udp", "udp_server": cfg["udp_server"], "udp_key_file": cfg["udp_key_file"],
+            "port_hint": udp_port_hint(), "udp": UDP_LINK.state}
 
 
 def remote_eval_settings(local_model: Path, gpu_model: str, extra_args: list, async_env: dict, opts: dict, body: dict) -> dict:
@@ -1909,12 +2145,10 @@ def remote_eval_settings(local_model: Path, gpu_model: str, extra_args: list, as
         threshold = min(0.9, 15 / chunk)
         env.update({"OMX_ASYNC": "1", "OMX_ASYNC_CHUNK": str(chunk), "OMX_ASYNC_THRESHOLD": f"{threshold:.2f}",
                     "OMX_ASYNC_AGG": "latest_only", "OMX_FPS": "30", "OMX_RTC": "0"})
-    env.update(OMX_REMOTE_URL=remote.infer_url(), OMX_REMOTE_MODEL=gpu_model, OMX_REMOTE_OVERRIDES=json.dumps(overrides))
-    link = infer_link()
-    if link["transport"] == "udp":
-        check_udp(link["udp_server"], link["udp_key_file"])
-        env.update(OMX_REMOTE_URL=f"udp://{link['udp_server']}",
-                   OMX_UDP_KEY=str(Path(link["udp_key_file"]).expanduser()))
+    env.update(OMX_REMOTE_MODEL=gpu_model, OMX_REMOTE_OVERRIDES=json.dumps(overrides))
+    link = udp_ready()
+    env.update(OMX_REMOTE_URL=f"udp://{link['udp_server']}",
+               OMX_UDP_KEY=str(Path(link["udp_key_file"]).expanduser()))
     return env
 
 
@@ -2330,10 +2564,32 @@ def model_home_pose(model_path: str) -> dict | None:
     if hit and time.time() - hit[0] < MODEL_HOME_TTL_S:
         return hit[1]
     if CONTROL:
-        home = remote.gpu_json("/api/home?model=" + urllib.parse.quote(model_path)).get("home")
+        home = control_home_pose(model_path)
     else:
         home = omx_home.model_home(model_path)
     MODEL_HOMES[model_path] = (time.time(), home)
+    return home
+
+
+def control_home_pose(model_path: str) -> dict | None:
+    """Control PC: the copy kept here (written once, like the GPU laptop's home_pose.json), else ask over UDP."""
+    f = model_local(model_path) / "home_pose.json"
+    try:
+        return json.loads(f.read_text())
+    except (OSError, ValueError):
+        pass
+    if UDP_LINK.state.get("ok") is False:  # do not keep a caller (the Host's readiness poll) waiting on a dead link
+        raise RuntimeError("AI 추론 서버와 UDP 연결 안 됨: " + (UDP_LINK.state.get("error") or ""))
+    info = udp_model_info(model_path, timeout=4.0)
+    home = info.get("home")
+    if home:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(home, ensure_ascii=False))
+        for name, text in (info.get("files") or {}).items():  # the same reply has the config files
+            if name in ("config.json", "train_config.json") and not (f.parent / name).exists():
+                (f.parent / name).write_text(text)
+    elif info.get("home_error"):
+        raise RuntimeError(f"GPU 노트북이 홈 자세를 만들지 못했습니다 ({info['home_error']})")
     return home
 
 
@@ -2414,19 +2670,21 @@ def start_eval(body: dict) -> dict:
     if not 1 <= threads <= (os.cpu_count() or 24):
         raise RuntimeError(f"CPU 스레드 수는 1~{os.cpu_count() or 24} 사이로 정하세요.")
     camera_gate()
-    local_model = remote.fetch_model(run["model_path"]) if CONTROL else Path(run["model_path"])
+    if CONTROL:
+        udp_ready()
+    local_model = fetch_model_udp(run["model_path"]) if CONTROL else Path(run["model_path"])
     check_model_fits(model_config(str(local_model)))
     extra_args, async_env, opts = policy_eval_options(str(local_model), body)
     if CONTROL:
         async_env = remote_eval_settings(local_model, run["model_path"], extra_args, async_env, opts, body)
         extra_args = [a for a in extra_args if a.startswith("--dataset.")] + ["--policy.device=cpu"]
         opts["remote_inference"] = remote.HOST
-        opts["transport"] = infer_link()["transport"]
+        opts["transport"] = "udp"
     home = None
     if omx_home.eval_enabled():  # first move to the model's home pose (median of its training data's first frames)
         try:
             if CONTROL:
-                home = remote.gpu_json("/api/home?model=" + urllib.parse.quote(run["model_path"])).get("home")
+                home = model_home_pose(run["model_path"])
                 if not home:
                     raise RuntimeError("GPU 노트북이 홈 자세를 보내지 않았습니다")
             else:
@@ -2818,6 +3076,11 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         CLIENT["seen"] = time.time()
         if CONTROL:
+            if self.path == "/api/train/runs":  # also the Host's model check: answered from the copy when the tunnel is down
+                try:
+                    return self._json(gpu_runs())
+                except Exception as exc:
+                    return self._json({"error": str(exc)}, 502)
             if remote.proxied("GET", self.path):
                 return self._forward("GET")
             if self.path.startswith(("/api/dataset?", "/api/reference?")):  # /api/align: the cameras are here
@@ -2826,12 +3089,14 @@ class Handler(BaseHTTPRequestHandler):
                 if q.get("model", [""])[0] or repo and not (DATA_HOME / repo).exists():  # training data: GPU laptop
                     return self._forward("GET")
             if self.path.startswith("/api/home?") and "model=" in self.path:
-                # the model's home pose is computed there (training data); whether to use it is this PC's setting
+                # the model's home pose is computed there (training data), kept here; whether to use it is this PC's setting
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                 try:
-                    out = remote.gpu_json(self.path)
+                    out = {"home": model_home_pose(q.get("model", [""])[0])}
                 except Exception as exc:
                     out = {"error": str(exc)}
-                return self._json(home_status() | {k: v for k, v in out.items() if k in ("home", "error")})
+                return self._json(home_status() | out)
+
         if self.path == "/api/datasets":
             return self._json({"datasets": list_datasets(), "legacy_note": data_notes.load().get("legacy_note", "")})
         if self.path == "/api/errors":
@@ -3096,7 +3361,7 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(raw or b"{}")
         try:
             mqtt = body.get("source") == "mqtt"  # a control-tower command (the MQTT worker on this PC)
-            if mqtt and self.path in ("/api/teleop", "/api/record", "/api/armed", "/api/infer_link"):
+            if mqtt and self.path in ("/api/teleop", "/api/record", "/api/armed", "/api/infer_link", "/api/infer_link/key"):
                 raise RuntimeError("관제 명령으로는 평가 시작만 할 수 있습니다. armed는 패널 화면에서 사람이 켭니다.")
             if mqtt and self.path == "/api/eval/start" and not ARMED["on"]:
                 raise RuntimeError("armed가 꺼져 있어 관제 명령을 받지 않습니다. 패널 화면에서 사람이 켜야 합니다.")
@@ -3139,6 +3404,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(save_view_refs())
             elif self.path == "/api/infer_link" and CONTROL:
                 self._json(save_infer_link(body))
+            elif self.path == "/api/infer_link/key" and CONTROL:
+                self._json(provision_udp_key())
+            elif self.path == "/api/udp_server" and not CONTROL:  # GPU laptop: a control PC wants UDP (or not)
+                if UDP_KEEPER is None:
+                    raise RuntimeError("이 PC는 UDP 추론 서버를 켜지 않습니다.")
+                if body.get("action") == "release":
+                    self._json(UDP_KEEPER.release(str(body.get("peer", ""))))
+                else:
+                    self._json(UDP_KEEPER.ensure(body))
             elif self.path == "/api/start_pose/save":
                 self._json(save_start_pose(body.get("kind", "start")))
             elif self.path == "/api/eval/start":
@@ -3276,6 +3550,19 @@ def start_inference_server() -> None:
     threading.Thread(target=keep, daemon=True).start()
 
 
+UDP_KEEPER = None
+
+
+def start_udp_keeper() -> None:
+    """GPU laptop: the UDP inference server, started when a control PC chooses UDP (omx_udp_keeper.py)."""
+    global UDP_KEEPER
+    import omx_udp_keeper
+
+    UDP_KEEPER = omx_udp_keeper.UdpServerKeeper(VENV_BIN / "python", TOOLS_DIR, LOG_DIR,
+                                                 state_path=omx_config.CONF_DIR / "udp_server.json")
+    UDP_KEEPER.start()
+
+
 def _port_in_use(port: int) -> bool:
     import socket
 
@@ -3300,6 +3587,7 @@ def main() -> None:
         print(f"[omx] control PC: training and inference on {remote.HOST} (SSH tunnel)", flush=True)
     else:
         start_inference_server()
+        start_udp_keeper()
     print(f"OMX panel {VERSION} on http://{HOST}:{PORT} (user {USER}, settings: {CFG['_source']})", flush=True)
     try:
         server.serve_forever()
@@ -3309,6 +3597,8 @@ def main() -> None:
         PREVIEW.stop()
         if CONTROL:
             remote.TUNNEL.stop()
+        elif UDP_KEEPER is not None:
+            UDP_KEEPER.stop()
 
 
 if __name__ == "__main__":
