@@ -3436,6 +3436,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path == "/tips":  # 학습 TIP (top bar): a self-contained page, also saved as an HTML file from the page
+            body = (TOOLS_DIR / "omx_train_tips.html").read_text().replace("__OMX_VERSION__", VERSION).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
         elif self.path == "/api/motor_output":
             self._json(motor_output())
         elif self.path == "/api/status":

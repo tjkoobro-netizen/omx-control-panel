@@ -245,9 +245,28 @@ pre.log { margin: 0; background: var(--code-bg); color: var(--code-fg); border-r
 .ds-group > summary { cursor: pointer; font-weight: 650; font-size: 13px; padding: 4px 0; }
 .ds-group > summary .meta { font-weight: 400; color: var(--muted); font-size: 12px; margin-left: 6px; }
 .ds-group-note { margin: 0; font-size: 12px; color: var(--muted); }
-.ds-note { display: grid; gap: 2px; font-size: 12px; color: var(--muted); padding-left: 26px; }
-.ds-note b { color: var(--fg); font-weight: 550; }
-.ds-note .warn { color: var(--bad); font-weight: 600; }
+/* one summary line under a dataset name; the full description opens in #dsInfoDlg */
+/* 학습 TIP: a link that looks like the top-bar 사용법 button */
+.appbar .tips-btn { display: inline-flex; align-items: center; height: 26px; padding: 0 12px; border-radius: 4px; border: 1px solid rgba(255,255,255,.22); background: transparent; color: var(--appbar-fg); font-size: 12px; font-weight: 600; text-decoration: none; white-space: nowrap; }
+.appbar .tips-btn:hover { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.4); }
+.appbar .tips-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ds-sum { display: flex; align-items: baseline; gap: 8px; width: 100%; min-width: 0; contain: inline-size; height: auto; padding: 0 0 0 26px; border: 0; background: none; font-size: 12px; font-weight: 400; letter-spacing: 0; color: var(--muted); justify-content: flex-start; text-align: left; }
+.ds-sum .t { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ds-sum .t b { color: var(--fg); font-weight: 550; }
+.ds-sum .warn { flex: none; color: var(--bad); font-weight: 600; }
+.ds-sum .more { flex: none; color: var(--accent); font-weight: 550; }
+.ds-sum:hover:not(:disabled) { color: var(--muted); }
+.ds-sum:hover .more { text-decoration: underline; text-underline-offset: 3px; }
+dialog#dsInfoDlg { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 48px); }
+.dsi-wrap { padding: 0 22px 20px; display: grid; gap: 14px; }
+.dsi-wrap h2 { font: 650 14.5px var(--mono); overflow-wrap: anywhere; margin: 0; }
+.dsi-meta { margin: 0; font-size: 12.5px; color: var(--muted); }
+.dsi-sec { display: grid; gap: 6px; }
+.dsi-sec h3 { margin: 0; font-size: 12px; font-weight: 650; color: var(--muted); letter-spacing: .02em; }
+.dsi-sec ul { margin: 0; padding-left: 18px; display: grid; gap: 5px; font-size: 13.5px; line-height: 1.6; max-width: 72ch; }
+.dsi-sec li { overflow-wrap: anywhere; }
+.dsi-sec li b { font-weight: 650; }
+.dsi-sec.warn li { color: var(--bad); font-weight: 600; }
 .src-tag { font: 600 11px var(--mono); padding: 0 6px; border: 1px solid currentColor; border-radius: 9px; margin-right: 6px; color: var(--accent); }
 .ep-chips button.off { text-decoration: line-through; color: var(--bad); border-color: var(--bad); background: var(--bad-soft); }
 .ep-chips button.cur { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -495,7 +514,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.14.3</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.14.4</span></div>
       </div>
     </div>
     <div class="status">
@@ -513,6 +532,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       <button type="button" id="errBadge" class="pill bad" hidden title="눌러서 오류 내용 보기"></button>
       <button type="button" id="camBadge" class="pill warn" hidden title="눌러서 카메라 화면 확인"></button>
       <button type="button" id="armedBadge" class="pill bad" hidden title="관제(MQTT) 명령으로 평가가 시작될 수 있습니다. 눌러서 평가 탭의 스위치 보기">관제 자동 수락 켜짐</button>
+      <a class="tips-btn" id="tipsBtn" href="/tips" target="_blank" rel="noopener" title="정책·학습 설정·데이터 품질·fps·성능 올리는 법 (논문·산업계 근거). 새 탭에서 열고 HTML로 저장할 수 있습니다">학습 TIP</a>
       <button type="button" class="help-open" data-help="start">사용법</button>
     </div>
   </div>
@@ -1190,6 +1210,14 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
   </div>
 </dialog>
 
+<dialog id="dsInfoDlg" aria-labelledby="dsInfoTitle">
+  <div class="dsi-wrap">
+    <div class="help-top"><h2 id="dsInfoTitle"></h2><button type="button" id="dsInfoClose">닫기</button></div>
+    <p class="dsi-meta" id="dsInfoMeta"></p>
+    <div id="dsInfoBody" style="display:grid;gap:16px"></div>
+  </div>
+</dialog>
+
 <dialog id="help" aria-labelledby="helpTitle">
 <div class="help-wrap">
   <nav class="help-nav" id="helpNav" aria-label="매뉴얼 목차">
@@ -1337,7 +1365,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
     <section id="h-train">
       <h3>② 학습 시키기</h3>
       <ol>
-        <li><b>학습 데이터 고르기</b>: 데이터는 구역별로 접고 펼칩니다. 이름 규칙(<code>MMDD_출처_행동키워드_Nep</code>, 무작위화 데이터는 끝이 <code>rand_epN</code>)을 따르면 설명이 저절로 채워지고, 이름과 실제 에피소드 수가 다르면 빨갛게 알려 줍니다. <b>전체 선택</b>은 펼친 구역만 고릅니다. <b>HTML로 내려받기</b>로 목록을 파일로 받을 수 있습니다. 녹화 원본에 체크합니다. <b>빠른 선택</b>으로 전체 선택·선택 해제·날짜별 선택을 할 수 있고, <b>짧은 에피소드 빼기</b>는 데이터셋마다 길이 중앙값의 60%보다 짧은 에피소드(중간에 끊긴 시연 등)를 뺍니다.</li>
+        <li><b>학습 데이터 고르기</b>: 데이터는 구역별로 접고 펼칩니다. 이름 규칙(<code>MMDD_출처_행동키워드_Nep</code>, 무작위화 데이터는 끝이 <code>rand_epN</code>)을 따르면 설명이 저절로 채워지고, 이름과 실제 에피소드 수가 다르면 빨갛게 알려 줍니다. 이름 아래에는 설명이 한 줄로 요약되어 나오고, 그 줄(또는 <b>자세히</b>)을 누르면 전체 설명이 팝업으로 열립니다. 정책·설정·데이터 품질·fps에 대한 배경 설명은 위쪽 <b>학습 TIP</b>(새 탭, HTML로 저장 가능)에 있습니다. <b>전체 선택</b>은 펼친 구역만 고릅니다. <b>HTML로 내려받기</b>로 목록을 파일로 받을 수 있습니다. 녹화 원본에 체크합니다. <b>빠른 선택</b>으로 전체 선택·선택 해제·날짜별 선택을 할 수 있고, <b>짧은 에피소드 빼기</b>는 데이터셋마다 길이 중앙값의 60%보다 짧은 에피소드(중간에 끊긴 시연 등)를 뺍니다.</li>
         <li><b>영상 보며 고르기</b>: 이름을 눌러 에피소드를 펼친 뒤 에피소드를 누르면 아래에서 front·wrist 영상이 2배속으로 재생됩니다. 실패한 시연이면 <b>학습에서 빼기</b>(단축키 X)를 누르고, <b>다음 ▶</b>(→)으로 넘기며 훑어봅니다. 스페이스는 재생·멈춤입니다.</li>
         <li><b>학습 설정</b>: 정책(ACT 추천), 스텝 수, 배치 크기, 이미지 증강을 정합니다. 아래에 예상 소요 시간과 데이터 반복 횟수, 저장 위치가 나옵니다.</li>
         <li><b>바로 시작</b>을 누르면 진행 막대, 남은 시간, 손실 그래프가 실시간으로 표시됩니다.</li>
@@ -1523,7 +1551,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       <p>모델은 한 번 계산할 때 앞으로 할 <b>동작 여러 개(동작 묶음)</b>를 한꺼번에 만들어요. 보통은 그 묶음을 다 쓰고 나서야 다음 묶음을 계산하기 때문에, <b>계산하는 동안 로봇이 멈춰요</b>. Diffusion은 1초 넘게 멈추기도 해요.</p>
       <p><b>비동기 실행</b>을 켜면 남은 동작을 계속 실행하면서 <b>뒤에서 다음 묶음을 미리 계산</b>해요. 새 묶음이 오면 이미 지나간 부분은 버리고 이어서 써요. 로봇이 멈추지 않아 동작이 부드러워져요.</p>
       <ul>
-        <li><b>한 번에 쓸 동작 수</b> (actions_per_chunk): 한 묶음에서 실제로 쓸 동작 개수예요. 30개 = 1초. 너무 길면 오래된 판단으로 움직이고, 너무 짧으면 계산이 자주 돌아요. 기본: ACT·SmolVLA 50, Diffusion 15(최대). <b>15개 미만으로 줄이면 묶음이 자주 바뀌어(0.5초에 한 번 이상) 이음새가 많아지고 오히려 더 버벅일 수 있어요.</b></li>
+        <li><b>한 번에 쓸 동작 수</b> (actions_per_chunk): 한 묶음에서 실제로 쓸 동작 개수예요. 30개 = 1초. 너무 길면 오래된 판단으로 움직이고, 너무 짧으면 계산이 자주 돌아요. 기본: ACT·SmolVLA 50, Diffusion 15. Diffusion의 최대는 모델마다 달라요(horizon − n_obs_steps + 1: 예전 모델 15, LeRobot 0.6.1에서 새로 학습한 모델 63). <b>15개 미만으로 줄이면 묶음이 자주 바뀌어(0.5초에 한 번 이상) 이음새가 많아지고 오히려 더 버벅일 수 있어요.</b></li>
         <li><b>다음 계산 시작 시점</b> (chunk_size_threshold, 0~1): 남은 동작이 이 비율 아래로 줄면 다음 묶음 계산을 시작해요. 0.5면 절반쯤 썼을 때 시작해요. 계산이 오래 걸리는 모델일수록 크게(일찍) 하세요.</li>
         <li><b>겹치는 구간 합치기</b> (aggregate_fn): 새 묶음과 아직 남은 옛 묶음이 겹치는 부분을 어떻게 합칠지예요. 가중 평균(옛 30% + 새 70%)이 부드럽고 무난해요. "새 것만"은 반응이 빠르지만 바뀌는 순간 튈 수 있어요.</li>
       </ul>
@@ -2829,13 +2857,37 @@ function trGroupOpen(key) {
   if (saved) { try { const o = JSON.parse(saved); if (key in o) return o[key]; } catch (e) {} }
   return key === "rule" || key === "new";
 }
-function trNoteHtml(d) {
-  if (d.kind === "eval") return "";
-  const lines = [d.how && `어떻게: ${escHtml(d.how)}`, d.action && `행동: ${escHtml(d.action)}`, d.use && d.use !== "미정" && `용도: <b>${escHtml(d.use)}</b>`]
-    .filter(Boolean).map(t => `<span>${t}</span>`);
-  if (d.warn) lines.push(`<span class="warn">${escHtml(d.warn)}</span>`);
-  return lines.length ? `<div class="ds-note">${lines.join("")}</div>` : "";
+// a description as lines: its own line breaks, sentence ends (". ") and " — " start a new line
+function dsLines(t) {
+  return String(t || "").split(/\n+|(?<=[.。])\s+(?=\S)|\s+—\s+/).map(x => x.trim()).filter(Boolean);
 }
+// "주의: ...", "뺀 것: ..." -> the label in bold
+function dsLineHtml(line) {
+  const m = line.match(/^([^:=()]{1,10}):\s+(.*)$/);
+  return `<li>${m ? `<b>${escHtml(m[1])}</b>: ${escHtml(m[2])}` : escHtml(line)}</li>`;
+}
+// one line under the name (purpose · first sentence of the action); a click opens the full description
+function trNoteHtml(d) {
+  if (d.kind === "eval" || !(d.how || d.action || d.use || d.warn)) return "";
+  const use = d.use && d.use !== "미정" ? `<b>${escHtml(d.use)}</b>` : "";
+  const what = escHtml(dsLines(d.action)[0] || dsLines(d.how)[0] || "");
+  return `<button type="button" class="ds-sum" data-info="${escHtml(d.repo_id)}" title="눌러서 자세한 설명 보기"><span class="t">${[use, what].filter(Boolean).join(" · ")}</span>${d.warn ? `<span class="warn">⚠ ${escHtml(d.warn)}</span>` : ""}<span class="more">자세히</span></button>`;
+}
+function openDsInfo(repo) {
+  const d = tr.datasets.find(x => x.repo_id === repo);
+  if (!d) return;
+  $("dsInfoTitle").textContent = d.repo_id;
+  $("dsInfoMeta").textContent = [d.source && `출처 ${d.source}`, `에피소드 ${d.episodes}개`, `${d.minutes}분`, TR_GROUP_TITLE[d.group] || d.group].filter(Boolean).join(" · ");
+  const sec = (title, text, cls = "") => {
+    const lines = dsLines(text);
+    return lines.length ? `<section class="dsi-sec ${cls}"><h3>${title}</h3><ul>${lines.map(dsLineHtml).join("")}</ul></section>` : "";
+  };
+  $("dsInfoBody").innerHTML = sec("주의", d.warn, "warn") + sec("용도", d.use !== "미정" ? d.use : "") + sec("어떤 행동인지", d.action)
+    + sec("어떻게 나온 데이터인지", d.how) || '<p class="muted" style="margin:0">설명이 없습니다.</p>';
+  $("dsInfoDlg").showModal();
+}
+$("dsInfoClose").addEventListener("click", () => $("dsInfoDlg").close());
+$("dsInfoDlg").addEventListener("click", (ev) => { if (ev.target === ev.currentTarget) ev.currentTarget.close(); });  // backdrop
 
 function drawTrainDatasets() {
   const box = $("trDatasets");
@@ -2870,7 +2922,7 @@ $("trDatasets").addEventListener("toggle", (ev) => {  // toggle does not bubble:
 // the same list as one HTML file to keep or send
 function dataListHtml() {
   const stamp = new Date().toLocaleString("ko-KR");
-  const sections = trGroups().map(g => `<details ${g.key === "rule" || g.key === "new" ? "open" : ""}><summary>${escHtml(g.title)} <span class="c">${g.list.length}</span></summary>${g.older && state?.data_legacy_note ? `<p class="c">${escHtml(state.data_legacy_note)}</p>` : ""}<div class="s"><table><thead><tr><th>데이터</th><th>출처</th><th>에피소드</th><th>길이</th><th>어떻게 나온 데이터인지</th><th>어떤 행동인지</th><th>용도</th></tr></thead><tbody>${g.list.map(d => `<tr><td><code>${escHtml(d.repo_id)}</code></td><td>${escHtml(d.source)}</td><td>${d.episodes}</td><td>${d.minutes}분</td><td>${escHtml(d.how)}</td><td>${escHtml(d.action)}${d.warn ? `<div class="w">${escHtml(d.warn)}</div>` : ""}</td><td>${escHtml(d.use)}</td></tr>`).join("")}</tbody></table></div></details>`).join("");
+  const sections = trGroups().map(g => `<details ${g.key === "rule" || g.key === "new" ? "open" : ""}><summary>${escHtml(g.title)} <span class="c">${g.list.length}</span></summary>${g.older && state?.data_legacy_note ? `<p class="c">${escHtml(state.data_legacy_note)}</p>` : ""}<div class="s"><table><thead><tr><th>데이터</th><th>출처</th><th>에피소드</th><th>길이</th><th>어떻게 나온 데이터인지</th><th>어떤 행동인지</th><th>용도</th></tr></thead><tbody>${g.list.map(d => `<tr><td><code>${escHtml(d.repo_id)}</code></td><td>${escHtml(d.source)}</td><td>${d.episodes}</td><td>${d.minutes}분</td><td>${dsLines(d.how).map(escHtml).join("<br>")}</td><td>${dsLines(d.action).map(escHtml).join("<br>")}${d.warn ? `<div class="w">${escHtml(d.warn)}</div>` : ""}</td><td>${escHtml(d.use)}</td></tr>`).join("")}</tbody></table></div></details>`).join("");
   return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>학습 데이터 목록</title><style>:root{--bg:#f6f7f9;--pn:#fff;--ln:#dfe3e8;--tx:#1b2026;--mu:#5d6773;--w:#a4260f}@media (prefers-color-scheme:dark){:root{--bg:#14181d;--pn:#1e242b;--ln:#343c46;--tx:#e6ebf0;--mu:#9aa6b2;--w:#ff8b80}}body{margin:0 auto;max-width:1400px;padding:20px;background:var(--bg);color:var(--tx);font:14px/1.5 system-ui,'Noto Sans CJK KR',sans-serif}h1{font-size:20px;margin:0 0 4px}.c{color:var(--mu);font-weight:400}details{margin:14px 0}summary{cursor:pointer;font-weight:600}.s{overflow-x:auto;background:var(--pn);border:1px solid var(--ln);border-radius:8px;margin-top:8px}table{border-collapse:collapse;width:100%;min-width:900px}th,td{padding:7px 10px;border-bottom:1px solid var(--ln);text-align:left;vertical-align:top}th{color:var(--mu);font-size:12px}code{font:12.5px ui-monospace,monospace}.w{color:var(--w);font-weight:600}</style></head><body><h1>학습 데이터 목록</h1><p class="c">${escHtml(stamp)} 기준 · 패널 ${escHtml(state?.version || "")} · 계정 ${escHtml(state?.user || "")}</p>${sections || '<p class="c">데이터가 없습니다.</p>'}</body></html>`;
 }
 $("trExport").addEventListener("click", () => {
@@ -2883,6 +2935,8 @@ $("trExport").addEventListener("click", () => {
 
 $("trDatasets").addEventListener("click", async (ev) => {
   const sel = ev.target.closest("[data-sel]"), open = ev.target.closest("[data-open]"), chip = ev.target.closest("[data-ep]");
+  const info = ev.target.closest("[data-info]");
+  if (info) { openDsInfo(info.dataset.info); return; }
   if (sel) { sel.checked ? tr.selected.add(sel.dataset.sel) : tr.selected.delete(sel.dataset.sel); drawTrainDatasets(); return; }
   if (open) {
     const repo = open.dataset.open;
