@@ -20,18 +20,19 @@ open_url() {  # a new window, so the panel is not hidden as a tab behind other w
   fi
 }
 
-robot_here() { ls /dev/serial/by-id/*OpenRB* >/dev/null 2>&1; }
-robot_on_gpu() { ssh -o BatchMode=yes -o ConnectTimeout=5 "$HOST" 'ls /dev/serial/by-id/*OpenRB*' >/dev/null 2>&1; }
-
-# v2 control PC (the robot is on this PC; training and inference on the GPU laptop): run the panel here.
-# With its robot plugged into the GPU laptop instead, open that laptop's panel below, like a personal PC does.
+# v2 control PC (training and inference on the GPU laptop): always this PC's own panel, wherever the robot is.
+# With the robot plugged into the GPU laptop, the panel's 로봇 PC switch (top right) opens that laptop's panel in the
+# same tab and keeps this PC's server (and the Host) running (3.14.3).
 CONTROL=0
 grep -q '"role": *"control"' $CONF_DIR/config.json 2>/dev/null && CONTROL=1
-if [ "$CONTROL" = 1 ] && { robot_here || ! robot_on_gpu; }; then
+if [ "$CONTROL" = 1 ]; then
   notify-send -t 4000 "OMX Control Panel v3" "이 PC의 제어판 v3를 켜는 중..." 2>/dev/null
-  # an SSH tunnel left by the old way of opening (laptop -> GPU panel) would hold the local port
+  # SSH tunnels left by the old ways of opening (laptop -> GPU panel on this port; before 3.14.3 the robot-on-GPU
+  # case on this port + 100) would hold the port or open a second, switch-less GPU panel
   P0=$(python3 -c "import sys; sys.path.insert(0, '$HOME/$V3/omx_tools'); import omx_config; print(omx_config.port())" 2>/dev/null)
-  for pid in $(ss -ltnpH 2>/dev/null | grep "127.0.0.1:${P0} " | grep '"ssh"' | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u); do kill "$pid"; done
+  for p in "$P0" "$((P0 + 100))"; do
+    for pid in $(ss -ltnpH 2>/dev/null | grep "127.0.0.1:${p} " | grep '"ssh"' | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u); do kill "$pid"; done
+  done
   PORT=$(bash ~/$V3/omx_tools/omx-panel-server.sh --port-only) || {
     notify-send -u critical "OMX Control Panel v3" "제어판 서버를 켜지 못했습니다. ~/$V3/logs/web.log 를 확인하세요." 2>/dev/null; exit 1; }
   open_url "http://127.0.0.1:${PORT}"
@@ -57,7 +58,6 @@ PORT=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$HOST" "bash $TOOLS/omx-panel-
   || fail "GPU 노트북($HOST)에서 제어판 서버를 켜지 못했습니다. 'ssh $HOST' 접속과 GPU 노트북의 ~/$V3/logs/web.log 를 확인하세요."
 [[ "$PORT" =~ ^[0-9]+$ ]] || fail "서버 포트를 알 수 없습니다: $PORT"
 LOCAL=$PORT
-[ "$CONTROL" = 1 ] && LOCAL=$((PORT + 100))  # this PC's own panel may hold the same port number
 URL="http://127.0.0.1:${LOCAL}"
 
 # a tunnel from before a network change or sleep can hold the port without answering: open a new one
