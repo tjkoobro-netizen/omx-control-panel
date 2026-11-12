@@ -65,6 +65,11 @@ FREEZE, RELEASE = threading.Event(), threading.Event()
 # Set while an arm is being landed (safe stop): omx_run.py then ignores a second 중지 (SIGINT / SIGTERM),
 # which used to cut the landing short and leave the arms holding with the torque on.
 LANDING = threading.Event()
+# fast release (evaluation with OMX_FAST_RELEASE=1 whose last attempt ended by return detection, nothing stopped it):
+# the arms are already at the start pose and the shelf alignment takes them over, so no home move, no wrist turn or
+# gripper close, a 0.5 s fade instead of 3 s, both arms at once. Set by omx_run.py just before its safe stop.
+FAST_LAND = threading.Event()
+FAST_RAMP_S = 0.5
 PWM_MAX = 885  # X-series Goal_PWM full scale
 
 DEFAULTS = {
@@ -371,6 +376,17 @@ def soft_land(robot) -> None:
     _say("완료. 토크를 끕니다", "stop")
 
 
+def fast_land(robot) -> None:
+    """The short safe stop (FAST_LAND): fade the output out over FAST_RAMP_S where the arm is, torque off."""
+    steps = 5
+    for k in range(1, steps + 1):
+        set_pwm(robot, 1 - k / steps)
+        time.sleep(FAST_RAMP_S / steps)
+    robot.bus.disable_torque()
+    set_pwm(robot, 1.0)  # leave the default output for the next program (RAM value; torque is off)
+    _say("빠른 놓기 완료. 토크를 끕니다 (정렬이 이어서 팔을 잡습니다)", "stop")
+
+
 def arm_joints(joints: dict, side: str | None) -> dict:
     """The joints of one arm: a cooperative robot's pose has left_/right_ names (a model trained on both arms);
     a pose without them (one arm, or a task's home) is used for each arm as it is."""
@@ -619,12 +635,20 @@ def install() -> None:
         return sent
 
     import threading
-    land_lock = threading.Lock()
+    locks_guard = threading.Lock()
+
+    def land_lock(arm) -> threading.Lock:
+        """One per arm: the two arms of a cooperative robot can land at the same time (fast release)."""
+        with locks_guard:
+            lock = arm.__dict__.get("_omx_land_lock")
+            if lock is None:
+                lock = arm.__dict__["_omx_land_lock"] = threading.Lock()
+            return lock
 
     def disconnect(self, *args, **kwargs):
         # 즉시 중단 may land the arm from another thread while omx_run.py is still saving;
         # whoever comes second just finds the robot already disconnected.
-        with land_lock:
+        with land_lock(self):
             if not self.bus.is_connected:
                 return None
             outer = LANDING.is_set()  # a cooperative robot sets it for both arms
@@ -645,7 +669,7 @@ def install() -> None:
             _say("초기 위치로 돌아갑니다", "freeze")
         try:
             if getattr(self.config, "disable_torque_on_disconnect", True):
-                soft_land(self)
+                fast_land(self) if FAST_LAND.is_set() and not FREEZE.is_set() else soft_land(self)
         except Exception as exc:  # never block the normal shutdown
             _say(f"건너뜀 ({exc})", "stop")
         return original_disconnect(self, *args, **kwargs)

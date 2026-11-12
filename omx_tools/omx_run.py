@@ -40,6 +40,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 # The video encoders run in worker processes. Forking this multi-threaded process (camera readers,
 # stdin listener) can deadlock them, so start workers with "spawn".
@@ -426,6 +427,30 @@ class Policy:
 
 
 # ---------------------------------------------------------------- dataset
+class NoRecord:
+    """Evaluation without recording (OMX_NO_RECORD=1, the panel's default): the dataset's features (the names the
+    policy reads and writes) and its episode count, nothing written - no frames, no videos, no folder."""
+
+    def __init__(self, repo_id: str, fps: int, features: dict):
+        self.repo_id, self.fps, self.features = repo_id, fps, features
+        self.num_episodes = 0
+        self.root = None
+        self.writer = SimpleNamespace(episode_buffer={"size": 0})
+
+    def add_frame(self, frame: dict) -> None:
+        self.writer.episode_buffer["size"] += 1
+
+    def clear_episode_buffer(self) -> None:
+        self.writer.episode_buffer = {"size": 0}
+
+    def save_episode(self) -> None:
+        self.num_episodes += 1
+        self.clear_episode_buffer()
+
+    def finalize(self) -> None:
+        pass
+
+
 def open_dataset(cfg: RunConfig, robot):
     from lerobot.datasets import LeRobotDataset
     from lerobot.utils.constants import HF_LEROBOT_HOME
@@ -435,6 +460,9 @@ def open_dataset(cfg: RunConfig, robot):
     root = Path(d.root) if d.root else Path(os.environ.get("HF_LEROBOT_HOME") or HF_LEROBOT_HOME) / d.repo_id
     features = combine_feature_dicts(hw_to_dataset_features(robot.action_features, ACT, d.video),
                                      hw_to_dataset_features(robot.observation_features, OBS, d.video))
+    if os.environ.get("OMX_NO_RECORD") == "1" and (cfg.policy.path or os.environ.get("OMX_REMOTE_URL")):  # evaluations only
+        _say("[omx] 녹화 안 함: 영상과 데이터를 저장하지 않고 평가만 합니다")
+        return NoRecord(d.repo_id, d.fps, features)
     cams = len(getattr(robot, "cameras", {}) or {})
     writers = 0 if d.streaming_encoding else 4 * cams  # PNG frames only without streaming encoding
     common = dict(streaming_encoding=d.streaming_encoding, encoder_threads=d.encoder_threads,
@@ -475,7 +503,8 @@ def save_episode(dataset) -> bool:
     if size == 0:
         _say("[omx] skipped an empty episode (stopped before any frame was recorded)")
         return False
-    _backup_episode(dataset, dataset.writer.episode_buffer, index)
+    if not isinstance(dataset, NoRecord):
+        _backup_episode(dataset, dataset.writer.episode_buffer, index)
     dataset.save_episode()
     return True
 
@@ -890,14 +919,21 @@ def run(cfg: RunConfig) -> None:
         return
     dataset = open_dataset(cfg, robot)
     viewer = Viewer(cfg)
+    clean = False  # every attempt ran and was saved (no exception): a fast release may follow
     try:
         # the leader first, so the follower is not left idle while the leader connects
         if teleop is not None:
             teleop.connect()
         robot.connect()
         run_episodes(cfg, robot, teleop, policy, dataset, viewer)
+        clean = True
     finally:
         logging.info("Stop recording")
+        if (os.environ.get("OMX_FAST_RELEASE") == "1" and clean and EPISODE_END.get("returned")
+                and not ABORT["on"] and not omx_safe_start.FREEZE.is_set()):
+            # the shelf alignment follows and takes the arms from here: the short safe stop (omx_safe_start)
+            omx_safe_start.FAST_LAND.set()
+            _say("[omx] 빠른 놓기: 복귀 감지로 끝나 원위치·손목·그리퍼 정리 없이 두 팔을 함께 0.5초에 내려놓습니다")
         dataset.finalize()
         _disconnect(robot)  # safe stop; after 비상 정지 it waits here for [홈 위치로 이동]
         if teleop is not None and teleop.is_connected:

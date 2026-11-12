@@ -201,6 +201,37 @@ def camera_watch() -> dict:
             "sig": "|".join(sorted(p.name for p in Path("/dev/v4l/by-path").glob("*-video-index0")))}
 
 
+HOSTNAME = os.uname().nodename
+
+
+def robot_here() -> bool:
+    """An arm board of this setup is plugged into this PC (the robot can move between the two PCs by one USB hub)."""
+    return any(Path(p).exists() for _, p in FOLLOWERS + LEADERS)
+
+
+_GPU_ROBOT = {"t": 0.0, "busy": False, "data": None}
+
+
+def _refresh_gpu_robot() -> None:
+    try:
+        _GPU_ROBOT["data"] = remote.gpu_json("/api/robot_here", timeout=3) if remote.TUNNEL.status()["ok"] else None
+    except Exception:
+        _GPU_ROBOT["data"] = None  # an older GPU panel (no such request) or the link is down: unknown
+    finally:
+        _GPU_ROBOT["t"], _GPU_ROBOT["busy"] = time.time(), False
+
+
+def gpu_panel() -> dict:
+    """Control PC: the GPU laptop's panel through the tunnel, and whether the robot is plugged in there. Refreshed in
+    the background every 5 s so the status poll never waits on the link."""
+    if time.time() - _GPU_ROBOT["t"] > 5 and not _GPU_ROBOT["busy"]:
+        _GPU_ROBOT["busy"] = True
+        threading.Thread(target=_refresh_gpu_robot, daemon=True).start()
+    data = _GPU_ROBOT["data"] or {}
+    return {"port": remote.TUNNEL_PANEL, "ok": remote.TUNNEL.status()["ok"],
+            "robot_here": data.get("robot_here"), "host": data.get("host", "")}
+
+
 def required_camera_roles(mode: str) -> list:
     return ["front", "wrist"] if mode == "single" else ["front", "wrist_left", "wrist_right"]
 
@@ -1298,9 +1329,15 @@ class Job:
             set_armed(False, f"이상 정지 {self.info['err']['name']}")
         if self.kind == "eval":
             LAST_RESULT.clear()
-            LAST_RESULT.update(eval_result(self))
-        if self.kind == "eval" and self.info.get("protocol"):
-            fill_auto_later(self.info["repo_id"], delay=0)
+            LAST_RESULT.update(eval_result(self), stage="done", final=True, align=None)
+            if self.info.get("shelf_align"):
+                align_after_eval(self.info["shelf_align"], proc)
+        if self.kind in ("align", "align_release"):
+            align_ended(self, proc)
+        if self.kind == "shelf_read":
+            shelf_read_ended(self, proc)
+        if self.kind == "eval" and self.info.get("protocol") and self.info.get("record", True):
+            fill_auto_later(self.info["repo_id"], delay=0)  # reads the recorded videos
         if self.kind == "eval" and self.info.get("repo_id"):
             # keep the control-rate summary with the eval record
             try:
@@ -1312,6 +1349,11 @@ class Job:
                                 "slow_min_hz": hz[0] if hz else None}
                 if self.info["err"]:
                     note["stop_error"] = {k: self.info["err"][k] for k in ("name", "title", "detail")}
+                if not self.info.get("record", True):  # nothing recorded: the attempts that ran, for marking results
+                    last = LAST_RESULT.get("last_episode") or {}
+                    note["episodes_run"] = int(last["episode"]) + 1 if last.get("episode") is not None else 0
+                    if proc.returncode != 0 and not note["episodes_run"]:
+                        note["start_failed"] = True
                 path.write_text(json.dumps(note, ensure_ascii=False, indent=2))
             except (OSError, ValueError):
                 pass
@@ -1421,6 +1463,9 @@ class Job:
     def stop(self) -> None:
         if not self.running():
             return
+        if self.kind == "align":
+            self._align_stop("abort")
+            return
         sig = signal.SIGTERM if self.info.get("stopping") else signal.SIGINT
         self.info["stopping"] = True
         os.killpg(self.proc.pid, sig)
@@ -1432,6 +1477,8 @@ class Job:
         started within ABORT_WAIT_S (process stuck), or on a second press, the run is killed and
         omx_return_home.py brings the arm back from the saved start pose instead.
         """
+        if self.running() and self.kind == "align":
+            return self._align_stop("abort")
         if not self.running() or self.kind != "eval":
             raise RuntimeError("실행 중인 평가가 없습니다.")
         if self.info.get("frozen") and not self.info.get("released"):
@@ -1490,6 +1537,8 @@ class Job:
         force-quit as before (the follower also stays where it is with the torque on)."""
         if not self.running():
             return "none"
+        if self.kind == "align":
+            return self._align_stop("freeze")
         if self.kind != "eval":
             self.kill()
             return "kill"
@@ -1511,6 +1560,36 @@ class Job:
 
         threading.Thread(target=watchdog, daemon=True).start()
         return "freeze"
+
+    def _align_stop(self, mode: str) -> str:
+        """Shelf alignment runner: SIGTERM = it stops where it is with the torque on and exits. 즉시 중단 / Stop
+        then lands the arms (runner --release), 비상 정지 waits for [홈 위치로 이동]. A second press, or no exit
+        within ALIGN_STOP_WAIT_S, force-quits it (the torque stays on, the landing still follows)."""
+        again = bool(self.info.get("abort_sent") or self.info.get("frozen"))
+        if mode == "freeze":
+            self.info["frozen"] = time.time()
+            self.info["land_after"] = False
+            self.info["phase"] = "비상 정지 · 제자리에 멈추는 중"
+        else:
+            self.info.setdefault("abort_sent", time.time())
+            self.info["land_after"] = not self.info.get("frozen")
+            self.info["phase"] = "즉시 중단 · 멈춘 뒤 내려놓습니다"
+        if again:
+            self.kill()
+            return "kill"
+        os.kill(self.proc.pid, signal.SIGTERM)
+        proc = self.proc
+
+        def watchdog() -> None:
+            end = time.time() + ALIGN_STOP_WAIT_S
+            while time.time() < end and proc.poll() is None:
+                time.sleep(0.2)
+            if self.proc is proc and proc.poll() is None:
+                self.lines.append("[omx] align: 응답이 없어 강제로 끝냅니다 (팔은 토크를 켠 채 제자리)")
+                self.kill()
+
+        threading.Thread(target=watchdog, daemon=True).start()
+        return mode
 
     def kill(self) -> list[str]:
         """Force-quit: SIGKILL the job's whole process group plus any leftover robot processes."""
@@ -2275,6 +2354,9 @@ def home_return() -> dict:
         return {"ok": True, "mode": "release"}
     if JOB.running() or other_robot_processes():
         raise RuntimeError("로봇 프로그램이 아직 실행 중입니다.")
+    if ALIGN.get("hold"):  # a shelf alignment stopped in place: its runner lands the arms
+        start_align(dict(ALIGN), release=True)
+        return {"ok": True, "mode": "align_release"}
     if not EVAL_HOME_FILE.exists():
         raise RuntimeError("돌아갈 홈 자세 기록이 없습니다.")
     data = json.loads(EVAL_HOME_FILE.read_text())
@@ -2642,6 +2724,7 @@ def eval_result(job) -> dict:
     arms = arm_states(end.get("state") or {}, home) if end else {}
     checks = [a["at_home"] for a in arms.values()]
     return {"kind": "eval", "source": info.get("source", "panel"), "repo_id": info.get("repo_id"),
+            "recorded": info.get("record", True),
             "started_at": dt.datetime.fromtimestamp(job.started).isoformat(timespec="seconds"),
             "ended_at": dt.datetime.now().isoformat(timespec="seconds"), "returncode": rc,
             "exit_ok": rc == 0 and not err and stopped is None, "stopped_by": stopped, "err": err,
@@ -2649,6 +2732,220 @@ def eval_result(job) -> dict:
             "last_episode": {k: end.get(k) for k in ("episode", "at", "aborted", "returned", "elapsed_s")} if end else None,
             "arms": arms or None,
             "home_check": "unknown" if not checks or None in checks else "ok" if all(checks) else "far"}
+
+
+# ---------------------------------------------------------------- 선반 정렬 (관제 평가 뒤 이어서)
+ALIGN_RESULT_FILE = LOG_DIR / "align_result.json"  # the runner's result (--result)
+ALIGN_DELAY_S = 0.3  # after the eval let go of the ports and cameras (the runner waits for its own start time)
+ALIGN_STOP_WAIT_S = 5.0  # 즉시 중단 / 비상 정지: force-quit the runner when it has not exited by then
+ALIGN: dict = {}  # box and slot of the last alignment; "hold" while its arms wait for [홈 위치로 이동]
+ALIGN_REST_TOL = 5.0  # joint units: after the alignment the arms are back where it found them (gripper left out)
+
+
+def align_settings() -> dict | None:
+    """config "shelf_align": {"cmd": [python, real_runner.py], "models": [part of the model path, ...],
+    "slot": "2B", "draw_target": false}. Missing or without cmd = off."""
+    s = omx_config.CFG.get("shelf_align") or {}
+    cmd = [str(Path(c).expanduser()) for c in s.get("cmd") or []]
+    return dict(s, cmd=cmd) if cmd else None
+
+
+def read_arms() -> dict | None:
+    """Both followers' positions now, read over the bus (no torque change, no motion). None if unreadable."""
+    try:
+        return home_current()["current"]
+    except Exception:
+        return None
+
+
+def rest_check(before: dict | None, after: dict | None) -> dict:
+    """Are the arms back at the pose the alignment started from (the eval's landed pose)? Per arm, every joint
+    but the gripper within ALIGN_REST_TOL; "unknown" when either reading is missing."""
+    arms = {}
+    for side, name in ARM_NAMES.items():
+        pre = f"{side}_" if side else ""
+        joints = {k[len(pre):]: v for k, v in (after or {}).items() if k.startswith(pre)} or None
+        g = (joints or {}).get("gripper")
+        far = sorted(k[len(pre):] for k, v in (after or {}).items() if k.startswith(pre) and not k.endswith("gripper")
+                     and (before or {}).get(k) is not None and abs(v - before[k]) > ALIGN_REST_TOL)
+        arms[name] = {"side": side or None, "joints": joints, "gripper": g,
+                      "gripper_state": None if g is None else "open" if g >= omx_home.GRIP_OPEN else "closed" if g < omx_home.GRIP_CLOSED else "half",
+                      "far_joints": far}
+    check = "unknown" if not before or not after else "far" if any(a["far_joints"] for a in arms.values()) else "ok"
+    return {"check": check, "tolerance": ALIGN_REST_TOL, "arms": arms}
+
+
+def align_done_later(proc) -> None:
+    """When the runner (or its landing) has let go of the ports: read where the arms ended, then final."""
+    def run() -> None:
+        end = time.time() + 30
+        while JOB.proc is proc and JOB.running() and time.time() < end:
+            time.sleep(0.2)
+        time.sleep(0.5)
+        a = LAST_RESULT.get("align") or {}
+        a["rest"] = rest_check(ALIGN.get("before"), read_arms())
+        LAST_RESULT.update(stage="done", final=True)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def align_plan(body: dict, run: dict) -> dict | None:
+    """A control-tower eval with a target marker is followed by the shelf alignment of that box when the
+    model is in the config list (or the command says "shelf_align": true / false)."""
+    s = align_settings()
+    marker = str(body.get("target_marker", "")).strip()
+    if not s or body.get("source") != "mqtt" or not marker:
+        return None
+    want = body.get("shelf_align")
+    if want is None:
+        want = any(m and m in run["model_path"] for m in s.get("models") or [])
+    if not want:
+        return None
+    return {"box": int(marker), "slot": str(s.get("slot") or "2B"), "draw_target": bool(s.get("draw_target", False))}
+
+
+def align_after_eval(plan: dict, eval_proc) -> None:
+    """Called when the eval has ended: only a clean eval with armed still on goes on to the alignment.
+    last_result stays final=False until the alignment (and the landing after a stop) is over."""
+    align = {"ran": False, "ok": None, "box": plan["box"], "slot": plan["slot"]}
+    if not LAST_RESULT.get("exit_ok"):  # the Host fails the mission on the eval error itself: nobody looks
+        LAST_RESULT["align"] = dict(align, ok=False, skipped="평가가 정상으로 끝나지 않음", on_shelf=None)
+        return
+    LAST_RESULT.update(stage="align", final=False, align=align)
+
+    def start_later() -> None:
+        end = time.time() + 30
+        while JOB.proc is eval_proc and JOB.running() and time.time() < end:
+            time.sleep(0.2)
+        time.sleep(ALIGN_DELAY_S)
+        if JOB.proc is not eval_proc or JOB.running():
+            # another job holds the robot and the cameras: nobody can look at the shelf (Host: PANEL_ALIGN_SKIPPED)
+            LAST_RESULT["align"].update(ok=False, skipped="다른 작업이 먼저 시작됨", on_shelf=None)
+            LAST_RESULT.update(stage="done", final=True)
+            return
+        why = f"armed 꺼짐 ({ARMED['off_reason']})" if not ARMED["on"] else None
+        if not why:
+            try:
+                ALIGN["before"] = read_arms()  # the eval's landed pose: the alignment ends back here
+                start_align(plan)
+                return
+            except Exception as exc:
+                why = f"시작하지 못함: {exc}"
+                set_armed(False, "선반 정렬 " + why)
+        start_shelf_read(plan, why)
+
+    threading.Thread(target=start_later, daemon=True).start()
+
+
+def start_align(plan: dict, release: bool = False) -> None:
+    """The shelf alignment runner as the robot job (it opens the cameras itself), or with release=True its
+    landing only (back to its start pose, torque off)."""
+    s = align_settings()
+    if not s:
+        raise RuntimeError("설정 shelf_align(cmd)이 없습니다.")
+    PREVIEW.stop()
+    before = ALIGN.get("before")
+    ALIGN.clear()
+    ALIGN.update(box=plan["box"], slot=plan["slot"], before=before)
+    args = ["--box", str(plan["box"]), "--auto"]
+    if release:
+        args.append("--release")
+    else:
+        ALIGN_RESULT_FILE.unlink(missing_ok=True)
+        args += ["--slot", plan["slot"], "--step", "shelf_align", "--result", str(ALIGN_RESULT_FILE)]
+    JOB.start("align_release" if release else "align", s["cmd"] + args,
+              {"phase": "로봇 내려놓는 중" if release else "정렬 중", "box": plan["box"], "slot": plan["slot"],
+               "eval_repo_id": LAST_RESULT.get("repo_id")},
+              need_leader=False, env_extra={"OMX_PANEL_URL": f"http://127.0.0.1:{PORT}"})
+
+
+def start_shelf_read(plan: dict, why: str) -> None:
+    """The alignment is skipped (armed off, it could not start): is the box on its shelf slot? The runner reads the
+    cameras only (--step shelf_read: no robot connection, no torque). Without the cameras on_shelf stays null."""
+    LAST_RESULT["align"].update(ok=False, skipped=why)
+    s = align_settings()
+    try:
+        if not s:
+            raise RuntimeError("설정 shelf_align(cmd)이 없습니다")
+        PREVIEW.stop()  # the runner opens the cameras itself
+        ALIGN_RESULT_FILE.unlink(missing_ok=True)
+        JOB.start("shelf_read", s["cmd"] + ["--box", str(plan["box"]), "--slot", plan["slot"], "--step", "shelf_read",
+                                           "--auto", "--result", str(ALIGN_RESULT_FILE)],
+                  {"phase": "선반 확인 중 (카메라만)", "box": plan["box"], "slot": plan["slot"], "skipped": why,
+                   "eval_repo_id": LAST_RESULT.get("repo_id")},
+                  need_leader=False, env_extra={"OMX_PANEL_URL": f"http://127.0.0.1:{PORT}"})
+    except Exception as exc:
+        LAST_RESULT["align"].update(on_shelf=None, shelf_read_error=str(exc)[:200])
+        LAST_RESULT.update(stage="done", final=True)
+
+
+def runner_result() -> tuple[dict, dict]:
+    try:
+        res = json.loads(ALIGN_RESULT_FILE.read_text())
+    except (OSError, ValueError):
+        res = {}
+    return res, res.get("result") or {}
+
+
+def shelf_read_ended(job, proc) -> None:
+    res, r = runner_result()
+    a = LAST_RESULT.get("align") or {}
+    # the runner's values as they are (shelf "ok" etc., on_shelf true/false/null); the panel's own keys stay
+    a.update({k: v for k, v in r.items() if k not in ("ran", "ok", "skipped", "box", "slot")})
+    a.setdefault("on_shelf", None)
+    a["shelf_read"] = {"returncode": job.info.get("returncode"), "log": res.get("log")}
+    LAST_RESULT["align"] = a
+    LAST_RESULT.update(stage="done", final=True)
+
+
+def align_ended(job, proc) -> None:
+    """The alignment (or its landing) has ended: last_result.align, then land the arms after a stop."""
+    info = job.info
+    if job.kind == "align_release":
+        if LAST_RESULT.get("align"):
+            LAST_RESULT["align"]["released"] = info.get("returncode") == 0
+        if info.get("returncode") == 3:  # no recorded way back from here: it did not move, the torque is still on
+            ALIGN["hold"] = True
+            LAST_RESULT.update(stage="hold", final=False)
+            job.lines.append("[omx] align: 되짚어 돌아갈 길이 없어 움직이지 않았습니다. 팔은 토크가 켜진 채 제자리입니다. "
+                             "팔을 받친 채 기록된 길 가까이 옮긴 뒤 [홈 위치로 이동]을 다시 누르거나, 받친 채 강제 종료로 내려 주세요")
+            return
+        ALIGN.pop("hold", None)
+        align_done_later(proc)
+        return
+    res, r = runner_result()
+    rc = info.get("returncode")
+    stopped = ("즉시 중단" if info.get("abort_sent") else "비상 정지" if info.get("frozen")
+               else "강제 종료" if info.get("killed") else None)
+    LAST_RESULT["align"] = {"ran": True, "ok": rc == 0 and stopped is None and r.get("shelf") == "ok" and r.get("align") == "aligned",
+                            "box": info.get("box"), "slot": info.get("slot"), "returncode": rc, "stopped_by": stopped,
+                            "err": info.get("err"), "shelf": r.get("shelf"), "align": r.get("align"), "log": res.get("log"),
+                            "ended_at": dt.datetime.now().isoformat(timespec="seconds"),
+                            "released": rc == 0 if stopped is None else None, "rest": None}
+    # every other result key as the runner wrote it (on_shelf, yaw_start, yaw_end, taps, align_s, ...): the Host uses them
+    LAST_RESULT["align"].update({k: v for k, v in r.items() if k not in LAST_RESULT["align"]})
+    LAST_RESULT["align"].setdefault("on_shelf", None)
+    if info.get("land_after"):
+        LAST_RESULT.update(stage="release", final=False)
+
+        def land() -> None:
+            end = time.time() + 30
+            while JOB.proc is proc and JOB.running() and time.time() < end:
+                time.sleep(0.2)
+            time.sleep(1.0)
+            try:
+                start_align(dict(ALIGN), release=True)
+            except Exception as exc:
+                ALIGN["hold"] = True
+                LAST_RESULT.update(stage="hold", final=False)
+                job.lines.append(f"[omx] align: 내려놓기를 시작하지 못했습니다 ({exc}). [홈 위치로 이동]을 누르세요")
+
+        threading.Thread(target=land, daemon=True).start()
+    elif info.get("frozen"):
+        ALIGN["hold"] = True  # 비상 정지: the arms stay in place until [홈 위치로 이동]
+        LAST_RESULT.update(stage="hold", final=False)
+    else:
+        align_done_later(proc)
 
 
 def start_eval(body: dict) -> dict:
@@ -2703,12 +3000,15 @@ def start_eval(body: dict) -> dict:
         repo_id, k = f"{USER}/{base}_{k}", k + 1
     path = notes_path(repo_id)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # recording is off unless asked for ("record": true, the panel's checkbox): a control-tower mission or a quick check
+    # only runs the policy; a recorded evaluation keeps videos and data for review, reports and training
+    record = bool(body.get("record"))
     path.write_text(json.dumps({"kind": "eval", "model": run["model_path"], "run_id": run["id"],
                                 "model_display": names.model_label(run.get("display") or names.display_name(run["id"]), step, run.get("steps")),
                                 "run_number": run.get("number"), "task": task, "results": {},
                                 "train_step": step or run.get("steps"), "final_steps": run.get("steps"),
                                 "smooth": bool(body.get("smooth")), "threads": threads,
-                                "reset_home": reset_home, "open_gripper": open_gripper,
+                                "reset_home": reset_home, "open_gripper": open_gripper, "recorded": record,
                                 "started": dt.datetime.now().strftime("%Y-%m-%d %H:%M")}, ensure_ascii=False, indent=2))
     PREVIEW.stop()  # the policy run needs the cameras itself
     fix_wrist_fps()
@@ -2735,19 +3035,30 @@ def start_eval(body: dict) -> dict:
         spare = min(max(int(body.get("spare", 3)), 0), 10)
         cmd = [a if not a.startswith("--dataset.num_episodes=") else f"--dataset.num_episodes={episodes + spare}" for a in cmd]
     end_on_return = bool(body.get("end_on_return"))
+    # the shelf alignment follows: when the attempt ends by return detection, the short safe stop (omx_safe_start)
+    fast_release = end_on_return and bool(body.get("fast_release"))
     eval_info = {"phase": "모델 불러오는 중", "repo_id": repo_id, "target": episodes, "end_on_return": end_on_return,
+                 "fast_release": fast_release, "record": record,
                  "episode_s": episode_s, "reset_s": reset_s, "model": run["id"],
                  "smooth": opts["smooth"], "threads": threads, "reset_home": reset_home,
                  "open_gripper": open_gripper, **opts,
                  "protocol": note.get("protocol"), "source": "mqtt" if body.get("source") == "mqtt" else "panel"}
-    tenv = target_env(body, eval_info)
+    plan = align_plan(body, run)
+    if plan and not plan["draw_target"]:  # the box number is for the alignment; the model never saw a circle
+        tenv = {}
+        eval_info["target_marker"] = plan["box"]
+    else:
+        tenv = target_env(body, eval_info)
+    if plan:
+        eval_info["shelf_align"] = plan
     if tenv:
         note["target_marker"] = eval_info["target_marker"]
     path.write_text(json.dumps(note, ensure_ascii=False, indent=2))
     JOB.start("eval", cmd, eval_info,
               need_leader=False, env_extra=thread_env(threads) | home_env(reset_home, open_gripper, repo_id) | async_env
               | ({"OMX_HOME_POSE": str(omx_home.write_run_file(home, RUN_HOME_FILE))} if home else {}) | tenv
-              | {"OMX_EPISODE_END": str(EPISODE_END_FILE)} | ({"OMX_END_ON_RETURN": "1"} if end_on_return else {}))
+              | {"OMX_EPISODE_END": str(EPISODE_END_FILE)} | ({"OMX_END_ON_RETURN": "1"} if end_on_return else {})
+              | ({"OMX_FAST_RELEASE": "1"} if fast_release else {}) | ({} if record else {"OMX_NO_RECORD": "1"}))
     EVAL_HOME_POSE.clear()
     EVAL_HOME_POSE.update(repo_id=repo_id, home=home)
     if preset:
@@ -2770,12 +3081,12 @@ def eval_list() -> list[dict]:
             continue
         repo = f"{note.parent.parent.name}/{note.stem}"
         info = DATA_HOME / repo / "meta/info.json"
-        total = json.loads(info.read_text()).get("total_episodes", 0) if info.exists() else 0
+        total = json.loads(info.read_text()).get("total_episodes", 0) if info.exists() else n.get("episodes_run", 0)
         res = n.get("results", {})
         items.append({"repo_id": repo, "model": n.get("model"), "run_id": n.get("run_id"), "run_number": n.get("run_number"),
                       "model_display": names.model_label(names.display_name(n.get("run_id"), aliases), names.train_amount(n, steps),
                                                          n.get("final_steps") or steps.get(n.get("run_id"))) if n.get("run_id") else "",
-                      "start_failed": bool(n.get("start_failed")),
+                      "start_failed": bool(n.get("start_failed")), "recorded": n.get("recorded", True),
                       "train_step": names.train_amount(n, steps), "final_steps": n.get("final_steps") or steps.get(n.get("run_id")),
                       "threads": n.get("threads"), "smooth": n.get("smooth"), "loop": n.get("loop"),
                       "policy_type": n.get("policy_type"), "async_mode": n.get("async_mode"), "rtc": n.get("rtc"),
@@ -3103,6 +3414,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"codes": omx_errors.all_codes()})
         if self.path == "/api/robot_setup":
             return self._json(setup_status())
+        if self.path == "/api/robot_here":  # light: the control PC asks this every 5 s
+            return self._json({"robot_here": robot_here(), "host": HOSTNAME, "role": "control" if CONTROL else "gpu",
+                               "version": VERSION})
         if self.path.startswith("/api/camera_probe?"):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             try:
@@ -3148,6 +3462,9 @@ class Handler(BaseHTTPRequestHandler):
                 "data_legacy_note": remote.gpu_legacy_note() if CONTROL else data_notes.load().get("legacy_note", ""),
                 "data_home": str(DATA_HOME),
                 "role": "control" if CONTROL else "gpu",
+                "host": HOSTNAME,
+                "robot_here": robot_here(),
+                "gpu_panel": gpu_panel() if CONTROL else None,
                 "sync": sync_status() if CONTROL else None,
                 "gpu_link": dict(remote.TUNNEL.status(), infer=infer_link_status()) if CONTROL else None,
                 "hf_user": UPLOADER.hf_login(),
@@ -3379,6 +3696,8 @@ class Handler(BaseHTTPRequestHandler):
                 if body.get("on"):
                     if JOB.running() and JOB.kind in ("record", "eval"):
                         raise RuntimeError("녹화·평가 중에는 그 프로그램이 카메라를 쓰고 있습니다. 화면은 그대로 보입니다.")
+                    if JOB.running() and JOB.kind in ("align", "align_release", "shelf_read") or LAST_RESULT.get("stage") == "align":
+                        raise RuntimeError("선반 정렬 중에는 정렬 프로그램이 카메라를 씁니다.")
                     if JOB.running() and JOB.info.get("with_cameras"):
                         raise RuntimeError("카메라를 쓰는 텔레옵이 실행 중입니다.")
                     PREVIEW.start()

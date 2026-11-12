@@ -17,7 +17,7 @@ import socket
 import subprocess
 from pathlib import Path
 
-VERSION = "3.13.0"
+VERSION = "3.14.2"
 
 DEFAULTS: dict = {
     # shown in the panel header

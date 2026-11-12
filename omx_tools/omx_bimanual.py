@@ -132,12 +132,24 @@ class BiOmxFollower(Robot):
 
         outer = omx_safe_start.LANDING.is_set()
         omx_safe_start.LANDING.set()  # a second 중지 between the two arms must not skip the second one
+        def land(arm) -> None:
+            try:
+                arm.disconnect()
+            except Exception as exc:  # the other arm must still land
+                print(f"[omx] safe stop: {arm._omx_side} 팔 정지 중 오류 ({exc})", flush=True)
+
         try:
-            for arm in self.arms:  # safe stop of each arm (home, gripper, fade out, torque off)
-                try:
-                    arm.disconnect()
-                except Exception as exc:  # the other arm must still land
-                    print(f"[omx] safe stop: {arm._omx_side} 팔 정지 중 오류 ({exc})", flush=True)
+            if omx_safe_start.FAST_LAND.is_set():  # fast release: both arms at once (each has its own bus)
+                import threading
+
+                threads = [threading.Thread(target=land, args=(arm,)) for arm in self.arms]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join()
+            else:
+                for arm in self.arms:  # safe stop of each arm in turn (home, gripper, fade out, torque off)
+                    land(arm)
         finally:
             if not outer:
                 omx_safe_start.LANDING.clear()
