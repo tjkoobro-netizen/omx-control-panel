@@ -108,6 +108,11 @@ form { display: grid; gap: 12px; }
 /* checkbox + text on one line; long text wraps next to the box, not under it */
 .opt { display: grid; grid-template-columns: 16px minmax(0, 1fr); column-gap: 10px; align-items: start; font-size: 13px; line-height: 1.5; }
 .opt input { margin-top: 2px; }
+/* 평가 녹화: on = accent, off = warning (an evaluation without records cannot be analysed afterwards) */
+.rec-opt { border: 1px solid var(--accent); background: var(--accent-soft); border-radius: 6px; padding: 8px 10px; }
+.rec-opt #evRecordHead { color: var(--accent); }
+.rec-opt.off { border-color: var(--bad); background: var(--bad-soft); }
+.rec-opt.off #evRecordHead, .rec-opt.off #evRecordNote { color: var(--bad); font-weight: 650; }
 .opt label, .opt span { cursor: pointer; }
 .opt label b { color: var(--fg); }
 
@@ -514,7 +519,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.14.4</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.14.5</span></div>
       </div>
     </div>
     <div class="status">
@@ -966,6 +971,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       <div class="panel-head">
         <h2>실행 화면</h2>
         <span class="pill" id="evPhase">대기</span>
+        <span class="pill warn" id="evNoRec" hidden title="이 평가는 영상·관절 기록을 남기지 않습니다">녹화 안 함</span>
       </div>
       <div class="cams" id="evCamGrid">
         <figure><div class="frame" id="evFrame-front">평가를 시작하면 실시간 영상이 나옵니다</div><figcaption><span><b>front</b> · 글로벌 카메라</span></figcaption></figure>
@@ -1067,7 +1073,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <input type="checkbox" id="evSmooth"><label for="evSmooth"><b>부드럽게 실행</b> (ACT 전용, 시간 앙상블: 매 스텝 예측해 겹치는 동작을 평균 · 3초마다 튀는 동작이 줄어듦 · 스텝당 약 10ms 더 걸림 · 비동기 실행과 함께 쓰지 않음)</label>
         <p class="muted" id="evSmoothRemote" style="grid-column:2;margin:4px 0 0" hidden>이 PC는 원격 추론(제어 PC)이라 쓸 수 없어요. 매 스텝 GPU 노트북까지 왕복해야 해서 30Hz를 맞추지 못해요. 대신 <b>비동기 실행</b>을 켜고 <b>겹치는 구간 합치기</b>를 <b>가중 평균</b>으로 두면 묶음이 바뀔 때 겹치는 동작을 섞어서 이어 줘요. <b>출력 부드럽게(필터)</b>도 함께 쓸 수 있어요.</p>
       </div>
-      <div class="opt"><input type="checkbox" id="evRecord"><label for="evRecord"><b>녹화</b> (영상과 데이터를 저장 · 모델 검증용. 끄면 평가만 하고 아무것도 저장하지 않음: 영상 다시 보기, 분석 자료, 실패 단계 추정은 녹화한 평가에서만 됨. 관제 미션은 녹화하지 않음)</label></div>
+      <div class="opt rec-opt" id="evRecordOpt"><input type="checkbox" id="evRecord" checked><label for="evRecord"><b id="evRecordHead">평가 녹화 켬</b> <span id="evRecordNote">영상과 관절 기록을 저장해요. 영상 다시 보기, 분석 자료, 실패 단계 추정은 녹화한 평가에서만 됩니다.</span> <span class="muted">(화면을 열 때마다 켜진 상태로 시작 · 관제 미션은 녹화하지 않음)</span></label></div>
       <div class="opt"><input type="checkbox" id="evAsync"><label for="evAsync"><b>비동기 실행</b> (다음 동작을 계산하는 동안에도 로봇이 남은 동작을 계속 실행) <button type="button" class="qbtn help-open" data-help="ev-async" title="비동기 실행 설명" aria-label="비동기 실행 설명">?</button></label></div>
       <div class="fields" id="evAsyncFields" hidden>
         <label class="f"><span>한 번에 쓸 동작 수 <button type="button" class="qbtn help-open" data-help="ev-async" title="actions_per_chunk 설명" aria-label="actions_per_chunk 설명">?</button></span><input type="number" id="evChunk" min="1" max="100" value="50"></label>
@@ -1094,7 +1100,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </div>
       <p class="muted meta-line" style="margin:0" id="evPreview"></p>
       <div class="row"><button class="primary" type="button" id="evStart">평가 시작</button></div>
-      <p class="tip-box">처음엔 딸기와 접시를 <b>녹화 때와 같은 위치</b>에 두고 시작하세요. 같은 위치에서 성공하는 걸 본 뒤 조금씩 옮겨봅니다. Rerun으로도 보려면 ① 탭의 "Rerun으로도 보기"를 켜두면 함께 적용됩니다.</p>
+      <p class="tip-box">처음엔 물체(상자·딸기 등)와 놓을 곳을 <b>녹화 때와 같은 위치</b>에 두고 시작하세요. 같은 위치에서 성공하는 걸 본 뒤 조금씩 옮겨봅니다. Rerun으로도 보려면 ① 탭의 "Rerun으로도 보기"를 켜두면 함께 적용됩니다.</p>
     </section>
 
     <section class="panel">
@@ -1455,21 +1461,21 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <li><b>모델 고르기</b>: 학습 기록의 모델 중에서 고릅니다. 어떤 데이터로 학습했는지와 지금까지의 평가 결과가 함께 보입니다.</li>
         <li><b>평가 설정</b>: 작업 문장(학습 데이터와 같은 문장, 자동 입력), 시도 횟수, 시도 시간, 원위치 시간을 정합니다.</li>
         <li>안전 확인란을 체크하고 <b>평가 시작</b>을 누릅니다. 모델을 불러오는 데 몇 초 걸립니다.</li>
-        <li><b>실행 화면</b>에서 실시간 영상과 남은 시간을 봅니다. 원위치 시간에는 로봇이 멈춰 있으니 딸기를 빼서 제자리에 놓습니다.</li>
+        <li><b>실행 화면</b>에서 실시간 영상과 남은 시간을 봅니다. 원위치 시간에는 로봇이 멈춰 있으니 물체(상자·딸기 등)를 빼서 제자리에 놓습니다. 음성 안내를 켜 두면 작업 문장에 따라 "17번 상자를 원위치하세요"처럼 알려 줍니다.</li>
         <li>시도가 끝날 때마다 <b>결과 표시</b>에서 성공·실패를 누릅니다. 결과는 학습 기록 표의 "평가" 칸에 자동으로 붙습니다.</li>
       </ol>
       <div class="help-table"><table>
         <tr><th>버튼</th><th>하는 일</th></tr>
         <tr><td>다음으로</td><td>지금 시도나 원위치를 일찍 끝냅니다</td></tr>
-        <tr><td>이번 것 다시</td><td>방금 시도를 버리고 다시 합니다(딸기 위치를 잘못 놓았을 때 등)</td></tr>
+        <tr><td>이번 것 다시</td><td>방금 시도를 버리고 다시 합니다(물체 위치를 잘못 놓았을 때 등)</td></tr>
         <tr><td>평가 끝내기 (저장 · 처음 자세로)</td><td>끝난 시도까지 저장하고, 팔로워를 평가 시작 때 자세로 천천히 되돌린 뒤 토크를 끕니다. 정해진 시도를 다 마쳤을 때도 같습니다</td></tr>
         <tr><td>즉시 중단 (처음 자세로)</td><td>두 번 눌러야 실행됩니다. 모델을 바로 멈추고(진행 중 시도는 저장 안 함, 끝난 시도는 저장) 곧바로 처음 자세로 천천히 돌아간 뒤 토크를 끕니다. 프로그램이 5초 안에 응답하지 않거나 한 번 더 누르면 강제로 끝내고, 복귀 프로그램이 다시 연결해 같은 방식으로 돌아갑니다. <b>팔이 움직이니 손을 치우세요</b></td></tr>
         <tr><td>비상 정지 (제자리)</td><td><b>한 번 누르면 바로</b> 실행됩니다. 모델을 멈추고 <b>아무 이동 없이 토크를 켠 채 그 자세로</b> 멈춥니다. 진행 중이던 시도는 "중단됨"으로, 끝난 시도는 그대로 저장합니다. 멈추면 같은 버튼이 <b>[홈 위치로 이동]</b>으로 바뀌고, 손을 치운 뒤 누르면 처음 자세로 천천히(출력 30%) 돌아가 그리퍼 정리 → 출력 감소 → 토크 끔. 사람 손이 팔 근처에 있거나 돌아가는 동작이 위험해 보일 때 씁니다. 복귀 중에도 누를 수 있습니다(그 자리에서 다시 멈춤). <b>⚠ 프로그램이 3초 안에 응답하지 않으면 강제로 끝내며</b>, 이때는 관절 기록이 사라질 수 있습니다(시도마다 남기는 사본으로 분석은 가능, 영상은 남음)</td></tr>
       </table></div>
       <p>평가 영상은 <code>&lt;계정&gt;/eval_&lt;모델&gt;_&lt;MMDD_HHMM&gt;</code>으로 저장됩니다. 평가 기록의 <b>다시보기</b>를 누르면 ① 탭 다시보기에서 바로 열립니다. 예전 평가도 <b>결과 표시</b>를 눌러 나중에 성공·실패를 표시할 수 있습니다.</p>
-      <p class="tip">처음엔 딸기와 접시를 녹화 때와 같은 위치에 두세요. 같은 위치에서 성공하는 걸 본 뒤 조금씩 옮겨 어디까지 되는지 봅니다. 시작 전에 ① 탭의 "카메라 위치 맞추기"로 front 카메라가 학습 때와 같은지 확인하세요.</p>
+      <p class="tip">처음엔 물체와 놓을 곳을 녹화 때와 같은 위치에 두세요. 같은 위치에서 성공하는 걸 본 뒤 조금씩 옮겨 어디까지 되는지 봅니다. 시작 전에 ① 탭의 "카메라 위치 맞추기"로 front 카메라가 학습 때와 같은지 확인하세요.</p>
       <p><b>부드럽게 실행</b>: ACT가 3초마다 새 동작 묶음으로 바뀌며 튀는 현상을 줄입니다. 매 스텝 예측해서 겹치는 동작을 평균 내는 방식입니다. 모델을 다시 학습할 필요는 없고, 스텝당 약 10ms가 더 걸립니다.</p>
-      <p><b>분석 자료 만들기</b>: 고른 평가의 시도 장면, 학습 시연과 비교한 관절 그래프, 딸기 시작 위치 지도를 만듭니다. Claude와의 대화에서 "평가 분석해줘"와 표시된 폴더 경로를 알려주면 개선점을 알려줍니다.</p>
+      <p><b>분석 자료 만들기</b>: 고른 평가의 시도 장면, 학습 시연과 비교한 관절 그래프, 물체 시작 위치 지도(빨간 물체 감지를 켠 평가만)를 만듭니다. Claude와의 대화에서 "평가 분석해줘"와 표시된 폴더 경로를 알려주면 개선점을 알려줍니다.</p>
     </section>
 
     <section id="h-ev-home">
@@ -1477,9 +1483,9 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       <p>평가는 리더 팔 없이 모델이 팔로워를 움직이기 때문에, 텔레옵처럼 "리더 자세로 돌아오기"가 없어요. 대신 <b>평가를 시작할 때 팔로워가 있던 자세</b>(처음 자세)를 기억해 두었다가 그 자세로 돌려보내요.</p>
       <ul>
         <li><b>평가를 끝낼 때</b> (평가 끝내기, 또는 정해진 시도를 다 마쳤을 때): 처음 자세로 천천히 이동 → (켜 두면) 그리퍼를 처음 상태로 천천히 열기 → 출력을 3초에 걸쳐 줄이고 토크 끄기. 팔이 툭 떨어지지 않아요.</li>
-        <li><b>원위치 시간</b> (켜 두면): 시도가 끝날 때마다 처음 자세로 돌아가요. 팔이 작업 영역에서 비켜서 딸기를 놓기 쉽고, 다음 시도가 녹화 때처럼 같은 자세에서 시작해요. 돌아가는 중에 <b>다음으로</b>를 누르면 이동을 멈추고 바로 다음 시도로 넘어가요.</li>
+        <li><b>원위치 시간</b> (켜 두면): 시도가 끝날 때마다 처음 자세로 돌아가요. 팔이 작업 영역에서 비켜서 물체를 놓기 쉽고, 다음 시도가 녹화 때처럼 같은 자세에서 시작해요. 돌아가는 중에 <b>다음으로</b>를 누르면 이동을 멈추고 바로 다음 시도로 넘어가요.</li>
         <li>움직이는 동안 출력은 30%로 제한되고 속도는 느려요(안전 정지와 같은 설정).</li>
-        <li><b>그리퍼</b>: 딸기를 잡은 채 멈췄을 수 있어서, 팔이 처음 자세에 <b>도착한 다음에만</b> 그리퍼를 열어요. 가는 도중에 아무 데나 떨어뜨리지 않아요. 끄면 잡은 채로 있다가 토크가 꺼질 때 힘이 빠지며 풀려요.</li>
+        <li><b>그리퍼</b>: 물체를 잡은 채 멈췄을 수 있어서, 팔이 처음 자세에 <b>도착한 다음에만</b> 그리퍼를 열어요. 가는 도중에 아무 데나 떨어뜨리지 않아요. 끄면 잡은 채로 있다가 토크가 꺼질 때 힘이 빠지며 풀려요.</li>
         <li><b>돌아가지 않는 경우</b>: 어떤 관절이 처음 자세와 약 160° 넘게 다르거나 위치가 한 바퀴 어긋나게 읽히면, 위험할 수 있어 움직이지 않고 출력만 천천히 줄여요.</li>
         <li><b>즉시 중단 (처음 자세로)</b>: 모델을 바로 멈추고, 지금 시도를 저장하지 않고 곧바로 같은 방식으로 처음 자세로 돌아가요. 평가 끝내기보다 빨리 출발해요. 프로그램이 멈춰 응답이 없으면(5초) 강제로 끝낸 뒤, 평가 시작 때 저장해 둔 처음 자세 파일로 <b>복귀 프로그램</b>이 다시 연결해서 돌아가요. 이때도 토크를 끄지 않고 지금 자리에서 출발해서 팔이 튀지 않아요.</li>
         <li><b>비상 정지 (제자리)</b>는 한 번 누르면 바로 아무 데도 움직이지 않고 토크를 켠 채 멈춰요. 기록은 저장되고, 버튼이 <b>[홈 위치로 이동]</b>으로 바뀌어요. 사람 손이 팔 근처에 있으면 이쪽을 쓰고, 손을 치운 뒤 [홈 위치로 이동]을 누르면 위 과정(처음 자세 → 그리퍼 → 출력 감소 → 토크 끔)을 이어서 해요. 프로그램이 응답하지 않아 강제로 끝난 경우에도 같은 버튼으로 돌아가요.</li>
@@ -1491,7 +1497,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       <h3>평가 방식 (자유 위치 / 지정된 위치)</h3>
       <p>모델마다 물체를 <b>같은 자리, 같은 순서</b>에 놓고 평가해야 공정하게 비교할 수 있어요. <b>지정된 위치</b> 방식은 front 카메라 화면 위의 점 N개와 순서를 저장해 둔 거예요(예: "지정된 위치 10곳"). <b>자유 위치</b>는 예전처럼 위치를 정하지 않고 평가해요. 팀 전체가 같이 쓰고, 작업마다 따로 만들 수 있어요(딸기, 면세품 등).</p>
       <ol>
-        <li>평가 설정의 <b>평가 방식</b>에서 지정된 위치를 고르면 시도 횟수가 위치 수(예: 10)로 들어가고, <b>카메라 미리보기가 켜져서 평가를 시작하기 전에</b> 첫 위치(#1)가 노란 원으로 보여요. 딸기를 원 안에 놓고 "목표와 Npx"가 초록이 되면 [평가 시작]을 누르세요. 시작하면 미리보기는 꺼지고 평가 영상 위 표시로 이어져요.</li>
+        <li>평가 설정의 <b>평가 방식</b>에서 지정된 위치를 고르면 시도 횟수가 위치 수(예: 10)로 들어가고, <b>카메라 미리보기가 켜져서 평가를 시작하기 전에</b> 첫 위치(#1)가 노란 원으로 보여요. 물체를 원 안에 놓고 "목표와 Npx"가 초록이 되면 [평가 시작]을 누르세요. 시작하면 미리보기는 꺼지고 평가 영상 위 표시로 이어져요.</li>
         <li>평가 중 실행 화면의 front 영상에 <b>노란 원(다음 시도 목표)</b>과 번호, 다른 위치(흰 점), 참고 물체(그릇, 파란 점선 원)가 겹쳐 보여요. 원위치 시간에 물체를 노란 원 안에 놓으세요.</li>
         <li>빨간 물체(딸기)는 자동으로 찾아 십자로 표시하고 목표와의 거리를 알려 줘요. 초록(8px 이내) 좋음, 노랑(20px 이내) 조금 벗어남, 빨강은 다시 놓으세요. 기준은 평가 방식마다 정할 수 있어요(기본 8·20px). 시도가 시작되는 순간의 위치와 거리가 기록돼요. 물체는 <b>감지 범위</b>(주황 점선 사각형) 안에서만 찾아요. 로봇 베이스의 빨간 부품처럼 늘 보이는 빨간 물건은 범위 밖에 두세요. 아주 작은 빨간 점(150px² 이하)은 무시해요.</li>
         <li>모든 위치를 시도하면 저장하고 자동으로 끝나요.</li>
@@ -1874,6 +1880,14 @@ function say(text) {
     speechSynthesis.speak(u);
   } catch (e) {}
 }
+// what to put back during an evaluation's reset time, from its task sentence: the voice cue used to say 딸기 always
+function evalObject(info) {
+  const task = String(info.task || "");
+  if (/strawberr|딸기/i.test(task)) return "딸기";
+  if (info.target_marker != null && info.target_marker !== "") return `${info.target_marker}번 상자`;
+  if (/box|marker|shelf|tray|outbound|inbound|상자|선반/i.test(task)) return "상자";
+  return "물체";
+}
 function voiceCue(job) {
   const info = job.info || {};
   if (job.kind !== "record" && job.kind !== "eval") return;
@@ -1884,7 +1898,7 @@ function voiceCue(job) {
   if (first) return;  // do not announce the state that was already there when the page opened
   if (info.phase === "녹화 중") say(`에피소드 ${(info.episode || 0) + 1} 녹화 시작`);
   else if (info.phase === "실행 중") say(`시도 ${(info.episode || 0) + 1} 시작`);
-  else if (info.phase === "원위치 시간" && job.kind === "eval") say("시도 끝. 성공 여부를 누르고 딸기를 원위치하세요");
+  else if (info.phase === "원위치 시간" && job.kind === "eval") say(`시도 끝. 성공 여부를 누르고 ${evalObject(info)}를 원위치하세요`);
   else if (info.phase === "원위치 시간") say("녹화 끝. 물체를 원위치하세요");
   else if (info.phase === "다시 찍기") say("다시 찍습니다");
   else if (info.phase === "저장 중") say("녹화를 마치고 저장합니다");
@@ -3059,6 +3073,15 @@ function setEvalStreams(on) {
   }
 }
 
+function renderEvalRecord() {
+  const on = $("evRecord").checked;
+  $("evRecordOpt").classList.toggle("off", !on);
+  $("evRecordHead").textContent = on ? "평가 녹화 켬" : "녹화 안 함:";
+  $("evRecordNote").textContent = on ? "영상과 관절 기록을 저장해요. 영상 다시 보기, 분석 자료, 실패 단계 추정은 녹화한 평가에서만 됩니다."
+    : "영상·관절 기록이 남지 않습니다. 회차별 분석이 필요하면 켜 주세요.";
+}
+$("evRecord").addEventListener("change", renderEvalRecord);
+renderEvalRecord();
 function renderEval(s) {
   const job = s.job || {}, info = job.info || {};
   const alignJob = ["align", "align_release", "shelf_read"].includes(job.kind);  // shelf alignment after a control-tower eval
@@ -3071,6 +3094,7 @@ function renderEval(s) {
   $("evPreviewBtn").textContent = s.preview ? "카메라 미리보기 끄기" : "카메라 켜고 위치 보기";
   $("evPhase").textContent = evalJob ? (info.phase || "-") : "대기";
   $("evPhase").className = "pill " + (running ? (info.phase === "원위치 시간" ? "warn" : "ok") : evalJob && info.returncode ? "bad" : "");
+  $("evNoRec").hidden = !(job.kind === "eval" && job.running && info.record === false);
   if (evalJob) {
     const total = info.phase === "원위치 시간" ? info.reset_s : info.episode_s, el = info.phase_elapsed || 0;
     $("evStepText").textContent = running && (info.phase === "천천히 내려놓는 중" || (info.phase || "").startsWith("즉시 중단")) && info.safe_start
@@ -3217,7 +3241,7 @@ function renderEvalResults(liveInfo) {
     } else if (a && r === "success" && !(e && e.recorded === false)) {
       extra += `<span class="why">추천 계산 중 (시도가 저장되면 나옴)</span>`;
     }
-    const voidBtn = a ? `<button type="button" data-mark="${i}" data-res="void" class="${r === "void" ? "on-void" : ""}" ${done ? "" : "disabled"} title="사람 개입·딸기 잘못 놓음 등. 성공률에서 빼고 이 위치를 다시 시도">무효</button>` : "";
+    const voidBtn = a ? `<button type="button" data-mark="${i}" data-res="void" class="${r === "void" ? "on-void" : ""}" ${done ? "" : "disabled"} title="사람 개입·물체를 잘못 놓음 등. 성공률에서 빼고 이 위치를 다시 시도">무효</button>` : "";
     cells.push(`<div class="ev-ep ${done ? "" : "pending"} ${r === "void" ? "void" : ""} ${a && a.train_candidate ? "cand-on" : ""}" data-order="${a && r === "success" ? (a.train_rec_priority || 3) : 9}"><span>시도 ${i + 1}</span>${extra}<div class="btns">
       <button type="button" data-mark="${i}" data-res="success" class="${r === "success" ? "on-success" : ""}" ${done ? "" : "disabled"}>성공</button>
       <button type="button" data-mark="${i}" data-res="fail" class="${r === "fail" ? "on-fail" : ""}" ${done ? "" : "disabled"}>실패</button>${voidBtn}</div></div>`);
@@ -3789,7 +3813,7 @@ $("evReportOpen").addEventListener("click", () => {
   $("reportTitle").textContent = "평가 분석 자료 · " + ev.view + (evx && evx.model_display ? " · 모델 " + evx.model_display : "");
   $("reportPath").textContent = r.dir;
   const order = (f) => f.startsWith("start_map") ? 0 : f.startsWith("joints") ? 1 : 2;
-  const caption = (f) => f.startsWith("start_map") ? "딸기 시작 위치: 초록 = 학습 시연, 빨강 = 이번 시도"
+  const caption = (f) => f.startsWith("start_map") ? "물체 시작 위치: 초록 = 학습 시연, 빨강 = 이번 시도"
     : f.startsWith("joints") ? "관절 움직임: 회색 띠 = 학습 시연 범위, 선 = 이번 시도" : "시도 장면 (위 front, 아래 wrist, 약 2~3초 간격)";
   $("reportImgs").innerHTML = r.files.slice().sort((a, b) => order(a) - order(b) || a.localeCompare(b))
     .map(f => `<figure><img src="/report/${rel}/${f}?t=${Date.now()}" alt="${f}" loading="lazy"><figcaption class="muted">${caption(f)} · ${f}</figcaption></figure>`).join("");

@@ -3042,7 +3042,8 @@ def start_eval(body: dict) -> dict:
                  "episode_s": episode_s, "reset_s": reset_s, "model": run["id"],
                  "smooth": opts["smooth"], "threads": threads, "reset_home": reset_home,
                  "open_gripper": open_gripper, **opts,
-                 "protocol": note.get("protocol"), "source": "mqtt" if body.get("source") == "mqtt" else "panel"}
+                 "protocol": note.get("protocol"), "source": "mqtt" if body.get("source") == "mqtt" else "panel",
+                 "task": task}  # the panel's voice cue names the object from it (box, strawberry, ...)
     plan = align_plan(body, run)
     if plan and not plan["draw_target"]:  # the box number is for the alignment; the model never saw a circle
         tenv = {}
