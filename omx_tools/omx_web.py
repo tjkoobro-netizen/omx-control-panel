@@ -2348,6 +2348,38 @@ def home_current() -> dict:
     return {"current": current}
 
 
+HOLD_REASON_KO = {"NO_HOLD": "Host에 HOLD가 없습니다", "HOLD_CHANGED": "그사이 다른 HOLD로 바뀌었습니다. 화면을 다시 보세요",
+                  "CHECKS_MISSING": "확인 항목이 빠졌습니다", "TASK_ACTIVE": "Host가 다른 작업을 진행 중입니다",
+                  "EXECUTOR_BUSY": "로봇 작업이 실행 중입니다", "ARMS_NOT_HOME": "두 팔이 홈 자세가 아니거나 그리퍼를 놓지 않았습니다",
+                  "STALE_REQUEST": "요청이 오래되었거나 형식이 맞지 않습니다",
+                  "NO_RESPONSE": "Host가 10초 안에 답하지 않아 요청을 취소했습니다. HOLD는 그대로입니다. Host가 실행 중인지, 브로커에 연결되어 있는지(위 관제 연결 표시) 확인한 뒤 다시 누르세요"}
+
+
+def host_hold_release(body: dict) -> dict:
+    """The person's [HOLD 해제]: checks on screen, no robot job, arms readable; then the Host decides (it checks the
+    arms itself and never turns armed on)."""
+    st = omx_host.hold_state()
+    hold = st.get("hold")
+    if not st.get("available"):
+        raise RuntimeError("Host가 HOLD 상태 파일을 쓰지 않습니다 (옛 Host).")
+    if not hold:
+        raise RuntimeError("Host에 HOLD가 없습니다.")
+    if str(body.get("hold") or "") != str(hold.get("command_id") or ""):
+        raise RuntimeError("그사이 HOLD가 바뀌었습니다. 화면의 내용을 다시 확인하세요.")
+    checks = body.get("checks") or {}
+    missing = [k for k in omx_host.HOLD_CHECKS if checks.get(k) is not True]
+    if missing:
+        raise RuntimeError("확인 항목을 모두 체크하세요.")
+    if JOB.running() or other_robot_processes():
+        raise RuntimeError("로봇 작업이 실행 중입니다. 끝난 뒤 해제하세요.")
+    arms = arms_now()
+    if arms.get("error") or not arms.get("arms"):
+        raise RuntimeError(f"팔 위치를 읽지 못했습니다: {arms.get('error') or '응답 없음'}")
+    res = omx_host.request_hold_release(str(hold.get("command_id")), checks)
+    res["reason_ko"] = HOLD_REASON_KO.get(res.get("reason") or "", res.get("reason") or "")
+    return res
+
+
 def home_return() -> dict:
     """After 비상 정지 (arm frozen in place): the user's [홈 위치로 이동] - back to the run's start pose
     (the standard home pose when "home_pose" is on), gripper, then the safe stop."""
@@ -3563,6 +3595,7 @@ class Handler(BaseHTTPRequestHandler):
                 "markers": PREVIEW.markers if PREVIEW.running else {},
                 **armed_status(),
                 "mqtt_host": MQTT_HOST.status(),
+                "host_hold": omx_host.hold_state(),
                 "last_result": LAST_RESULT or None,
                 "camera_watch": camera_watch(),
                 "live": JOB.running() and JOB.kind in ("record", "eval"),
@@ -3901,6 +3934,8 @@ class Handler(BaseHTTPRequestHandler):
                     raise RuntimeError("작업이 실행 중일 때는 홈 자세를 바꾸지 않습니다.")
                 self._json({"home": omx_home.compute_task(str(body.get("task") or "straw"), bool(body.get("apply"))),
                             "tasks": omx_home.load_tasks()})
+            elif self.path == "/api/host/hold_release":
+                self._json(host_hold_release(body))
             elif self.path == "/api/home/return":
                 # a control-tower (Host) request moves the arms only while armed is on (TK 11/16); the screen button as before
                 if body.get("source") == "mqtt" and not ARMED["on"]:

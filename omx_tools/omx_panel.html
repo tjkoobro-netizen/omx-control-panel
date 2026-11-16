@@ -251,6 +251,12 @@ pre.log { margin: 0; background: var(--code-bg); color: var(--code-fg); border-r
 .ds-group > summary .meta { font-weight: 400; color: var(--muted); font-size: 12px; margin-left: 6px; }
 .ds-group-note { margin: 0; font-size: 12px; color: var(--muted); }
 /* one summary line under a dataset name; the full description opens in #dsInfoDlg */
+/* control-tower Host HOLD: reason, three checks by the person, release request */
+.hold-box { border: 1px solid var(--bad); background: var(--bad-soft); border-radius: 8px; padding: 10px 12px; margin: 10px 0 0; display: grid; gap: 8px; }
+.hold-head { color: var(--bad); font-size: 13.5px; }
+.hold-detail { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.hold-checks { display: grid; gap: 4px; font-size: 13px; }
+.hold-checks label { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
 /* 학습 TIP: a link that looks like the top-bar 사용법 button */
 .appbar .tips-btn { display: inline-flex; align-items: center; height: 26px; padding: 0 12px; border-radius: 4px; border: 1px solid rgba(255,255,255,.22); background: transparent; color: var(--appbar-fg); font-size: 12px; font-weight: 600; text-decoration: none; white-space: nowrap; }
 .appbar .tips-btn:hover { background: rgba(255,255,255,.08); border-color: rgba(255,255,255,.4); }
@@ -519,7 +525,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.15.0</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.16.0</span></div>
       </div>
     </div>
     <div class="status">
@@ -536,6 +542,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       <button type="button" class="theme-btn" id="themeBtn" title="밝은 화면 / 어두운 화면">밝게</button>
       <button type="button" id="errBadge" class="pill bad" hidden title="눌러서 오류 내용 보기"></button>
       <button type="button" id="camBadge" class="pill warn" hidden title="눌러서 카메라 화면 확인"></button>
+      <button type="button" id="holdBadge" class="pill bad" hidden title="관제 Host가 HOLD 상태입니다. 눌러서 해제 화면 보기">관제 HOLD</button>
       <button type="button" id="armedBadge" class="pill bad" hidden title="관제(MQTT) 명령으로 평가가 시작될 수 있습니다. 눌러서 평가 탭의 스위치 보기">관제 자동 수락 켜짐</button>
       <a class="tips-btn" id="tipsBtn" href="/tips" target="_blank" rel="noopener" title="정책·학습 설정·데이터 품질·fps·성능 올리는 법 (논문·산업계 근거). 새 탭에서 열고 HTML로 저장할 수 있습니다">학습 TIP</a>
       <button type="button" class="help-open" data-help="start">사용법</button>
@@ -964,6 +971,17 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
   <span class="muted" id="armedNote" style="font-size:12.5px">꺼짐 · 켜져 있는 동안만 관제(MQTT) 명령으로 평가가 시작됩니다</span>
   <button type="button" class="qbtn help-open" data-help="armed" title="관제 자동 수락 설명" aria-label="관제 자동 수락 설명">?</button>
   <span class="muted" id="hostNote" style="font-size:12.5px;flex-basis:100%" hidden></span>
+</div>
+<div class="hold-box" id="holdBox" hidden>
+  <div class="hold-head"><b>관제 Host가 HOLD 상태입니다</b> <span id="holdWhat"></span></div>
+  <p class="hold-detail" id="holdDetail"></p>
+  <p class="muted" style="margin:0;font-size:12.5px">새 미션을 받지 않고 기다리는 중입니다. 현장을 확인한 뒤 해제하세요. 해제해도 armed는 켜지지 않고, Host가 두 팔이 홈 자세이고 그리퍼를 놓았는지 다시 확인합니다.</p>
+  <div class="hold-checks">
+    <label><input type="checkbox" id="holdArms"> 두 팔이 안전한 자세이고 주변에 걸린 것이 없음</label>
+    <label><input type="checkbox" id="holdPkg"> 상자(물품) 위치를 확인함 (선반·쟁반·바닥)</label>
+    <label><input type="checkbox" id="holdPinky"> Pinky 상태를 확인함</label>
+  </div>
+  <div class="row" style="gap:8px;align-items:center"><button type="button" class="danger" id="holdBtn" disabled>HOLD 해제 요청</button> <span id="holdResult" style="font-size:12.5px"></span></div>
 </div>
 <div class="grid">
   <div class="col">
@@ -1619,6 +1637,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <li>정상 종료·시간 만료·오류·평가 끝내기·즉시 중단 뒤에는 확인하고, <b>비상 정지</b>·<b>강제 종료</b> 뒤에는 하지 않아요. 20초 안에 끝나지 않으면 멈추고 "시간 초과"로 남겨요.</li>
         <li><code>last_result</code>의 <code>stage</code>는 평가 → <code>pinky_check</code> → <code>done</code>(<code>final: true</code>). 결과는 <code>last_result.pinky</code>: 확인 프로그램 값 그대로(<code>on_pinky</code>, <code>on_shelf</code>, <code>pinky</code>, <code>shelf</code> 등)와 패널 값(<code>ran</code>, <code>box</code>, <code>returncode</code>, <code>skipped</code>). 확인하지 못하면 <code>on_pinky</code>·<code>on_shelf</code>는 <code>null</code>이에요.</li>
         <li>관제(Host)가 보내는 <b>홈 복귀</b>(<code>POST /api/home/return</code>, <code>"source": "mqtt"</code>)는 armed가 켜져 있을 때만 받아요. 화면의 [홈 위치로 이동] 버튼은 그대로예요.</li>
+        <li><b>관제 HOLD 해제</b>: Host가 판단할 수 없는 일(판독 불가, 시작 실패 등)로 HOLD에 들어가면 위쪽에 빨간 <b>관제 HOLD</b>가 뜨고, ③ 평가의 armed 아래에 사유가 보여요. 현장을 보고 세 가지(두 팔 안전, 상자 위치, Pinky 상태)를 체크한 뒤 <b>HOLD 해제 요청</b>을 누르면, 패널이 로봇 작업이 없고 팔 위치를 읽을 수 있는지 확인하고 Host에 요청해요. Host가 두 팔이 홈 자세이고 그리퍼를 놓았는지 다시 확인한 뒤 풀어요. 해제해도 armed는 켜지지 않아요. Host 상태 파일이 없는 옛 Host에서는 이 칸이 보이지 않아요(그때는 Host를 <code>--clear-hold</code>로 다시 띄움).</li>
       </ul>
     </section>
 
@@ -1787,7 +1806,49 @@ function renderArmed(s) {
     $("hostNote").style.color = h.error || (h.state === "off" && h.exit_code) ? "var(--bad, #c0392b)" : "";
   }
   armedWas = on;
+  renderHold(s.host_hold);
 }
+// control-tower Host HOLD (Host PR #103): shown only while the Host's state file says hold
+const holdUi = { id: null, busy: false };
+function renderHold(hh) {
+  const hold = hh && hh.available ? hh.hold : null;
+  $("holdBadge").hidden = !hold;
+  $("holdBox").hidden = !hold;
+  if (!hold) { holdUi.id = null; return; }
+  if (holdUi.id !== hold.command_id) {  // a new HOLD: the person checks again
+    holdUi.id = hold.command_id;
+    for (const id of ["holdArms", "holdPkg", "holdPinky"]) $(id).checked = false;
+    $("holdResult").textContent = "";
+  }
+  const since = hold.since ? new Date(hold.since * 1000).toLocaleTimeString("en-GB") : "";
+  $("holdWhat").textContent = `${hold.error_code || ""}${hold.mission_result ? " · " + hold.mission_result : ""}${since ? " · " + since + "부터" : ""}`;
+  $("holdDetail").textContent = [hold.detail, hold.last_step ? `마지막 단계: ${hold.last_step}` : "", `명령 ${hold.command_id}`].filter(Boolean).join(" · ");
+  holdButton();
+}
+function holdButton() {
+  $("holdBtn").disabled = holdUi.busy || !["holdArms", "holdPkg", "holdPinky"].every(id => $(id).checked);
+}
+for (const id of ["holdArms", "holdPkg", "holdPinky"]) $(id).addEventListener("change", holdButton);
+$("holdBadge").addEventListener("click", () => { showTab("eval"); $("holdBox").scrollIntoView({ block: "center" }); });
+$("holdBtn").addEventListener("click", async () => {
+  holdUi.busy = true; holdButton();
+  $("holdResult").textContent = "Host에 해제를 요청하는 중... (최대 10초)";
+  $("holdResult").style.color = "";
+  try {
+    const r = await api("/api/host/hold_release", { hold: holdUi.id,
+      checks: { arms_safe: $("holdArms").checked, package_checked: $("holdPkg").checked, pinky_checked: $("holdPinky").checked } });
+    if (r.cleared) {
+      $("holdResult").textContent = "해제되었습니다. armed는 꺼진 상태 그대로입니다.";
+      toast("관제 Host HOLD를 해제했습니다.");
+    } else {
+      $("holdResult").textContent = "해제되지 않음: " + (r.reason_ko || r.reason || "이유 모름");
+      $("holdResult").style.color = "var(--bad)";
+    }
+  } catch (e) {
+    $("holdResult").textContent = "요청 실패: " + e.message;
+    $("holdResult").style.color = "var(--bad)";
+  } finally { holdUi.busy = false; holdButton(); }
+});
 $("armedBtn").addEventListener("click", () => {
   const on = !(state && state.armed);
   if (on && !$("evConfirm").checked) { toast("켜기 전에 위의 안전 확인란을 체크해주세요.", "err"); return; }

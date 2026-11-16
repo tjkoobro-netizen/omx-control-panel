@@ -1,5 +1,11 @@
 # OMX 제어판 버전 기록
 
+## 3.16.0 (2026-11-17) - 관제 Host HOLD를 패널에서 해제
+
+- Host(PR #103)가 journal 옆에 쓰는 `<stem>.host-state.json`을 읽어 `/api/status`의 `host_hold`(`available`, `hold`, `active`, `updated_at`, `boot_id`)로 보여 줌. 상태 파일이 없는 옛 Host면 `available: false`이고 화면에 아무것도 안 보임
+- HOLD일 때 위쪽에 빨간 **관제 HOLD**, ③ 평가 armed 아래에 사유(error_code, mission_result, detail, last_step, 명령 id, 시작 시각)와 체크 3개(두 팔 안전 / 상자 위치 확인 / Pinky 확인). 셋 다 체크해야 **HOLD 해제 요청**이 눌림. HOLD가 바뀌면 체크를 다시 비움
+- `POST /api/host/hold_release` `{hold, checks}`: 화면에 보인 HOLD와 같은지, 체크 셋, 로봇 작업 없음, 팔 위치를 읽을 수 있는지 확인한 뒤 `<stem>.hold-request.json`(request_id, hold, checks, requested_at, by "panel")을 tmp→replace로 쓰고 `<stem>.hold-result.json`에서 같은 request_id 답을 10초까지 기다림(Host가 브로커에 연결하는 동안 최대 5초는 요청을 보지 않음). 답이 없으면 요청 파일을 지워 취소하고(늦은 해제가 사람 모르게 일어나지 않게, HOLD 그대로) `NO_RESPONSE`("Host 실행·브로커 연결 확인 뒤 다시" 안내). 취소하려는 순간 Host가 이미 가져갔으면 그 답을 3초 더 기다림. 결과 파일은 지우지 않음(Host가 덮어씀, 마지막 결과는 현장 기록). Host 거절 사유(NO_HOLD, HOLD_CHANGED, CHECKS_MISSING, TASK_ACTIVE, EXECUTOR_BUSY, ARMS_NOT_HOME, STALE_REQUEST)는 한국어로 보여 줌. 해제는 armed를 켜지 않음
+
 ## 3.15.0 (2026-11-16) - 하차 뒤 Pinky 상차 확인, 관제 홈 복귀는 armed일 때만, UDP 코드 팀 저장소와 같게
 
 - **상차 확인(pinky_check)**: 관제 명령(`source: mqtt`)에 `"pinky_check": true`와 `target_marker`가 있으면 평가가 끝난 뒤 카메라만으로 `real_runner.py --box N --slot <shelf_align.slot> --step pinky_read --auto --result <logs/pinky_result.json>`을 실행(작업 `pinky_read`, 로봇 연결·토크 없음, armed와 무관). 실행기 명령은 설정 `pinky_check.cmd`, 없으면 `shelf_align.cmd`. 상한 `pinky_check.timeout_s`(기본 20초) 지나면 멈추고 "시간 초과"

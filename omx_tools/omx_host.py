@@ -177,3 +177,84 @@ class Host:
             "log": list(self.lines)[-8:],
             "exit_code": self.proc.returncode if self.proc is not None and not mine else None,
         }
+
+
+# ---- HOLD release (Host PR #103): files next to the Host journal <stem>.json --------------------------------
+# Host writes <stem>.host-state.json {"boot_id", "active", "hold": null | {"command_id", "error_code", "detail",
+# "mission_result", "last_step", "since"}, "updated_at"}; the panel writes <stem>.hold-request.json and the Host
+# answers in <stem>.hold-result.json with the same request_id. The Host checks the arms itself before clearing,
+# and clearing never turns armed on.
+HOLD_CHECKS = ("arms_safe", "package_checked", "pinky_checked")
+
+
+def hold_files() -> dict | None:
+    """The three file paths from the journal in the Host settings; None without settings."""
+    try:
+        raw = json.loads(CONFIG.read_text())
+        journal = _path(raw["journal"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    base = journal.parent / journal.stem
+    return {"state": Path(f"{base}.host-state.json"), "request": Path(f"{base}.hold-request.json"),
+            "result": Path(f"{base}.hold-result.json")}
+
+
+def hold_state() -> dict:
+    """For /api/status: available = this Host writes its state file (an older Host does not: no button)."""
+    files = hold_files()
+    if not files or not files["state"].exists():
+        return {"available": False, "hold": None}
+    try:
+        st = json.loads(files["state"].read_text())
+    except (OSError, ValueError):
+        return {"available": False, "hold": None, "error": "Host 상태 파일을 읽지 못했습니다"}
+    hold = st.get("hold") if isinstance(st.get("hold"), dict) else None
+    return {"available": True, "hold": hold, "active": st.get("active"), "updated_at": st.get("updated_at"),
+            "boot_id": st.get("boot_id")}
+
+
+def _write_json(path: Path, data: dict) -> None:
+    tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+    tmp.write_text(json.dumps(data, ensure_ascii=False))
+    os.replace(tmp, path)
+
+
+def request_hold_release(hold_id: str, checks: dict, wait_s: float = 10.0) -> dict:
+    """Write the request and wait for the Host's answer with the same request_id (10 s: while the Host is
+    connecting to the broker, up to 5 s, it does not look at requests). The result file stays (the Host
+    overwrites it; the last one is a site record)."""
+    import uuid
+
+    files = hold_files()
+    if not files:
+        raise RuntimeError("Host 설정(omx-host.json)이 없습니다.")
+    request_id = str(uuid.uuid4())
+    _write_json(files["request"], {"request_id": request_id, "hold": hold_id,
+                                   "checks": {k: bool(checks.get(k)) for k in HOLD_CHECKS},
+                                   "requested_at": time.time(), "by": "panel"})
+    def answer(until: float) -> dict | None:
+        while time.time() < until:
+            try:
+                res = json.loads(files["result"].read_text())
+                if res.get("request_id") == request_id:
+                    return res
+            except (OSError, ValueError):
+                pass
+            time.sleep(0.1)
+        return None
+
+    res = answer(time.time() + wait_s)
+    if res:
+        return res
+    # no answer: cancel, so a late release never happens without the person seeing it (the Host only acts on
+    # a request file it finds). If the file is already gone the Host took it just now: wait for that answer.
+    try:
+        if json.loads(files["request"].read_text()).get("request_id") == request_id:
+            files["request"].unlink()
+    except FileNotFoundError:
+        res = answer(time.time() + 3.0)
+        if res:
+            return res
+    except (OSError, ValueError):
+        pass
+    return {"request_id": request_id, "hold": hold_id, "cleared": None, "reason": "NO_RESPONSE"}
