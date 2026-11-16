@@ -1329,13 +1329,17 @@ class Job:
             set_armed(False, f"이상 정지 {self.info['err']['name']}")
         if self.kind == "eval":
             LAST_RESULT.clear()
-            LAST_RESULT.update(eval_result(self), stage="done", final=True, align=None)
+            LAST_RESULT.update(eval_result(self), stage="done", final=True, align=None, pinky=None)
             if self.info.get("shelf_align"):
                 align_after_eval(self.info["shelf_align"], proc)
+            if self.info.get("pinky_check"):
+                pinky_after_eval(self.info["pinky_check"], proc)
         if self.kind in ("align", "align_release"):
             align_ended(self, proc)
         if self.kind == "shelf_read":
             shelf_read_ended(self, proc)
+        if self.kind == "pinky_read":
+            pinky_read_ended(self, proc)
         if self.kind == "eval" and self.info.get("protocol") and self.info.get("record", True):
             fill_auto_later(self.info["repo_id"], delay=0)  # reads the recorded videos
         if self.kind == "eval" and self.info.get("repo_id"):
@@ -2737,6 +2741,8 @@ def eval_result(job) -> dict:
 # ---------------------------------------------------------------- 선반 정렬 (관제 평가 뒤 이어서)
 ALIGN_RESULT_FILE = LOG_DIR / "align_result.json"  # the runner's result (--result)
 ALIGN_DELAY_S = 0.3  # after the eval let go of the ports and cameras (the runner waits for its own start time)
+PINKY_RESULT_FILE = LOG_DIR / "pinky_result.json"  # the runner's --step pinky_read result
+PINKY: dict = {}  # the running pinky_read: proc, timed_out
 ALIGN_STOP_WAIT_S = 5.0  # 즉시 중단 / 비상 정지: force-quit the runner when it has not exited by then
 ALIGN: dict = {}  # box and slot of the last alignment; "hold" while its arms wait for [홈 위치로 이동]
 ALIGN_REST_TOL = 5.0  # joint units: after the alignment the arms are back where it found them (gripper left out)
@@ -2835,6 +2841,102 @@ def align_after_eval(plan: dict, eval_proc) -> None:
         start_shelf_read(plan, why)
 
     threading.Thread(target=start_later, daemon=True).start()
+
+
+def pinky_plan(body: dict, run: dict) -> dict | None:
+    """Unloading (OUTBOUND, 11/16): a control-tower eval with "pinky_check": true is followed by a camera-only check
+    (real_runner.py --step pinky_read: front = box on the Pinky tray, front_2 = left on the shelf). Checked at the
+    start of the eval, so the Host hears of a wrong request before anything moves."""
+    if body.get("pinky_check") is not True:
+        return None
+    if body.get("source") != "mqtt":
+        raise RuntimeError("상차 확인(pinky_check)은 관제 명령으로 시작한 평가에서만 씁니다.")
+    marker = str(body.get("target_marker", "")).strip()
+    if not marker.isdigit():
+        raise RuntimeError("상차 확인(pinky_check)에는 상자 번호(target_marker)가 필요합니다.")
+    if align_plan(body, run):
+        raise RuntimeError("선반 정렬(shelf_align)과 상차 확인(pinky_check)은 함께 쓸 수 없습니다. 하차 명령은 \"shelf_align\": false로 보내세요.")
+    a = omx_config.CFG.get("shelf_align") or {}
+    s = omx_config.CFG.get("pinky_check") or {}
+    cmd = [str(Path(c).expanduser()) for c in s.get("cmd") or a.get("cmd") or []]
+    if not cmd:
+        raise RuntimeError("설정 pinky_check(cmd) 또는 shelf_align(cmd)이 없어 상차 확인을 할 수 없습니다.")
+    return {"box": int(marker), "slot": str(s.get("slot") or a.get("slot") or "2B"), "cmd": cmd,
+            "timeout_s": float(s.get("timeout_s") or 20)}
+
+
+def pinky_after_eval(plan: dict, eval_proc) -> None:
+    """Called when the eval has ended. Every end but 비상 정지 (arms held in place) and 강제 종료 goes on to the
+    camera check; last_result stays final=False until it is over."""
+    pinky = {"ran": False, "on_pinky": None, "on_shelf": None, "box": plan["box"], "returncode": None, "skipped": None}
+    stopped = LAST_RESULT.get("stopped_by")
+    if stopped in ("비상 정지", "강제 종료"):
+        LAST_RESULT["pinky"] = dict(pinky, skipped=stopped)
+        return
+    LAST_RESULT.update(stage="pinky_check", final=False, pinky=pinky)
+
+    def start_later() -> None:
+        end = time.time() + 30
+        while JOB.proc is eval_proc and JOB.running() and time.time() < end:
+            time.sleep(0.2)
+        time.sleep(ALIGN_DELAY_S)
+        if JOB.proc is not eval_proc or JOB.running():
+            LAST_RESULT["pinky"].update(skipped="다른 작업이 먼저 시작됨")
+            LAST_RESULT.update(stage="done", final=True)
+            return
+        try:
+            start_pinky_read(plan)
+        except Exception as exc:
+            LAST_RESULT["pinky"].update(skipped=f"시작하지 못함: {str(exc)[:160]}")
+            LAST_RESULT.update(stage="done", final=True)
+
+    threading.Thread(target=start_later, daemon=True).start()
+
+
+def start_pinky_read(plan: dict) -> None:
+    PREVIEW.stop()  # the runner opens the cameras itself
+    PINKY_RESULT_FILE.unlink(missing_ok=True)
+    JOB.start("pinky_read", plan["cmd"] + ["--box", str(plan["box"]), "--slot", plan["slot"], "--step", "pinky_read",
+                                           "--auto", "--result", str(PINKY_RESULT_FILE)],
+              {"phase": "상차 확인 중 (카메라만)", "box": plan["box"], "eval_repo_id": LAST_RESULT.get("repo_id")},
+              need_leader=False, env_extra={"OMX_PANEL_URL": f"http://127.0.0.1:{PORT}"})
+    proc = JOB.proc
+    PINKY.clear()
+    PINKY.update(proc=proc, timed_out=False)
+
+    def watchdog() -> None:  # upper limit: a hung camera must not keep the Host waiting
+        end = time.time() + plan["timeout_s"]
+        while JOB.proc is proc and JOB.running() and time.time() < end:
+            time.sleep(0.2)
+        if JOB.proc is proc and JOB.running():
+            PINKY["timed_out"] = True
+            JOB.kill()
+
+    threading.Thread(target=watchdog, daemon=True).start()
+
+
+def pinky_read_ended(job, proc) -> None:
+    """The runner's result object as it is, plus the panel's own keys; on_pinky / on_shelf null unless it said so."""
+    try:
+        res = json.loads(PINKY_RESULT_FILE.read_text())
+    except (OSError, ValueError):
+        res = {}
+    r = res.get("result") if isinstance(res.get("result"), dict) else {}
+    p = LAST_RESULT.get("pinky") or {"box": job.info.get("box")}
+    rc = job.info.get("returncode")
+    timed_out = PINKY.get("proc") is proc and PINKY.get("timed_out")
+    p.update({k: v for k, v in r.items() if k not in ("ran", "box", "returncode", "skipped")})
+    p.update(ran=True, returncode=rc, log=res.get("log"))
+    if timed_out or job.info.get("killed"):
+        p.update(on_pinky=None, on_shelf=None, skipped="시간 초과" if timed_out else "강제 종료")
+    elif res.get("early_exit"):
+        p["skipped"] = "실행기가 중간에 끝남"
+    elif not r:
+        p["skipped"] = f"결과 없음 (종료 코드 {rc})"
+    p.setdefault("on_pinky", None)
+    p.setdefault("on_shelf", None)
+    LAST_RESULT["pinky"] = p
+    LAST_RESULT.update(stage="done", final=True)
 
 
 def start_align(plan: dict, release: bool = False) -> None:
@@ -2966,6 +3068,7 @@ def start_eval(body: dict) -> dict:
     reset_home, open_gripper = bool(body.get("reset_home", True)), bool(body.get("open_gripper", True))
     if not 1 <= threads <= (os.cpu_count() or 24):
         raise RuntimeError(f"CPU 스레드 수는 1~{os.cpu_count() or 24} 사이로 정하세요.")
+    pinky = pinky_plan(body, run)  # a wrong unloading request is refused before anything moves
     camera_gate()
     if CONTROL:
         udp_ready()
@@ -3052,6 +3155,9 @@ def start_eval(body: dict) -> dict:
         tenv = target_env(body, eval_info)
     if plan:
         eval_info["shelf_align"] = plan
+    if pinky:
+        eval_info["pinky_check"] = pinky
+        eval_info.setdefault("target_marker", pinky["box"])
     if tenv:
         note["target_marker"] = eval_info["target_marker"]
     path.write_text(json.dumps(note, ensure_ascii=False, indent=2))
@@ -3707,6 +3813,8 @@ class Handler(BaseHTTPRequestHandler):
                         raise RuntimeError("녹화·평가 중에는 그 프로그램이 카메라를 쓰고 있습니다. 화면은 그대로 보입니다.")
                     if JOB.running() and JOB.kind in ("align", "align_release", "shelf_read") or LAST_RESULT.get("stage") == "align":
                         raise RuntimeError("선반 정렬 중에는 정렬 프로그램이 카메라를 씁니다.")
+                    if JOB.running() and JOB.kind == "pinky_read" or LAST_RESULT.get("stage") == "pinky_check":
+                        raise RuntimeError("상차 확인 중에는 확인 프로그램이 카메라를 씁니다.")
                     if JOB.running() and JOB.info.get("with_cameras"):
                         raise RuntimeError("카메라를 쓰는 텔레옵이 실행 중입니다.")
                     PREVIEW.start()
@@ -3794,6 +3902,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"home": omx_home.compute_task(str(body.get("task") or "straw"), bool(body.get("apply"))),
                             "tasks": omx_home.load_tasks()})
             elif self.path == "/api/home/return":
+                # a control-tower (Host) request moves the arms only while armed is on (TK 11/16); the screen button as before
+                if body.get("source") == "mqtt" and not ARMED["on"]:
+                    raise RuntimeError(f"armed 꺼짐: 관제 홈 복귀 거절 ({ARMED.get('off_reason') or '꺼짐'})")
                 self._json(home_return())
             elif self.path == "/api/kill":
                 set_armed(False, {"home": "즉시 중단", "freeze": "비상 정지"}.get(body.get("mode"), "강제 종료"))

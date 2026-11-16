@@ -1,4 +1,4 @@
-# Copied from the team's AI server repo (services/roport-ai-server omx_udp); keep the code identical there and here.
+# Copied from the team's AI server repo (services/roport-ai-server/src/omx_udp, PR #97 a09b74e); keep the code identical there and here.
 """OMX inference UDP server (GPU side): observations in, action chunks out; never drives a robot.
 
 The robot loop stays on the host PC (OMX panel): it sends the latest observation when its action
@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Protocol
 
+from .errors import PolicyError
 from .wire import (
     ACTIONS,
     ECHO_FIELDS,
@@ -37,14 +38,6 @@ from .wire import (
 
 DEFAULT_PORT = 5600
 RCVBUF_BYTES = 8 * 1024 * 1024
-
-
-class PolicyError(Exception):
-    """A refusal with a stable code, e.g. MODEL_NOT_ALLOWED or NOT_LOADED."""
-
-    def __init__(self, code: str, message: str = ""):
-        super().__init__(message or code)
-        self.code = code
 
 
 class Policy(Protocol):

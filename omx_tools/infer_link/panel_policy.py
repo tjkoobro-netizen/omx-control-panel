@@ -1,4 +1,4 @@
-# Copied from the team's AI server repo (services/roport-ai-server omx_udp); keep the code identical there and here.
+# Copied from the team's AI server repo (services/roport-ai-server/src/omx_udp, PR #97 a09b74e); keep the code identical there and here.
 """Policy backed by the OMX panel's LeRobot runner on the GPU PC (omx_tools/omx_infer.py).
 
 The panel already owns model loading, pre/post-processing and the observation format; this adapter
@@ -9,7 +9,7 @@ panel's LeRobot/PyTorch environment, which the AI server's own tests never insta
 import sys
 from pathlib import Path
 
-from .server import PolicyError
+from .errors import PolicyError
 
 
 class PanelPolicy:
@@ -51,7 +51,9 @@ class PanelPolicy:
         if (overrides or {}).get("_info_only"):
             # LOAD with overrides {"_info_only": true}: the files and home pose only, nothing loaded on the GPU
             if not self._infer.allowed_model(model):
-                raise PolicyError("MODEL_NOT_ALLOWED", "model is not in the checkpoints")
+                raise PolicyError(
+                    "MODEL_NOT_ALLOWED", "model is not in the checkpoints"
+                )
             return {"ok": True, "info_only": True, **self.model_info(model)}
         runner, load_ms = self._runner(model, overrides)
         diffusion = runner.cfg.type == "diffusion"

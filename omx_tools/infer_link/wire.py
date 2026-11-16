@@ -1,4 +1,4 @@
-# Copied from the team's robot repo (services/roport-omx infer_link, wire RPI1); keep the code identical there and here.
+# Copied from the team's AI server repo (services/roport-ai-server/src/omx_udp, PR #97 a09b74e; same code as services/roport-omx/src/roport_omx/infer_link/wire.py); keep the code identical there and here.
 """OMX inference UDP wire v1 (stdlib only): message framing, HMAC and reassembly.
 
 A message (one observation request or one action reply) is split into datagrams of at most
@@ -34,7 +34,7 @@ PING, PONG, LOAD, LOADED, INFER, ACTIONS, ERROR = range(1, 8)
 KINDS = {PING, PONG, LOAD, LOADED, INFER, ACTIONS, ERROR}
 REPLIES = {PING: PONG, LOAD: LOADED, INFER: ACTIONS}
 
-# INFER header identifiers from the team's AI UDP draft: the reply echoes
+# INFER header identifiers from the team's AI UDP draft (Confluence MFS 10125435): the reply echoes
 # them so the Host applies actions only to the matching attempt, observation and model.
 SCHEMA = "roport-omx-infer-v1"
 ECHO_FIELDS = (

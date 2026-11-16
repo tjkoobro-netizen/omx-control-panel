@@ -1,4 +1,4 @@
-# Copied from the team's robot repo (services/roport-omx infer_link, wire RPI1); keep the code identical there and here.
+# Copied from the team's robot repo (services/roport-omx/src/roport_omx/infer_link, PR #97 a09b74e, wire RPI1); keep the code identical there and here.
 """UDP inference client for the host PC's OMX panel (wire RPI1); stdlib only.
 
 One request at a time. Every call uses a new request_id, and only the reply to that id is

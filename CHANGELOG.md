@@ -1,5 +1,17 @@
 # OMX 제어판 버전 기록
 
+## 3.15.0 (2026-11-16) - 하차 뒤 Pinky 상차 확인, 관제 홈 복귀는 armed일 때만, UDP 코드 팀 저장소와 같게
+
+- **상차 확인(pinky_check)**: 관제 명령(`source: mqtt`)에 `"pinky_check": true`와 `target_marker`가 있으면 평가가 끝난 뒤 카메라만으로 `real_runner.py --box N --slot <shelf_align.slot> --step pinky_read --auto --result <logs/pinky_result.json>`을 실행(작업 `pinky_read`, 로봇 연결·토크 없음, armed와 무관). 실행기 명령은 설정 `pinky_check.cmd`, 없으면 `shelf_align.cmd`. 상한 `pinky_check.timeout_s`(기본 20초) 지나면 멈추고 "시간 초과"
+- 평가 시작에서 검사: 관제 명령이 아니거나 상자 번호가 없거나 선반 정렬과 함께면(`shelf_align` true, 또는 생략했는데 정렬 모델) 400으로 거절. 하차 명령은 `"shelf_align": false`와 함께 보냄
+- 실행 조건: 정상 종료·시간 만료·오류·평가 끝내기(중지)·즉시 중단 뒤 실행, 비상 정지·강제 종료 뒤에는 실행하지 않음(`skipped`). 평가 프로세스가 끝나 카메라를 놓은 뒤 시작, 그사이 다른 작업이 먼저 잡히면 `skipped: "다른 작업이 먼저 시작됨"`
+- `last_result`: 평가가 끝나면 `stage: "pinky_check"`, `final: false` → 끝나면 `stage: "done"`, `final: true`. `last_result.pinky` = 실행기 `result` 그대로(`on_pinky`, `on_shelf`, `pinky`, `shelf`, `x`, `y`, `dx_cm`, `dy_cm`, `yaw_deg`, `pinky_ids`, `photo_top`, `photo_front2` …) + 패널 값(`ran`, `box`, `returncode`, `skipped`, `log`). 시간 초과·강제 종료·중간 종료(`early_exit`)·결과 없음이면 `on_pinky`·`on_shelf`는 `null`. 상차 확인을 쓰지 않는 평가는 `pinky: null`
+- 상차 확인 중에는 카메라 미리보기를 켜지 않음. 평가 탭 상태 줄에 "상차 확인 중 · 상자 N", 끝나면 "쟁반 위 있음/없음 · 선반에 남음/없음"
+- **관제 홈 복귀**: `POST /api/home/return`에 `"source": "mqtt"`가 있고 armed가 꺼져 있으면 400("armed 꺼짐: 관제 홈 복귀 거절 (이유)"). 화면의 [홈 위치로 이동](source 없음)은 그대로
+- `omx_tools/infer_link`를 팀 저장소 PR #97(FFT1-154, a09b74e)의 `services/roport-ai-server/src/omx_udp`와 같게 맞춤: `errors.py`(PolicyError) 추가, `server.py`는 PolicyError를 errors에서 가져옴, `panel_policy.py`도 errors에서 가져오고 줄바꿈을 원본과 같게. `wire.py`, `client.py`는 코드 그대로이고 출처 주석만 PR 경로로
+- 이제 `python -m infer_link.server`로 띄워도 모르는 모델 거절이 MODEL_NOT_ALLOWED로 나감(PolicyError가 한 클래스). GPU 패널은 지금처럼 `main()`을 불러 띄움
+- UDP 코드는 동작 변화 없음: PR 테스트 15개와 두 가지 실행 방식(PING, 모르는 모델 거절)을 패널 복사본으로 확인
+
 ## 3.14.5 (2026-11-14) - 평가 음성 안내가 작업에 맞는 물체 이름을 말함 · 평가 녹화 기본 켬
 
 - ③ 평가의 **평가 녹화**를 기본으로 켬(화면을 열 때마다 켜진 상태로 시작, 기억하지 않음). 3.14.1부터 기본이 '녹화 안 함'이라, 녹화되는 줄 알고 돌린 평가(11/14 #25 10회)에 영상·관절 기록이 남지 않았음. 관제(MQTT) 미션은 지금처럼 녹화하지 않음
