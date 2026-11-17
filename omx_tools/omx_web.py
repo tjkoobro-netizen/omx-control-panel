@@ -1101,6 +1101,7 @@ class Preview:
         self.cams: dict[str, OpenCVCamera] = {}
         self.frames: dict[str, bytes] = {}
         self.raw: dict[str, bytes] = {}  # the frame before the marker check drew on it (camera alignment)
+        self.frame_ts: dict[str, float] = {}  # when each frame was read (epoch s): /api/snapshot X-Frame-Ts
         self.brightness: dict[str, float] = {}
         self.running = False
         self.thread: threading.Thread | None = None
@@ -1165,6 +1166,7 @@ class Preview:
                     frame = cam.async_read(timeout_ms=500)
                 except Exception:
                     continue
+                read_at = time.time()
                 raw = None
                 if name == "front" and (self.marker_show or self.marker_target is not None):
                     try:
@@ -1179,6 +1181,7 @@ class Preview:
                                        [cv2.IMWRITE_JPEG_QUALITY, 75])
                 if ok:
                     self.frames[name] = jpg.tobytes()
+                    self.frame_ts[name] = read_at
                     self.brightness[name] = round(float(frame.mean()), 1)
             time.sleep(1 / 15)
 
@@ -1194,7 +1197,7 @@ class Preview:
                     cam.disconnect()
                 except Exception:
                     pass
-            self.cams, self.frames, self.raw, self.brightness = {}, {}, {}, {}
+            self.cams, self.frames, self.raw, self.brightness, self.frame_ts = {}, {}, {}, {}, {}
 
 
 def output_lines(proc: subprocess.Popen, grace_s: float = 2.0):
@@ -1279,6 +1282,7 @@ class Job:
         self.log_file.write("$ " + " ".join(cmd) + "\n")
         self.lines.clear()
         self.kind, self.info, self.started = kind, info, time.time()
+        info.setdefault("base_phase", info.get("phase"))  # a runner's own words, kept through its safe start
         self.slow = collections.deque(maxlen=2000)  # (time, Hz) of "Record loop is running slower" warnings
         self.slow_total = 0
         env = dict(os.environ, PYTHONUNBUFFERED="1", OMX_PORT=str(PORT), **(env_extra or {}))  # same LIVE files
@@ -1329,7 +1333,7 @@ class Job:
             set_armed(False, f"이상 정지 {self.info['err']['name']}")
         if self.kind == "eval":
             LAST_RESULT.clear()
-            LAST_RESULT.update(eval_result(self), stage="done", final=True, align=None, pinky=None)
+            LAST_RESULT.update(eval_result(self), stage="done", final=True, align=None, pinky=None, placement=None)
             if self.info.get("shelf_align"):
                 align_after_eval(self.info["shelf_align"], proc)
             if self.info.get("pinky_check"):
@@ -1436,7 +1440,11 @@ class Job:
                 frame = int(round((time.time() - self.info.get("phase_started", time.time())) * 30))
                 update_note(self.info["repo_id"], lambda n: n.get("attempts", {}).get("0", {}).update(safe_start_end_frame=frame))
             self.info["safe_start"] = msg
-            if self.kind == "teleop":
+            if self.kind not in ("record", "eval", "teleop"):
+                # the shelf / Pinky runner grabbing the arms: keep its own words ("정렬 중"), not "녹화 중" (11/17)
+                base = self.info.get("base_phase") or "실행 중"
+                self.info["phase"] = base if done else f"{base} · 팔 잡는 중"
+            elif self.kind == "teleop":
                 self.info["phase"] = "조작 중" if done else "안전 시작 중"
             elif not done:
                 self.info["phase"] = "안전 시작 중"
@@ -2764,7 +2772,7 @@ def eval_result(job) -> dict:
             "started_at": dt.datetime.fromtimestamp(job.started).isoformat(timespec="seconds"),
             "ended_at": dt.datetime.now().isoformat(timespec="seconds"), "returncode": rc,
             "exit_ok": rc == 0 and not err and stopped is None, "stopped_by": stopped, "err": err,
-            "target_marker": info.get("target_marker"),
+            "target_marker": info.get("target_marker"), "target_drawn": info.get("target_drawn"),
             "last_episode": {k: end.get(k) for k in ("episode", "at", "aborted", "returned", "elapsed_s")} if end else None,
             "arms": arms or None,
             "home_check": "unknown" if not checks or None in checks else "ok" if all(checks) else "far"}
@@ -2772,6 +2780,10 @@ def eval_result(job) -> dict:
 
 # ---------------------------------------------------------------- 선반 정렬 (관제 평가 뒤 이어서)
 ALIGN_RESULT_FILE = LOG_DIR / "align_result.json"  # the runner's result (--result)
+# the runner writes this as soon as it has read the shelf, before it aligns (3.17.0): "the box is on its slot"
+PLACEMENT_FILE = ALIGN_RESULT_FILE.with_suffix(".placement.json")
+SLOT_RE = re.compile(r"[1-9][A-Z]")
+PINKY_RE = re.compile(r"pinky(\d+)", re.IGNORECASE)
 ALIGN_DELAY_S = 0.3  # after the eval let go of the ports and cameras (the runner waits for its own start time)
 PINKY_RESULT_FILE = LOG_DIR / "pinky_result.json"  # the runner's --step pinky_read result
 PINKY: dict = {}  # the running pinky_read: proc, timed_out
@@ -2827,6 +2839,113 @@ def align_done_later(proc) -> None:
     threading.Thread(target=run, daemon=True).start()
 
 
+def now_iso() -> str:
+    """Local time with milliseconds and the time zone, e.g. 2026-11-17T18:30:01.123+09:00 (the Host compares)."""
+    return dt.datetime.now().astimezone().isoformat(timespec="milliseconds")
+
+
+def command_slot(body: dict) -> str | None:
+    """The control tower's slot ("2B"), or None when the command has none (the settings' slot is used)."""
+    raw = body.get("slot")
+    if raw is None or str(raw).strip() == "":
+        return None
+    slot = str(raw).strip().upper()
+    if not SLOT_RE.fullmatch(slot):
+        raise RuntimeError(f"칸(slot)은 2B처럼 층 숫자 하나와 칸 글자 하나로 보내세요 (받은 값 {raw!r}).")
+    return slot
+
+
+def command_pinky(body: dict) -> dict:
+    """"pinky_id": "pinky1" -> the runner's --pinky 1 (that Pinky's tray marker reference). Missing or another
+    form: no --pinky (the common reference), and the value is kept to show why."""
+    raw = body.get("pinky_id")
+    m = PINKY_RE.fullmatch(str(raw).strip()) if raw is not None else None
+    out = {"pinky_id": raw, "pinky_no": int(m.group(1)) if m else None}
+    if raw is not None and not m:
+        out["pinky_id_ignored"] = True
+    return out
+
+
+def take_placement(source: str) -> bool:
+    """The runner's placement file -> last_result.placement (once per alignment / shelf read)."""
+    if LAST_RESULT.get("placement"):
+        return True
+    try:
+        d = json.loads(PLACEMENT_FILE.read_text())
+    except (OSError, ValueError):
+        return False
+    if not isinstance(d, dict):
+        return False
+    d.setdefault("on_shelf", None)
+    LAST_RESULT["placement"] = dict(d, source=source, reported_at=now_iso())
+    return True
+
+
+def watch_placement(proc, source: str) -> None:
+    """While the runner works, pick up its placement file at once (the Host reports COMPLETE from it)."""
+    def run() -> None:
+        while JOB.proc is proc and JOB.running():
+            if take_placement(source):
+                return
+            time.sleep(0.2)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def placement_from_result(source: str, r: dict, slot: str | None, box) -> None:
+    """The runner ended without a placement file (an older runner, a stop): its final result, when it has one."""
+    if take_placement(source):
+        return
+    if "on_shelf" in r or "shelf" in r:
+        LAST_RESULT["placement"] = {"on_shelf": r.get("on_shelf"), "shelf": r.get("shelf"), "slot": r.get("slot") or slot,
+                                    "box": box, "observed_at": r.get("observed_at"), "observed_ts": r.get("observed_ts"),
+                                    "observed_src": r.get("observed_src"), "source": source, "from_result": True,
+                                    "reported_at": now_iso()}
+    else:
+        placement_skipped("결과 없음", slot, box)
+
+
+def placement_skipped(why: str, slot: str | None, box) -> None:
+    LAST_RESULT["placement"] = {"on_shelf": None, "skipped": why, "slot": slot, "box": box, "observed_at": None,
+                                "observed_ts": None, "reported_at": now_iso()}
+
+
+def episode_end_pose() -> dict | None:
+    """Where the eval's last episode ended (omx_run.py's episode_end.json), in read_arms() form."""
+    try:
+        end = json.loads(EPISODE_END_FILE.read_text())
+    except (OSError, ValueError):
+        return None
+    state = end.get("state") if isinstance(end.get("state"), dict) else None
+    return {k.removesuffix(".pos"): v for k, v in state.items()} if state else None
+
+
+RUNNER_POSE_RE = re.compile(r"현재 자세 \[([-0-9., ]+)\]")
+MOTOR_ORDER = ("shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper")
+
+
+def runner_start_pose(r: dict, lines) -> tuple[dict | None, str | None]:
+    """Where the runner found the arms when it connected (it goes back there after aligning): its result's
+    start_pose, else its log line "현재 자세 [...]" (left arm then right arm, motor order)."""
+    sp = r.get("start_pose")
+    if isinstance(sp, dict) and sp:
+        return {k.removesuffix(".pos"): float(v) for k, v in sp.items()}, "runner"
+    for line in lines:
+        m = RUNNER_POSE_RE.search(line)
+        if not m:
+            continue
+        try:
+            vals = [float(x) for x in m.group(1).split(",")]
+        except ValueError:
+            return None, None
+        sides = [s for s in ARM_NAMES] if ROBOT_MODE == "bimanual" else [""]
+        names = [f"{s}_{j}" if s else j for s in sides for j in MOTOR_ORDER]
+        if len(vals) == len(names):
+            return dict(zip(names, vals)), "runner_log"
+        return None, None
+    return None, None
+
+
 def align_plan(body: dict, run: dict) -> dict | None:
     """A control-tower eval with a target marker is followed by the shelf alignment of that box when the
     model is in the config list (or the command says "shelf_align": true / false)."""
@@ -2839,7 +2958,8 @@ def align_plan(body: dict, run: dict) -> dict | None:
         want = any(m and m in run["model_path"] for m in s.get("models") or [])
     if not want:
         return None
-    return {"box": int(marker), "slot": str(s.get("slot") or "2B"), "draw_target": bool(s.get("draw_target", False))}
+    return {"box": int(marker), "slot": command_slot(body) or str(s.get("slot") or "2B"),
+            "draw_target": bool(s.get("draw_target", False))}
 
 
 def align_after_eval(plan: dict, eval_proc) -> None:
@@ -2848,6 +2968,7 @@ def align_after_eval(plan: dict, eval_proc) -> None:
     align = {"ran": False, "ok": None, "box": plan["box"], "slot": plan["slot"]}
     if not LAST_RESULT.get("exit_ok"):  # the Host fails the mission on the eval error itself: nobody looks
         LAST_RESULT["align"] = dict(align, ok=False, skipped="평가가 정상으로 끝나지 않음", on_shelf=None)
+        placement_skipped("평가가 정상으로 끝나지 않음", plan["slot"], plan["box"])
         return
     LAST_RESULT.update(stage="align", final=False, align=align)
 
@@ -2859,12 +2980,15 @@ def align_after_eval(plan: dict, eval_proc) -> None:
         if JOB.proc is not eval_proc or JOB.running():
             # another job holds the robot and the cameras: nobody can look at the shelf (Host: PANEL_ALIGN_SKIPPED)
             LAST_RESULT["align"].update(ok=False, skipped="다른 작업이 먼저 시작됨", on_shelf=None)
+            placement_skipped("다른 작업이 먼저 시작됨", plan["slot"], plan["box"])
             LAST_RESULT.update(stage="done", final=True)
             return
         why = f"armed 꺼짐 ({ARMED['off_reason']})" if not ARMED["on"] else None
         if not why:
             try:
-                ALIGN["before"] = read_arms()  # the eval's landed pose: the alignment ends back here
+                # the rest check's reference: where the runner finds the arms (its start pose, after it ends);
+                # until then the eval's last pose. No bus read here: it cost about 2 s before the runner started
+                ALIGN["before"] = episode_end_pose()
                 start_align(plan)
                 return
             except Exception as exc:
@@ -2893,17 +3017,20 @@ def pinky_plan(body: dict, run: dict) -> dict | None:
     cmd = [str(Path(c).expanduser()) for c in s.get("cmd") or a.get("cmd") or []]
     if not cmd:
         raise RuntimeError("설정 pinky_check(cmd) 또는 shelf_align(cmd)이 없어 상차 확인을 할 수 없습니다.")
-    return {"box": int(marker), "slot": str(s.get("slot") or a.get("slot") or "2B"), "cmd": cmd,
-            "timeout_s": float(s.get("timeout_s") or 20)}
+    return {"box": int(marker), "slot": command_slot(body) or str(s.get("slot") or a.get("slot") or "2B"), "cmd": cmd,
+            "timeout_s": float(s.get("timeout_s") or 20), **command_pinky(body)}
 
 
 def pinky_after_eval(plan: dict, eval_proc) -> None:
     """Called when the eval has ended. Every end but 비상 정지 (arms held in place) and 강제 종료 goes on to the
     camera check; last_result stays final=False until it is over."""
-    pinky = {"ran": False, "on_pinky": None, "on_shelf": None, "box": plan["box"], "returncode": None, "skipped": None}
+    pinky = {"ran": False, "on_pinky": None, "on_shelf": None, "box": plan["box"], "slot": plan["slot"],
+             "pinky_id": plan.get("pinky_id"), "pinky_no": plan.get("pinky_no"), "returncode": None, "skipped": None}
+    if plan.get("pinky_id_ignored"):
+        pinky["pinky_id_ignored"] = True
     stopped = LAST_RESULT.get("stopped_by")
     if stopped in ("비상 정지", "강제 종료"):
-        LAST_RESULT["pinky"] = dict(pinky, skipped=stopped)
+        LAST_RESULT["pinky"] = dict(pinky, skipped=stopped, reported_at=now_iso())
         return
     LAST_RESULT.update(stage="pinky_check", final=False, pinky=pinky)
 
@@ -2913,13 +3040,13 @@ def pinky_after_eval(plan: dict, eval_proc) -> None:
             time.sleep(0.2)
         time.sleep(ALIGN_DELAY_S)
         if JOB.proc is not eval_proc or JOB.running():
-            LAST_RESULT["pinky"].update(skipped="다른 작업이 먼저 시작됨")
+            LAST_RESULT["pinky"].update(skipped="다른 작업이 먼저 시작됨", reported_at=now_iso())
             LAST_RESULT.update(stage="done", final=True)
             return
         try:
             start_pinky_read(plan)
         except Exception as exc:
-            LAST_RESULT["pinky"].update(skipped=f"시작하지 못함: {str(exc)[:160]}")
+            LAST_RESULT["pinky"].update(skipped=f"시작하지 못함: {str(exc)[:160]}", reported_at=now_iso())
             LAST_RESULT.update(stage="done", final=True)
 
     threading.Thread(target=start_later, daemon=True).start()
@@ -2928,8 +3055,10 @@ def pinky_after_eval(plan: dict, eval_proc) -> None:
 def start_pinky_read(plan: dict) -> None:
     PREVIEW.stop()  # the runner opens the cameras itself
     PINKY_RESULT_FILE.unlink(missing_ok=True)
-    JOB.start("pinky_read", plan["cmd"] + ["--box", str(plan["box"]), "--slot", plan["slot"], "--step", "pinky_read",
-                                           "--auto", "--result", str(PINKY_RESULT_FILE)],
+    args = ["--box", str(plan["box"]), "--slot", plan["slot"], "--step", "pinky_read", "--auto", "--result", str(PINKY_RESULT_FILE)]
+    if plan.get("pinky_no") is not None:
+        args += ["--pinky", str(plan["pinky_no"])]
+    JOB.start("pinky_read", plan["cmd"] + args,
               {"phase": "상차 확인 중 (카메라만)", "box": plan["box"], "eval_repo_id": LAST_RESULT.get("repo_id")},
               need_leader=False, env_extra={"OMX_PANEL_URL": f"http://127.0.0.1:{PORT}"})
     proc = JOB.proc
@@ -2957,8 +3086,8 @@ def pinky_read_ended(job, proc) -> None:
     p = LAST_RESULT.get("pinky") or {"box": job.info.get("box")}
     rc = job.info.get("returncode")
     timed_out = PINKY.get("proc") is proc and PINKY.get("timed_out")
-    p.update({k: v for k, v in r.items() if k not in ("ran", "box", "returncode", "skipped")})
-    p.update(ran=True, returncode=rc, log=res.get("log"))
+    p.update({k: v for k, v in r.items() if k not in ("ran", "box", "returncode", "skipped", "pinky_id", "pinky_no")})
+    p.update(ran=True, returncode=rc, log=res.get("log"), reported_at=now_iso())
     if timed_out or job.info.get("killed"):
         p.update(on_pinky=None, on_shelf=None, skipped="시간 초과" if timed_out else "강제 종료")
     elif res.get("early_exit"):
@@ -2986,11 +3115,14 @@ def start_align(plan: dict, release: bool = False) -> None:
         args.append("--release")
     else:
         ALIGN_RESULT_FILE.unlink(missing_ok=True)
+        PLACEMENT_FILE.unlink(missing_ok=True)
         args += ["--slot", plan["slot"], "--step", "shelf_align", "--result", str(ALIGN_RESULT_FILE)]
     JOB.start("align_release" if release else "align", s["cmd"] + args,
               {"phase": "로봇 내려놓는 중" if release else "정렬 중", "box": plan["box"], "slot": plan["slot"],
                "eval_repo_id": LAST_RESULT.get("repo_id")},
               need_leader=False, env_extra={"OMX_PANEL_URL": f"http://127.0.0.1:{PORT}"})
+    if not release:
+        watch_placement(JOB.proc, "align")
 
 
 def start_shelf_read(plan: dict, why: str) -> None:
@@ -3003,13 +3135,16 @@ def start_shelf_read(plan: dict, why: str) -> None:
             raise RuntimeError("설정 shelf_align(cmd)이 없습니다")
         PREVIEW.stop()  # the runner opens the cameras itself
         ALIGN_RESULT_FILE.unlink(missing_ok=True)
+        PLACEMENT_FILE.unlink(missing_ok=True)
         JOB.start("shelf_read", s["cmd"] + ["--box", str(plan["box"]), "--slot", plan["slot"], "--step", "shelf_read",
                                            "--auto", "--result", str(ALIGN_RESULT_FILE)],
                   {"phase": "선반 확인 중 (카메라만)", "box": plan["box"], "slot": plan["slot"], "skipped": why,
                    "eval_repo_id": LAST_RESULT.get("repo_id")},
                   need_leader=False, env_extra={"OMX_PANEL_URL": f"http://127.0.0.1:{PORT}"})
+        watch_placement(JOB.proc, "shelf_read")
     except Exception as exc:
         LAST_RESULT["align"].update(on_shelf=None, shelf_read_error=str(exc)[:200])
+        placement_skipped(f"선반 확인을 시작하지 못함: {str(exc)[:160]}", plan["slot"], plan["box"])
         LAST_RESULT.update(stage="done", final=True)
 
 
@@ -3028,7 +3163,9 @@ def shelf_read_ended(job, proc) -> None:
     a.update({k: v for k, v in r.items() if k not in ("ran", "ok", "skipped", "box", "slot")})
     a.setdefault("on_shelf", None)
     a["shelf_read"] = {"returncode": job.info.get("returncode"), "log": res.get("log")}
+    a["reported_at"] = now_iso()
     LAST_RESULT["align"] = a
+    placement_from_result("shelf_read", r, job.info.get("slot"), job.info.get("box"))
     LAST_RESULT.update(stage="done", final=True)
 
 
@@ -3059,6 +3196,12 @@ def align_ended(job, proc) -> None:
     # every other result key as the runner wrote it (on_shelf, yaw_start, yaw_end, taps, align_s, ...): the Host uses them
     LAST_RESULT["align"].update({k: v for k, v in r.items() if k not in LAST_RESULT["align"]})
     LAST_RESULT["align"].setdefault("on_shelf", None)
+    LAST_RESULT["align"]["reported_at"] = now_iso()
+    placement_from_result("align", r, info.get("slot"), info.get("box"))
+    start_pose, ref = runner_start_pose(r, job.lines)
+    if start_pose:  # the runner goes back to where it found the arms: compare with that, not the eval's end
+        ALIGN["before"] = start_pose
+    LAST_RESULT["align"]["rest_ref"] = ref or ("eval_end" if ALIGN.get("before") else None)
     if info.get("land_after"):
         LAST_RESULT.update(stage="release", final=False)
 
@@ -3100,6 +3243,7 @@ def start_eval(body: dict) -> dict:
     reset_home, open_gripper = bool(body.get("reset_home", True)), bool(body.get("open_gripper", True))
     if not 1 <= threads <= (os.cpu_count() or 24):
         raise RuntimeError(f"CPU 스레드 수는 1~{os.cpu_count() or 24} 사이로 정하세요.")
+    command_slot(body)  # a wrong slot is refused before anything moves
     pinky = pinky_plan(body, run)  # a wrong unloading request is refused before anything moves
     camera_gate()
     if CONTROL:
@@ -3180,18 +3324,27 @@ def start_eval(body: dict) -> dict:
                  "protocol": note.get("protocol"), "source": "mqtt" if body.get("source") == "mqtt" else "panel",
                  "task": task}  # the panel's voice cue names the object from it (box, strawberry, ...)
     plan = align_plan(body, run)
+    marker = str(body.get("target_marker", "")).strip()
     if plan and not plan["draw_target"]:  # the box number is for the alignment; the model never saw a circle
         tenv = {}
         eval_info["target_marker"] = plan["box"]
+    elif body.get("draw_target") is False:
+        # the command keeps the number (Pinky check, the record) but no circle goes into the front image:
+        # a model trained without one (unloading, 11/17) must not see one
+        tenv = {}
+        if marker:
+            eval_info["target_marker"] = int(marker)
     else:
         tenv = target_env(body, eval_info)
+    eval_info["target_drawn"] = bool(tenv)
     if plan:
         eval_info["shelf_align"] = plan
     if pinky:
         eval_info["pinky_check"] = pinky
         eval_info.setdefault("target_marker", pinky["box"])
-    if tenv:
+    if eval_info.get("target_marker") is not None:
         note["target_marker"] = eval_info["target_marker"]
+        note["target_drawn"] = bool(tenv)
     path.write_text(json.dumps(note, ensure_ascii=False, indent=2))
     JOB.start("eval", cmd, eval_info,
               need_leader=False, env_extra=thread_env(threads) | home_env(reset_home, open_gripper, repo_id) | async_env
@@ -3695,7 +3848,8 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._json({"error": str(exc)}, 400)
         elif self.path.startswith("/api/snapshot/"):
-            self._snapshot(self.path.rsplit("/", 1)[-1].split("?", 1)[0])
+            parts = urllib.parse.urlsplit(self.path)
+            self._snapshot(parts.path.rsplit("/", 1)[-1], urllib.parse.parse_qs(parts.query))
         elif self.path == "/api/eval/list":
             self._json({"evals": eval_list()})
         elif self.path == "/api/train/status":
@@ -3757,19 +3911,44 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
 
-    def _snapshot(self, name: str) -> None:
-        """One camera frame for the position editor: camera view, or the running program's live frame."""
-        frame = PREVIEW.frames.get(name) if PREVIEW.running else None
+    def _snapshot(self, name: str, query: dict | None = None) -> None:
+        """One camera frame for the position editor and the shelf / Pinky runner: camera view, or the running
+        program's live frame. X-Frame-Ts = when it was read (epoch s), X-Frame-Age = seconds since;
+        ?raw=1: the camera view's frame without the marker check's drawing; ?max_age=S: 410 when older."""
+        query = query or {}
+        raw_wanted = (query.get("raw") or [""])[0] in ("1", "true")
+        try:
+            max_age = float((query.get("max_age") or [""])[0] or "nan")
+        except ValueError:
+            max_age = float("nan")
+        frame, ts, drawn = None, None, False
+        if PREVIEW.running:
+            raw = PREVIEW.raw.get(name) if raw_wanted else None
+            frame = raw or PREVIEW.frames.get(name)
+            ts = PREVIEW.frame_ts.get(name)
+            drawn = raw is None and name in PREVIEW.raw  # the marker check drew on the frame sent
         live = Path(f"{LIVE}{name}.jpg")
-        if frame is None and live.exists() and time.time() - live.stat().st_mtime < 5:
-            frame = live.read_bytes()
+        if frame is None and live.exists():
+            mtime = live.stat().st_mtime
+            if time.time() - mtime < 5:
+                frame, ts = live.read_bytes(), mtime
+                drawn = name == "front" and bool(JOB.running() and JOB.info.get("target_drawn"))
         if not frame or name not in CAMERAS:
             self._json({"error": "영상이 없습니다. ① 탭에서 카메라 보기를 켜면 배경에 나옵니다."}, 404)
+            return
+        age = None if ts is None else max(0.0, time.time() - ts)
+        if max_age == max_age and (age is None or age > max_age):  # max_age given (not nan)
+            self._json({"error": f"{name} 영상이 {max_age:g}초보다 오래됐습니다",
+                        "age_s": None if age is None else round(age, 3)}, 410)
             return
         self.send_response(200)
         self.send_header("Content-Type", "image/jpeg")
         self.send_header("Content-Length", str(len(frame)))
         self.send_header("Cache-Control", "no-store")
+        if ts is not None:
+            self.send_header("X-Frame-Ts", f"{ts:.3f}")
+            self.send_header("X-Frame-Age", f"{age:.3f}")
+        self.send_header("X-Frame-Raw", "0" if drawn else "1")
         self.end_headers()
         self.wfile.write(frame)
 

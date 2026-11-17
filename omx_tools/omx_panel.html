@@ -525,7 +525,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.16.0</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.17.0</span></div>
       </div>
     </div>
     <div class="status">
@@ -1633,6 +1633,8 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </ul>
       <h3>하차 뒤 상차 확인 (Pinky)</h3>
       <p>관제 명령에 <code>"pinky_check": true</code>와 상자 번호(<code>target_marker</code>)가 있으면, 평가가 끝난 뒤 카메라만으로 <b>상차 확인</b>을 해요(로봇은 건드리지 않아 armed와 무관). 위 카메라(front)로 상자가 Pinky 쟁반 위에 있는지, 전방 카메라(front_2)로 선반에 남았는지 봅니다. 선반 정렬과는 함께 쓸 수 없어서, 하차 명령은 <code>"shelf_align": false</code>로 보내요(둘 다 켜면 평가를 시작하지 않고 거절).</p>
+      <p>상자 번호를 보내면 기본으로 위 카메라 영상에 목표 원을 그려 정책에 보여 줘요. 원 없이 학습한 모델(하차 등)은 <code>"draw_target": false</code>를 함께 보내면 번호는 상차 확인·기록에만 쓰고 원은 그리지 않아요(<code>last_result.target_drawn</code>).</p>
+      <p>관제 명령의 <code>"slot"</code>(예 <code>"2B"</code>)은 정렬·선반 확인·상차 확인에 그대로 넘어가고, <code>"pinky_id"</code>(예 <code>"pinky1"</code>)는 상차 확인의 Pinky별 쟁반 기준에 쓰여요. 선반 정렬은 상자가 칸에 놓였는지 먼저 읽어 <code>last_result.placement</code>로 바로 알리고(정렬은 이어서 진행), 결과마다 관측 시각 <code>observed_at</code>과 받은 시각 <code>reported_at</code>이 붙어요.</p>
       <ul>
         <li>정상 종료·시간 만료·오류·평가 끝내기·즉시 중단 뒤에는 확인하고, <b>비상 정지</b>·<b>강제 종료</b> 뒤에는 하지 않아요. 20초 안에 끝나지 않으면 멈추고 "시간 초과"로 남겨요.</li>
         <li><code>last_result</code>의 <code>stage</code>는 평가 → <code>pinky_check</code> → <code>done</code>(<code>final: true</code>). 결과는 <code>last_result.pinky</code>: 확인 프로그램 값 그대로(<code>on_pinky</code>, <code>on_shelf</code>, <code>pinky</code>, <code>shelf</code> 등)와 패널 값(<code>ran</code>, <code>box</code>, <code>returncode</code>, <code>skipped</code>). 확인하지 못하면 <code>on_pinky</code>·<code>on_shelf</code>는 <code>null</code>이에요.</li>

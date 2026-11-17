@@ -1,5 +1,21 @@
 # OMX 제어판 버전 기록
 
+## 3.17.0 (2026-11-17) - 선반 안착 먼저 보고, 명령 칸·Pinky 번호 전달, 관측 시각, 정렬 중 문구, 평가→정렬 2초 단축
+
+- **안착 먼저 보고(`last_result.placement`)**: 정렬 실행기가 선반을 읽자마자 쓰는 `<align_result>.placement.json`(tmp→replace)을 정렬 중 0.2초마다 보고 `last_result.placement`로 바로 내보냄(`stage: "align"`, `final: false` 그대로, 정렬은 이어서 끝까지). 값은 실행기 내용 그대로(`on_shelf`, `shelf`, `slot`, `box`, `observed_at`, `observed_ts`, `observed_src`) + `source`(`align`/`shelf_read`), `reported_at`. armed 꺼짐으로 선반 확인만 할 때도 같은 모양. 파일을 쓰지 않는 옛 실행기면 끝난 뒤 최종 결과로 채움(`from_result: true`). 평가가 정상으로 끝나지 않았거나 다른 작업이 먼저 잡혔으면 `on_shelf: null`과 `skipped`. 정렬·상차 확인을 안 하는 평가는 `placement: null`
+- **명령 칸(`slot`)**: 평가 시작 요청의 `"slot"`(예 `"2B"`, 소문자도 받음)을 정렬·선반 확인·상차 확인 실행기의 `--slot`으로 넘김. 없으면 설정값(없으면 2B). 형식이 틀리면 평가를 시작하지 않고 거절. 실행기가 못 하는 칸이면 실행기가 `slot_unsupported`(값 `null`)를 냄. `last_result.align`·`pinky`·`placement`에 실제로 쓴 `slot`
+- **Pinky 번호(`pinky_id`)**: `"pinky_id": "pinky1"`(대소문자 무관)이면 상차 확인에 `--pinky 1`(Pinky별 쟁반 마커 기준). 없거나 형식이 다르면 넘기지 않고(공통 기준) `pinky_id_ignored: true`. `last_result.pinky`에 `pinky_id`, `pinky_no`
+- **시각**: `last_result.pinky`·`align`·`placement`에 패널이 결과를 받은 시각 `reported_at`(밀리초와 시간대, 예 `2026-11-17T18:30:01.123+09:00`). 관측 시각 `observed_at`은 실행기 값 그대로
+- **`/api/snapshot/<camera>`**: 응답 헤더 `X-Frame-Ts`(프레임을 읽은 epoch 초: 카메라 보기 프레임 시각, 실행 중이면 라이브 jpg 수정 시각), `X-Frame-Age`(초), `X-Frame-Raw`(1 = 그림 없는 원본). `?raw=1`이면 마커 확인 그림이 없는 원본, `?max_age=S`이면 더 오래된 프레임은 410(JSON `age_s`)
+- **정렬 중 문구**: 정렬·선반 확인·상차 확인 실행기가 팔을 잡을 때 "녹화 중"/"안전 시작 중" 대신 그 작업 문구("정렬 중 · 팔 잡는 중" → "정렬 중")
+- **평가→정렬 전환 약 2초 단축**: 정렬 전에 버스로 두 팔 위치를 다시 읽던 것(약 2.2초)을 없앰. 정렬 뒤 제자리 확인(`align.rest`)의 기준은 실행기가 팔을 잡은 순간 자세(결과의 `start_pose`, 없으면 로그 "현재 자세 [...]"), 그것도 없으면 평가 마지막 자세(`episode_end.json`). 어느 것을 썼는지 `align.rest_ref`(`runner`/`runner_log`/`eval_end`)
+
+## 3.16.1 (2026-11-17) - 관제 평가에서 목표 원 끄기 (`draw_target: false`)
+
+- 평가 시작 요청에 `"draw_target": false`가 있으면 상자 번호(`target_marker`)는 그대로 쓰되(상차 확인, 평가 기록, 음성 안내) 위 카메라(front) 영상에 목표 원을 그리지 않음(`OMX_TARGET_*` 환경 변수를 넣지 않음). 이 원은 정책이 보는 front 영상에 직접 그려지므로, 원 없이 학습한 모델(하차 `outbound_act_re1112x37_60k_1113` 등)은 꺼야 함. 11/17 현장 하차 평가에서 원이 들어간 것을 발견
+- 키가 없으면 지금처럼 그림(입고·기존 평가 그대로). 선반 정렬 설정의 `draw_target`(정렬 모델)은 전과 같음
+- `last_result`와 평가 노트에 `target_drawn`(true/false) 추가. 원을 그리지 않은 평가도 노트에 `target_marker`를 남김
+
 ## 3.16.0 (2026-11-17) - 관제 Host HOLD를 패널에서 해제
 
 - Host(PR #103)가 journal 옆에 쓰는 `<stem>.host-state.json`을 읽어 `/api/status`의 `host_hold`(`available`, `hold`, `active`, `updated_at`, `boot_id`)로 보여 줌. 상태 파일이 없는 옛 Host면 `available: false`이고 화면에 아무것도 안 보임
