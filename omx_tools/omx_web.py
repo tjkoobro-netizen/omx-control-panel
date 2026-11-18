@@ -2782,6 +2782,8 @@ def eval_result(job) -> dict:
 ALIGN_RESULT_FILE = LOG_DIR / "align_result.json"  # the runner's result (--result)
 # the runner writes this as soon as it has read the shelf, before it aligns (3.17.0): "the box is on its slot"
 PLACEMENT_FILE = ALIGN_RESULT_FILE.with_suffix(".placement.json")
+# the eval's model home pose, handed to the runner (--home-pose): after aligning it goes straight there (3.17.1)
+ALIGN_HOME_FILE = LOG_DIR / "align_home_pose.json"
 SLOT_RE = re.compile(r"[1-9][A-Z]")
 PINKY_RE = re.compile(r"pinky(\d+)", re.IGNORECASE)
 ALIGN_DELAY_S = 0.3  # after the eval let go of the ports and cameras (the runner waits for its own start time)
@@ -3100,6 +3102,28 @@ def pinky_read_ended(job, proc) -> None:
     LAST_RESULT.update(stage="done", final=True)
 
 
+def runner_takes(cmd: list, flag: str) -> bool:
+    """Does the runner script (the .py in the command) know this option? Read from its source, not by running it."""
+    for c in cmd:
+        if c.endswith(".py"):
+            try:
+                return flag in Path(c).read_text(errors="replace")
+            except OSError:
+                return False
+    return False
+
+
+def align_home_args(cmd: list) -> list:
+    """--home-pose for the alignment: the home pose of the eval that just ran (the model's, as its safe stop
+    uses), when the runner knows the option and there is one. Otherwise the runner keeps its old rule."""
+    home = EVAL_HOME_POSE.get("home") if EVAL_HOME_POSE.get("repo_id") == LAST_RESULT.get("repo_id") else None
+    ALIGN_HOME_FILE.unlink(missing_ok=True)
+    if not home or not (home.get("joints") or {}) or not runner_takes(cmd, "--home-pose"):
+        return []
+    ALIGN_HOME_FILE.write_text(json.dumps(home, ensure_ascii=False, indent=2))
+    return ["--home-pose", str(ALIGN_HOME_FILE)]
+
+
 def start_align(plan: dict, release: bool = False) -> None:
     """The shelf alignment runner as the robot job (it opens the cameras itself), or with release=True its
     landing only (back to its start pose, torque off)."""
@@ -3117,6 +3141,7 @@ def start_align(plan: dict, release: bool = False) -> None:
         ALIGN_RESULT_FILE.unlink(missing_ok=True)
         PLACEMENT_FILE.unlink(missing_ok=True)
         args += ["--slot", plan["slot"], "--step", "shelf_align", "--result", str(ALIGN_RESULT_FILE)]
+        args += align_home_args(s["cmd"])
     JOB.start("align_release" if release else "align", s["cmd"] + args,
               {"phase": "로봇 내려놓는 중" if release else "정렬 중", "box": plan["box"], "slot": plan["slot"],
                "eval_repo_id": LAST_RESULT.get("repo_id")},
@@ -3199,7 +3224,11 @@ def align_ended(job, proc) -> None:
     LAST_RESULT["align"]["reported_at"] = now_iso()
     placement_from_result("align", r, info.get("slot"), info.get("box"))
     start_pose, ref = runner_start_pose(r, job.lines)
-    if start_pose:  # the runner goes back to where it found the arms: compare with that, not the eval's end
+    home = r.get("home_pose") if r.get("rest_target") == "home" else None
+    if isinstance(home, dict) and home:  # 3.17.1: the runner went to the model's home pose: compare with that
+        ALIGN["before"] = {k.removesuffix(".pos"): float(v) for k, v in home.items()}
+        ref = "home"
+    elif start_pose:  # the runner goes back to where it found the arms: compare with that, not the eval's end
         ALIGN["before"] = start_pose
     LAST_RESULT["align"]["rest_ref"] = ref or ("eval_end" if ALIGN.get("before") else None)
     if info.get("land_after"):

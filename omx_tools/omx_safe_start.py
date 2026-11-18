@@ -93,6 +93,7 @@ DEFAULTS = {
     "attempt_pwm_ratio": 0.5,  # output cap while approaching the policy's first target in later attempts
     "stop_wrist_roll": 0.0,  # wrist on stop: camera up, jaws spreading left and right (as the recordings start)
     "gripper_stall": 4.0,    # units behind its command: the closing gripper has touched something, so it stops
+    "lift_dz": 0.04,         # m: on stop / reset / return, raise the fingertips this much first (0 = off, 3.17.3)
 }
 
 
@@ -222,6 +223,77 @@ def _step(current: float, target: float, max_delta: float) -> float:
     return target if abs(d) <= max_delta else current + max_delta * (1 if d > 0 else -1)
 
 
+def _sync_duration(start: dict, goal: dict, speed: float) -> float:
+    """Seconds for a synchronized move: the joint with the largest gap moves at `speed`, the others slower in
+    proportion, so every joint arrives together and the path is a straight line in joint space (3.17.2).
+    Moving each joint at its own capped speed (as before) brought the small-gap wrist and elbow home first while
+    the shoulder was still reaching out, curving the hand down past the Pinky and the tray (Guide sim, 11/17)."""
+    span = max((abs(goal[m] - start[m]) for m in goal), default=0.0)
+    return span / speed if speed > 0 else 0.0
+
+
+def _sync_cmd(start: dict, goal: dict, progress: float) -> dict:
+    return {m: start[m] + (goal[m] - start[m]) * progress for m in goal}
+
+
+_LIFTER: dict = {"tried": False, "obj": None, "err": None, "lock": threading.Lock()}
+
+
+def _lifter():
+    """Guide's straight-up fingertip planner (omx_lift.py + handover_fk.json, numpy only), loaded once.
+    None when it cannot be loaded: then the arm goes home without lifting, as in 3.17.2."""
+    with _LIFTER["lock"]:
+        if not _LIFTER["tried"]:
+            _LIFTER["tried"] = True
+            try:
+                import omx_lift
+
+                _LIFTER["obj"] = omx_lift.Lifter()
+                _LIFTER["step_limit"] = float(getattr(omx_lift, "STEP_LIMIT", 15.0))
+                _LIFTER["version"] = getattr(omx_lift, "VERSION", "?")
+            except Exception as exc:  # noqa: BLE001
+                _LIFTER["err"] = f"{type(exc).__name__}: {exc}"[:160]
+        return _LIFTER["obj"]
+
+
+def lift_plan(robot, present: dict, s: dict) -> tuple[str, list]:
+    """Before going home from a stop (3.17.3, TK 11/18): raise the fingertips lift_dz straight up, the hand's tilt kept
+    (omx_lift.plan; under a shelf plate it first pulls the hand out, then lifts 2 cm). Returns (mode, waypoints of the
+    five arm joints). Mode "none" (no plan, unknown arm side, off, planner missing): go home directly (synchronized).
+    Guide sim, recorded evals stopped mid-task: inbound 900 points 84 -> 9 collisions, unload 299 points 3 -> 2."""
+    side = getattr(robot, "_omx_side", None)
+    dz = float(s.get("lift_dz") or 0.0)
+    if side not in ("left", "right") or dz <= 0:
+        return "none", []
+    lifter = _lifter()
+    if lifter is None:
+        _say(f"들기 계산을 불러오지 못해 들지 않고 돌아갑니다 ({_LIFTER['err']})", "stop")
+        return "none", []
+    own = {m: float(v) for m, v in present.items() if m in ARM or m == "gripper"}
+    other = "right" if side == "left" else "left"
+    # the planner's FK takes both arms' joints; the other arm does not change this arm's plan (checked 11/18),
+    # so fill it with this arm's values. With one side only it would quietly return "none" (no lift).
+    joints = {**{f"{other}_{m}": v for m, v in own.items()}, **{f"{side}_{m}": v for m, v in own.items()}}
+    try:
+        mode, path = lifter.plan(joints, side, dz)
+    except Exception:  # noqa: BLE001  (plan() already returns "none" on failure)
+        return "none", []
+    if mode == "none" or not path:
+        return "none", []
+    pts, prev = [], {m: present[m] for m in ARM}
+    for wp in path:
+        try:
+            p = {m: float(wp[f"{side}_{m}"]) for m in ARM}
+        except (KeyError, TypeError, ValueError):
+            return "none", []
+        if max(abs(p[m] - prev[m]) for m in ARM) > _LIFTER.get("step_limit", 15.0) or not all(-100.0 <= v <= 100.0 for v in p.values()):
+            _say("들기 계산 결과가 비정상이라 들지 않고 돌아갑니다", "stop")
+            return "none", []
+        pts.append(p)
+        prev = p
+    return mode, pts
+
+
 def set_pwm(robot, ratio: float) -> None:
     value = int(PWM_MAX * ratio)
     for motor in robot.bus.motors:
@@ -259,8 +331,12 @@ def go_home(robot, what: str = "stop", events: dict | None = None) -> bool:
     _say(f"{'홈 자세로' if what == 'start' else '시작할 때 자세로'} 천천히 {'이동합니다' if what == 'start' else '돌아갑니다'} "
          f"(출력 {int(s['pwm_ratio'] * 100)}%)", what)
 
-    def move(goal: dict, speed: float) -> bool:
-        cmd = {m: present[m] for m in goal}
+    def move(goal: dict, speed: float, settle: bool = True) -> bool:
+        """Synchronized: all joints of `goal` arrive together, the furthest one at `speed` (see _sync_duration).
+        Starts where the last move ended (present is kept up to date); settle=False for a waypoint on the way."""
+        start = {m: present[m] for m in goal}
+        dur = _sync_duration(start, goal, speed)
+        done = 0.0  # progress 0..1; advanced by the capped step time, so a stalled loop never makes a jump
         t = t0 = time.monotonic()
         while time.monotonic() - t0 < s["timeout_s"]:
             if events and (events.get("exit_early") or events.get("stop_recording")):
@@ -270,14 +346,24 @@ def go_home(robot, what: str = "stop", events: dict | None = None) -> bool:
             time.sleep(1 / 30)
             now = time.monotonic()
             dt, t = min(now - t, 0.2), now
-            for m in goal:
-                cmd[m] = _step(cmd[m], goal[m], speed * dt)
-            robot.bus.sync_write("Goal_Position", dict(cmd))
-            if all(abs(cmd[m] - goal[m]) <= 1e-6 for m in goal):
-                time.sleep(0.5)  # let the servos settle on the last goal
+            done = 1.0 if dur <= 0 else min(1.0, done + dt / dur)
+            robot.bus.sync_write("Goal_Position", _sync_cmd(start, goal, done))
+            if done >= 1.0:
+                present.update(goal)
+                if settle:
+                    time.sleep(0.5)  # let the servos settle on the last goal
                 return True
         return False
 
+    if what != "start":  # a stop may leave the hand in the tray or near the shelf: lift it out first (3.17.3)
+        mode, pts = lift_plan(robot, present, s)
+        if pts:
+            side = getattr(robot, "_omx_side", "")
+            _say(f"{'왼팔' if side == 'left' else '오른팔'} 손끝을 먼저 "
+                 f"{'앞으로 뺀 뒤 ' if mode.startswith('back') else ''}들어 올립니다 ({len(pts)}단계)", what)
+            for i, p in enumerate(pts):
+                if not move(p, s["stop_speed"], settle=i == len(pts) - 1):
+                    return False  # 비상 정지 / 다음으로·끝내기: stop where it is, as during the home move
     arrived = move({m: home[m] for m in ARM if m in home}, s["stop_speed"])
     if arrived and "gripper" in home and (what == "start" or os.environ.get("OMX_HOME_GRIPPER") == "open"):
         present["gripper"] = float(robot.bus.sync_read("Present_Position")["gripper"])
@@ -347,17 +433,18 @@ def soft_land(robot) -> None:
             arrived = go_home(robot, "stop")
     elif rest:
         _say("끝 자세로 천천히 이동합니다", "stop")
-        cmd = {m: float(v) for m, v in robot.bus.sync_read("Present_Position").items()}
+        now_pos = {m: float(v) for m, v in robot.bus.sync_read("Present_Position").items()}
+        goal = {m: float(rest[m]) for m in ARM if m in rest}
+        start = {m: now_pos[m] for m in goal}
+        dur, done = _sync_duration(start, goal, s["stop_speed"]), 0.0  # synchronized, as go_home (3.17.2)
         t, t0 = time.monotonic(), time.monotonic()
         while time.monotonic() - t0 < s["timeout_s"]:
             time.sleep(1 / 30)
             now = time.monotonic()
             dt, t = min(now - t, 0.2), now
-            for m in ARM:
-                if m in rest:
-                    cmd[m] = _step(cmd[m], rest[m], s["stop_speed"] * dt)
-            robot.bus.sync_write("Goal_Position", {m: cmd[m] for m in ARM if m in rest})
-            if all(abs(cmd[m] - rest[m]) <= 1e-6 for m in ARM if m in rest):
+            done = 1.0 if dur <= 0 else min(1.0, done + dt / dur)
+            robot.bus.sync_write("Goal_Position", _sync_cmd(start, goal, done))
+            if done >= 1.0:
                 time.sleep(0.5)  # let the servos settle on the last goal
                 arrived = True
                 break

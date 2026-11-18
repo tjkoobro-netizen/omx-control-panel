@@ -51,6 +51,7 @@ def return_arm(port: str, home: dict | None, side: str | None = None) -> None:
     from lerobot.robots.omx_follower import OmxFollower, OmxFollowerConfig
 
     robot = OmxFollower(OmxFollowerConfig(port=port, id="omx_follower_arm"))
+    robot._omx_side = side  # which arm of the cooperative robot: the fingertip lift before going home needs it (3.17.3)
     robot.bus.connect()  # open the port and ping; torque and goals stay as the killed run left them
     try:
         s = ss.settings()
