@@ -10,7 +10,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-BUILTIN = re.compile(r"True Vision|Integrated|Webcam|FaceTime", re.I)  # the laptop's own camera
+BUILTIN = re.compile(r"True Vision|Integrated|Webcam|FaceTime|LG Camera", re.I)  # the laptop's own camera (LG gram: 3.20.2)
 WRIST_MODEL = re.compile(r"Innomaker", re.I)
 # same values as the kit's sim_realcam.py: no wrong answer on 18 recordings and 3564 occluded / brightened variants
 MATCH_MIN, MATCH_GAP = 0.3, 0.25

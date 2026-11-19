@@ -176,7 +176,8 @@ def capture_time(cam, frame) -> float | None:
 
 
 def list_cameras() -> list[dict]:
-    """Every camera plugged into this PC, by USB port (identical cameras share serials, so the port is the id)."""
+    """Every camera plugged into this PC, by USB port (identical cameras share serials, so the port is the id).
+    The laptop's own camera is left out unless a role already uses it."""
     out = []
     for p in sorted(Path("/dev/v4l/by-path").glob("*-video-index0")):
         if "usbv2" in p.name:  # the same device under an older path alias
@@ -188,6 +189,8 @@ def list_cameras() -> list[dict]:
             model = ""
         port = re.search(r"usb-\d+:([\d.]+):", p.name)
         used = next((n for n, path in CAMERAS.items() if path == str(p)), None)
+        if camauto.BUILTIN.search(model) and not used:  # the laptop's own camera: never a robot camera (3.20.2)
+            continue
         out.append({"path": str(p), "device": f"/dev/{dev}", "model": model, "usb_port": port.group(1) if port else "",
                     "role": used, "label": CAMERA_LABELS.get(used) if used else None})
     return out
