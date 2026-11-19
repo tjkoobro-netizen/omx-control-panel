@@ -141,7 +141,9 @@ form { display: grid; gap: 12px; }
 .cam-row .thumb { width: 96px; height: 72px; background: #000; border-radius: 3px; display: grid; place-items: center; font-size: 11px; color: var(--muted); overflow: hidden; cursor: pointer; }
 .cam-row .thumb img { width: 100%; height: 100%; object-fit: cover; }
 .cam-row .cam-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; font-size: 12px; }
-@media (max-width: 560px) { .cams { grid-template-columns: 1fr; } }
+.cams.many { grid-template-columns: repeat(3, minmax(0, 1fr)); }  /* 5 or 6 cameras (3.19.0 front_3 / front_4) */
+@media (max-width: 900px) { .cams.many { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .cams, .cams.many { grid-template-columns: 1fr; } }
 /* 모터 출력: a pane right of the cameras while a teleop / record runs (button in the camera panel head) */
 .cam-body { display: grid; gap: 12px; min-width: 0; }
 .cam-body.motor-on { grid-template-columns: minmax(0, 1fr) 236px; align-items: start; }
@@ -525,7 +527,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.18.0</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.19.0</span></div>
       </div>
     </div>
     <div class="status">
@@ -1349,6 +1351,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <li>상태 칸에 경과 시간과 제어 주기(정상은 약 60Hz)가 표시됩니다.</li>
         <li><b>중지</b>: 안전 정지(시작할 때 자세로 천천히 이동 → 손목 카메라가 위를 보게 돌리고 그리퍼 닫기 → 출력 서서히 줄이기 → 토크 끄기)로 끝냅니다. 몇 초 걸립니다(협동 로봇은 두 팔을 차례로). 안전 정지 중에 중지를 다시 눌러도 내려놓기를 끝까지 마칩니다. 바로 멈춰야 하면 <b>강제 종료</b>를 누르세요.</li>
         <li><b>손목 회전 보정</b>(로봇 구성 → 구성 바꾸기): 리더 그리퍼가 팔로워 집게와 90° 돌아가게 조립된 세트는 +90° 또는 −90°를 고릅니다. 텔레옵·녹화에서 팔로워 손목이 리더 손목 + 보정값으로 움직이고, 녹화되는 동작도 보정된 값입니다(평가에는 쓰지 않음). 손목은 한 바퀴(±180°) 안에서만 움직이므로, 보정한 쪽으로는 손목을 90° 덜 돌릴 수 있습니다. 보정을 바꾸기 전과 후의 녹화는 서로 다른 데이터셋에 담으세요.</li>
+        <li><b>글로벌 카메라 추가</b>(3.19.0): front, front_2 말고도 <b>front_3</b>, <b>front_4</b>(선택)를 지정할 수 있습니다. 지정한 카메라는 화면에 나오고 녹화에도 모두 들어갑니다. 카메라 수가 다른 데이터셋끼리는 합칠 수 없으니, 카메라를 늘린 뒤의 녹화는 새 데이터셋에 담으세요. 평가는 모델이 학습한 카메라만 엽니다(front_3·front_4 없이 학습한 모델이면 두 카메라는 열지 않음).</li>
         <li>기본은 카메라 없이 실행합니다. 화면은 왼쪽 카메라 보기로 확인합니다. <a href="#h-rerun">Rerun 보기</a>를 켜면 카메라를 포함해 실행하고 영상을 Rerun으로 보냅니다.</li>
       </ul>
     </section>
@@ -2107,6 +2110,7 @@ function buildCamFrames(list) {
     <figcaption><span><b>${esc(c.name)}</b> · ${esc(c.label)}</span><span class="mono" id="bright-${c.name}"></span></figcaption></figure>`).join("");
   $("evCamGrid").innerHTML = list.map(c => `<figure><span class="cam-stat" id="evStat-${c.name}"></span><div class="frame" id="evFrame-${c.name}">평가를 시작하면 실시간 영상이 나옵니다</div>
     <figcaption><span><b>${esc(c.name)}</b> · ${esc(c.label)}</span></figcaption></figure>`).join("");
+  for (const id of ["camGrid", "evCamGrid"]) $(id).classList.toggle("many", list.length > 4);
   streamsOn = false; ev.streams = false;  // the next status update opens the streams of the new frames
 }
 
@@ -2525,16 +2529,16 @@ $("evLinkKeyBtn").addEventListener("click", () => act(() => api("/api/infer_link
 
 // ---- robot setup: one arm or a cooperative pair, robot sets and camera roles with labels ----
 const setup = { data: null };
-const ROLE_KO = { front: "글로벌 front", front_2: "글로벌 front 2", wrist: "팔로워 wrist", wrist_left: "왼팔 wrist", wrist_right: "오른팔 wrist" };
+const ROLE_KO = { front: "글로벌 front", front_2: "글로벌 front 2", front_3: "글로벌 front 3", front_4: "글로벌 front 4", wrist: "팔로워 wrist", wrist_left: "왼팔 wrist", wrist_right: "오른팔 wrist" };
 function setupMode() { const r = document.querySelector("input[name=robotMode]:checked"); return r ? r.value : "single"; }
 function autoLabel(role) {
   const m = setupMode();
   if (m === "bimanual") {
     const l = $("setLeft").value, r = $("setRight").value, pair = `${l}+${r.replace("OMX ", "")}`;
-    return { front: `${pair} · 글로벌 front`, front_2: `${pair} · 글로벌 front 2`, wrist_left: `${l} · 왼팔 wrist`, wrist_right: `${r} · 오른팔 wrist` }[role] || role;
+    return { front: `${pair} · 글로벌 front`, front_2: `${pair} · 글로벌 front 2`, front_3: `${pair} · 글로벌 front 3`, front_4: `${pair} · 글로벌 front 4`, wrist_left: `${l} · 왼팔 wrist`, wrist_right: `${r} · 오른팔 wrist` }[role] || role;
   }
   const n = $("setSingle").value;
-  return { front: `${n} · 글로벌 front`, front_2: `${n} · 글로벌 front 2`, wrist: `${n} · 팔로워 wrist` }[role] || role;
+  return { front: `${n} · 글로벌 front`, front_2: `${n} · 글로벌 front 2`, front_3: `${n} · 글로벌 front 3`, front_4: `${n} · 글로벌 front 4`, wrist: `${n} · 팔로워 wrist` }[role] || role;
 }
 async function loadSetup() {
   let d;

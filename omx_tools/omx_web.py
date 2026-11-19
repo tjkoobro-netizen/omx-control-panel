@@ -90,7 +90,11 @@ VIEWER_PORT = 9876
 SETUP_FILE = Path(os.environ.get("OMX_ROBOT_SETUP") or omx_config.CONF_DIR / "robot.json").expanduser()
 ROBOT_SETS = CFG.get("robot_sets") or {f"OMX {n}": {"follower": f"/dev/omx_follower_{n}", "leader": f"/dev/omx_leader_{n}"}
                                        for n in (1, 2, 3)}
-CAMERA_ROLES = {"single": ["front", "front_2", "wrist"], "bimanual": ["front", "front_2", "wrist_left", "wrist_right"]}
+CAMERA_ROLES = {"single": ["front", "front_2", "front_3", "front_4", "wrist"],
+                "bimanual": ["front", "front_2", "front_3", "front_4", "wrist_left", "wrist_right"]}
+# 3.19.0: front_3 / front_4 are optional extra global cameras. A record keeps every chosen camera; an evaluation opens
+# them only for a model trained with them (a model of the usual cameras runs as before, at the same camera load).
+EXTRA_CAMERA_ROLES = ("front_3", "front_4")
 ROBOT_MODE = "single"
 FOLLOWERS: list = []   # [(label, port)]
 LEADERS: list = []
@@ -103,9 +107,11 @@ def camera_label(mode: str, name: str, setup: dict) -> str:
         left, right = setup["bimanual"]["left"], setup["bimanual"]["right"]
         pair = f"{left.replace('OMX ', 'OMX ')}+{right.removeprefix('OMX ')}"
         return {"front": f"{pair} · 글로벌 front", "front_2": f"{pair} · 글로벌 front 2",
+                "front_3": f"{pair} · 글로벌 front 3", "front_4": f"{pair} · 글로벌 front 4",
                 "wrist_left": f"{left} · 왼팔 wrist", "wrist_right": f"{right} · 오른팔 wrist"}.get(name, name)
     robot = setup["single"]["set"]
-    return {"front": f"{robot} · 글로벌 front", "front_2": f"{robot} · 글로벌 front 2", "wrist": f"{robot} · 팔로워 wrist"}.get(name, name)
+    return {"front": f"{robot} · 글로벌 front", "front_2": f"{robot} · 글로벌 front 2", "front_3": f"{robot} · 글로벌 front 3",
+            "front_4": f"{robot} · 글로벌 front 4", "wrist": f"{robot} · 팔로워 wrist"}.get(name, name)
 
 
 def load_setup() -> dict | None:
@@ -2290,6 +2296,13 @@ def check_model_fits(cfg: dict) -> None:
                            f"{', '.join(CAMERAS)}. ① 탭 '로봇 구성'에서 같은 이름으로 지정하세요.")
 
 
+def eval_cameras(cfg: dict) -> dict:
+    """The cameras an evaluation opens: all of the setup, except an extra global camera (front_3 / front_4) the model
+    was not trained with (3.19.0). The usual cameras stay open as before: the judges read front / front_2."""
+    used = {k.split(".")[-1] for k in (cfg.get("input_features") or {}) if k.startswith("observation.images.")}
+    return {n: p for n, p in CAMERAS.items() if n not in EXTRA_CAMERA_ROLES or n in used}
+
+
 def find_model(model_path: str) -> dict:
     """A trained policy from the team index (or any policy folder under CKPT_HOME)."""
     if CONTROL:
@@ -3673,7 +3686,9 @@ def start_eval(body: dict) -> dict:
     if CONTROL:
         udp_ready()
     local_model = fetch_model_udp(run["model_path"]) if CONTROL else Path(run["model_path"])
-    check_model_fits(model_config(str(local_model)))
+    model_cfg = model_config(str(local_model))
+    check_model_fits(model_cfg)
+    eval_cams = eval_cameras(model_cfg)
     extra_args, async_env, opts = policy_eval_options(str(local_model), body)
     if CONTROL:
         async_env = remote_eval_settings(local_model, run["model_path"], extra_args, async_env, opts, body)
@@ -3719,7 +3734,7 @@ def start_eval(body: dict) -> dict:
     EPISODE_END_FILE.unlink(missing_ok=True)  # written by this run at the end of each episode
     cmd = [
         str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_run.py"),
-        *ROBOT_ARGS, f"--robot.cameras={CAMS_ARG}",
+        *ROBOT_ARGS, f"--robot.cameras={omx_config.cameras_arg(warmup_s=3, cameras=eval_cams)}",
         f"--policy.path={local_model}",
         f"--dataset.repo_id={repo_id}", f"--dataset.single_task={task}",
         f"--dataset.num_episodes={episodes}", f"--dataset.episode_time_s={episode_s}",
