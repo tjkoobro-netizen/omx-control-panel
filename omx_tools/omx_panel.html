@@ -527,7 +527,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.20.2</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.21.0</span></div>
       </div>
     </div>
     <div class="status">
@@ -1115,6 +1115,9 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </div>
       <div class="opt"><input type="checkbox" id="evResetHome" checked><label for="evResetHome"><b>원위치 시간에 처음 자세로 돌아가기</b> <button type="button" class="qbtn help-open" data-help="ev-home" title="처음 자세로 돌아가기 설명" aria-label="처음 자세로 돌아가기 설명">?</button></label></div>
       <div class="opt"><input type="checkbox" id="evOpenGripper" checked><label for="evOpenGripper"><b>처음 자세에 도착하면 그리퍼를 처음 상태로 천천히 열기</b> (끄면 잡은 채로 있다가 토크가 꺼질 때 풀림)</label></div>
+      <div class="fields" id="evArmRow" hidden>
+        <label class="f"><span>실행할 팔 (협동 로봇) <button type="button" class="qbtn help-open" data-help="ev-arm" title="실행할 팔 설명" aria-label="실행할 팔 설명">?</button></span><select id="evArm"><option value="">두 팔 (관절 12개 모델)</option><option value="left">왼팔만 (관절 6개 모델)</option><option value="right">오른팔만 (관절 6개 모델)</option></select></label>
+      </div>
       <div class="fields">
         <label class="f"><span>CPU 스레드 수 <button type="button" class="qbtn help-open" data-help="ev-threads" title="CPU 스레드 수 설명" aria-label="CPU 스레드 수 설명">?</button></span><input type="number" id="evThreads" min="1" max="24" value="4"></label>
       </div>
@@ -1679,6 +1682,18 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </ul>
     </section>
 
+    <section id="h-ev-arm">
+      <h3>실행할 팔 (협동 로봇, 3.21.0)</h3>
+      <p>두 팔이 연결된 협동 구성에서도 한 팔(관절 6개) 모델을 고른 팔 하나로 돌릴 수 있어요. 예: A·C열 한 팔 작업을 팔별로 나눠 학습한 모델.</p>
+      <ul>
+        <li><b>두 팔</b>(기본): 관절 12개 모델. 지금까지와 같아요.</li>
+        <li><b>왼팔만 / 오른팔만</b>: 관절 6개 모델을 그 팔의 포트로만 돌려요(보정 파일은 두 팔 때와 같아서 관절값이 학습 데이터와 맞아요). 다른 팔은 연결하지 않고 그대로 둬요. 다른 팔이 움직일 팔의 길을 막지 않는지 먼저 보세요.</li>
+        <li>카메라는 모델이 학습한 것만 열어요. 모델이 반대쪽 손목 카메라(예: 왼팔을 골랐는데 wrist_right)로 학습했으면 시작하지 않고 알려 줘요.</li>
+        <li>시작 전 모델 홈 자세로 가기, 원위치, 끝낼 때 손끝을 들고 홈으로 가기, [즉시 중단] 뒤 홈 복귀는 고른 팔에만 해요.</li>
+        <li>관제 미션(상차 확인, 선반 정렬, 넘겨받기)은 아직 두 팔 모델로만 해요.</li>
+      </ul>
+    </section>
+
     <section id="h-ev-threads">
       <h3>CPU 스레드 수</h3>
       <p>평가할 때 카메라 이미지 전처리 같은 <b>CPU 계산을 몇 개로 나눠 동시에 처리할지</b>예요. 모델 추론은 GPU가 하기 때문에 이 값은 결과(정확도)는 바꾸지 않고 속도만 바꿔요.</p>
@@ -2212,6 +2227,7 @@ function render(s) {
   $("user").textContent = s.user;
   if (s.gpu_name) $("gpuName").textContent = s.gpu_name;
   if (s.version) $("appVersion").textContent = "v" + s.version;
+  $("evArmRow").hidden = s.robot_mode !== "bimanual";  // 3.21.0: one-arm models on one arm of the pair
   if (s.ckpt_home) $("runsPath").textContent = s.ckpt_home + "/INDEX.md";
   const job = s.job || {};
   const running = !!job.running;
@@ -3113,6 +3129,8 @@ function updateEvalPreview() {
 for (const id of ["evEpisodes", "evEpisodeS", "evResetS"]) $(id).addEventListener("input", updateEvalPreview);
 $("evEpisodes").addEventListener("input", () => { if (!ev.view) renderEvalResults(null); });
 
+$("evArm").value = store.get("omx.evArm", "");
+$("evArm").addEventListener("change", () => store.set("omx.evArm", $("evArm").value));
 $("evStart").addEventListener("click", async () => {
   if (!$("evConfirm").checked) { toast("시작 전에 위의 안전 확인란을 체크해주세요.", "err"); return; }
   // a training on the same laptop takes the CPU and GPU: the control loop slows down and the results get worse
@@ -3132,6 +3150,7 @@ $("evStart").addEventListener("click", async () => {
     diffusion_steps: ev.policy === "diffusion" ? Number($("evDiffSteps").value) : 0,
     reset_home: $("evResetHome").checked, open_gripper: $("evOpenGripper").checked,
     preset_id: $("evPreset").value || undefined, record: $("evRecord").checked,
+    arm: state && state.robot_mode === "bimanual" ? $("evArm").value || undefined : undefined,
   }), (r) => { ev.view = r.repo_id; return "평가를 시작합니다" + ($("evRecord").checked ? " (녹화)" : " (녹화 안 함)") + ": " + r.repo_id + " (모델을 불러오는 데 몇 초 걸립니다)"; }).then(loadEvals);
 });
 $("evNext").addEventListener("click", () => act(() => api("/api/control", { cmd: "next" }), "다음 단계로 넘어갑니다."));

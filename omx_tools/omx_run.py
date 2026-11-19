@@ -1050,6 +1050,10 @@ def run(cfg: RunConfig) -> None:
             print(f"[omx] safe start: 시작하지 않습니다. {problem}", flush=True)
         sys.exit(2)
     robot = make_robot_from_config(cfg.robot)
+    if os.environ.get("OMX_ARM_SIDE") in ("left", "right") and not getattr(robot, "arms", None):
+        # 3.21.0: one arm of the cooperative robot run alone; its side picks the home of a two-arm pose, the lift before
+        # going home (omx_lift needs the side) and the per-arm entry of the home file (omx_return_home)
+        robot._omx_side = os.environ["OMX_ARM_SIDE"]
     teleop = make_teleoperator_from_config(cfg.teleop) if cfg.teleop is not None else None
     install_wrist_offset(teleop)
     ABORT["robot"] = robot

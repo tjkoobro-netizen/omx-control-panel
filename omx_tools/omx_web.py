@@ -2297,25 +2297,64 @@ def remote_eval_settings(local_model: Path, gpu_model: str, extra_args: list, as
     return env
 
 
-def check_model_fits(cfg: dict) -> None:
+ARM_KO = {"left": "왼팔", "right": "오른팔"}
+
+
+def one_arm(body: dict) -> str | None:
+    """3.21.0: the person runs a one-arm (6-joint) model on one arm of the cooperative robot ("arm": "left" | "right").
+    That arm alone is driven as a single OMX (its own port, the shared calibration); the other arm is not touched.
+    Panel evaluations only: a control-tower mission (Pinky check, shelf alignment, handover) still needs both arms."""
+    arm = str(body.get("arm") or "").strip()
+    if arm in ("", "both"):
+        return None
+    if arm not in ARM_KO:
+        raise RuntimeError("실행할 팔은 left(왼팔) 또는 right(오른팔)입니다.")
+    if ROBOT_MODE != "bimanual":
+        raise RuntimeError("한 팔 선택은 협동 로봇(팔 2개) 구성에서만 씁니다. 지금은 단일 로봇 구성이라 팔을 고르지 않고 시작하세요.")
+    if body.get("source") == "mqtt" or body.get("pinky_check") or body.get("end_on_place") or body.get("end_on_return"):
+        raise RuntimeError("한 팔 평가는 패널에서 직접 하는 평가만 됩니다. 관제 미션(상차 확인, 선반 정렬, 넘겨받기)은 아직 두 팔 모델로만 합니다.")
+    return arm
+
+
+def one_arm_robot_args(arm: str) -> list:
+    """That arm as a single OMX: same port and calibration file (omx_follower_arm) as in the pair, so the joint
+    values match the per-arm training data cut from two-arm recordings."""
+    return ["--robot.type=omx_follower", f"--robot.port={FOLLOWERS[0 if arm == 'left' else 1][1]}",
+            "--robot.id=omx_follower_arm"]
+
+
+def check_model_fits(cfg: dict, arm: str | None = None) -> None:
     """A model drives the robot it was trained on: 6 joints = one arm, 12 = a cooperative pair; and the same
-    cameras by name."""
+    cameras by name. On a cooperative robot a 6-joint model runs on the arm the person chose (3.21.0)."""
     shape = ((cfg.get("output_features") or {}).get("action") or {}).get("shape") or [None]
-    want = 12 if ROBOT_MODE == "bimanual" else 6
+    cams = {k.split(".")[-1] for k in (cfg.get("input_features") or {}) if k.startswith("observation.images.")}
+    want = 12 if ROBOT_MODE == "bimanual" and not arm else 6
+    if shape[0] == 6 and want == 12:
+        side = "left" if "wrist_left" in cams and "wrist_right" not in cams else "right" if "wrist_right" in cams and "wrist_left" not in cams else ""
+        raise RuntimeError("이 모델은 한 팔(관절 6개)용입니다. 평가 설정의 '실행할 팔'에서 "
+                           + (f"{ARM_KO[side]}을 고르세요 (손목 카메라 wrist_{side}로 학습)." if side else "왼팔 또는 오른팔을 고르세요."))
+    if shape[0] == 12 and arm:
+        raise RuntimeError("이 모델은 두 팔(관절 12개)용입니다. '실행할 팔'을 두 팔로 두세요.")
     if shape[0] and shape[0] != want:
         kind = {6: "단일 로봇(팔 1개)", 12: "협동 로봇(팔 2개)"}
         raise RuntimeError(f"이 모델은 {kind.get(shape[0], f'관절 {shape[0]}개')}용입니다. 지금 구성은 "
                            f"{kind[want]}입니다. ① 탭 '로봇 구성'을 맞추거나 다른 모델을 고르세요.")
-    cams = {k.split(".")[-1] for k in (cfg.get("input_features") or {}) if k.startswith("observation.images.")}
     if cams and not any(c.startswith("camera") for c in cams) and not cams <= set(CAMERAS):
         raise RuntimeError(f"이 모델은 카메라 {', '.join(sorted(cams))}로 학습했습니다. 지금 구성의 카메라: "
                            f"{', '.join(CAMERAS)}. ① 탭 '로봇 구성'에서 같은 이름으로 지정하세요.")
+    other = {"left": "wrist_right", "right": "wrist_left"}.get(arm or "")
+    if other and other in cams:
+        raise RuntimeError(f"이 모델은 {ARM_KO['right' if arm == 'left' else 'left']} 손목 카메라({other})로 학습했습니다. "
+                           f"'실행할 팔'을 {ARM_KO['right' if arm == 'left' else 'left']}로 고르세요.")
 
 
-def eval_cameras(cfg: dict) -> dict:
+def eval_cameras(cfg: dict, arm: str | None = None) -> dict:
     """The cameras an evaluation opens: all of the setup, except an extra global camera (front_3 / front_4) the model
-    was not trained with (3.19.0). The usual cameras stay open as before: the judges read front / front_2."""
+    was not trained with (3.19.0). The usual cameras stay open as before: the judges read front / front_2.
+    One arm (3.21.0): only the model's cameras (no judges run; the other arm's wrist camera stays closed)."""
     used = {k.split(".")[-1] for k in (cfg.get("input_features") or {}) if k.startswith("observation.images.")}
+    if arm and used and used <= set(CAMERAS):
+        return {n: p for n, p in CAMERAS.items() if n in used}
     return {n: p for n, p in CAMERAS.items() if n not in EXTRA_CAMERA_ROLES or n in used}
 
 
@@ -3807,6 +3846,7 @@ def start_eval(body: dict) -> dict:
     reset_home, open_gripper = bool(body.get("reset_home", True)), bool(body.get("open_gripper", True))
     if not 1 <= threads <= (os.cpu_count() or 24):
         raise RuntimeError(f"CPU 스레드 수는 1~{os.cpu_count() or 24} 사이로 정하세요.")
+    arm = one_arm(body)  # 3.21.0: a one-arm model on the arm the person chose (refused for missions)
     command_slot(body)  # a wrong slot is refused before anything moves
     pinky = pinky_plan(body, run)  # a wrong unloading request is refused before anything moves
     camera_gate()
@@ -3814,8 +3854,8 @@ def start_eval(body: dict) -> dict:
         udp_ready()
     local_model = fetch_model_udp(run["model_path"]) if CONTROL else Path(run["model_path"])
     model_cfg = model_config(str(local_model))
-    check_model_fits(model_cfg)
-    eval_cams = eval_cameras(model_cfg)
+    check_model_fits(model_cfg, arm)
+    eval_cams = eval_cameras(model_cfg, arm)
     extra_args, async_env, opts = policy_eval_options(str(local_model), body)
     if CONTROL:
         async_env = remote_eval_settings(local_model, run["model_path"], extra_args, async_env, opts, body)
@@ -3856,6 +3896,7 @@ def start_eval(body: dict) -> dict:
                                 "train_step": step or run.get("steps"), "final_steps": run.get("steps"),
                                 "smooth": bool(body.get("smooth")), "threads": threads,
                                 "reset_home": reset_home, "open_gripper": open_gripper, "recorded": record,
+                                **({"arm": arm, "arm_set": ARM_NAMES.get(arm)} if arm else {}),
                                 "started": dt.datetime.now().strftime("%Y-%m-%d %H:%M")}, ensure_ascii=False, indent=2))
     PREVIEW.stop()  # the policy run needs the cameras itself
     fix_wrist_fps()
@@ -3863,7 +3904,7 @@ def start_eval(body: dict) -> dict:
     EPISODE_END_FILE.unlink(missing_ok=True)  # written by this run at the end of each episode
     cmd = [
         str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_run.py"),
-        *ROBOT_ARGS, f"--robot.cameras={omx_config.cameras_arg(warmup_s=3, cameras=eval_cams)}",
+        *(one_arm_robot_args(arm) if arm else ROBOT_ARGS), f"--robot.cameras={omx_config.cameras_arg(warmup_s=3, cameras=eval_cams)}",
         f"--policy.path={local_model}",
         f"--dataset.repo_id={repo_id}", f"--dataset.single_task={task}",
         f"--dataset.num_episodes={episodes}", f"--dataset.episode_time_s={episode_s}",
@@ -3890,8 +3931,9 @@ def start_eval(body: dict) -> dict:
                  "smooth": opts["smooth"], "threads": threads, "reset_home": reset_home,
                  "open_gripper": open_gripper, **opts,
                  "protocol": note.get("protocol"), "source": "mqtt" if body.get("source") == "mqtt" else "panel",
+                 **({"arm": arm} if arm else {}),
                  "task": task}  # the panel's voice cue names the object from it (box, strawberry, ...)
-    plan = align_plan(body, run)
+    plan = None if arm else align_plan(body, run)
     marker = str(body.get("target_marker", "")).strip()
     if plan and not plan["draw_target"]:  # the box number is for the alignment; the model never saw a circle
         tenv = {}
@@ -3907,7 +3949,7 @@ def start_eval(body: dict) -> dict:
     eval_info["target_drawn"] = bool(tenv)
     if plan:
         eval_info["shelf_align"] = plan
-    ho = handover_plan(body, plan, episodes)
+    ho = None if arm else handover_plan(body, plan, episodes)
     if ho:
         eval_info["handover"] = ho
     if pinky:
@@ -3922,7 +3964,7 @@ def start_eval(body: dict) -> dict:
               | ({"OMX_HOME_POSE": str(omx_home.write_run_file(home, RUN_HOME_FILE))} if home else {}) | tenv
               | {"OMX_EPISODE_END": str(EPISODE_END_FILE)} | ({"OMX_END_ON_RETURN": "1"} if end_on_return else {})
               | ({"OMX_FAST_RELEASE": "1"} if fast_release else {}) | ({} if record else {"OMX_NO_RECORD": "1"})
-              | (handover_env(ho) if ho else {}))
+              | (handover_env(ho) if ho else {}) | ({"OMX_ARM_SIDE": arm} if arm else {}))
     EVAL_HOME_POSE.clear()
     EVAL_HOME_POSE.update(repo_id=repo_id, home=home)
     if ho and ho["mode"] == "handover":
