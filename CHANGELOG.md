@@ -1,5 +1,18 @@
 # OMX 제어판 버전 기록
 
+## 3.20.0 (2026-11-19) - 하차 직전 쟁반 확인, 놓음 근거 키
+
+11/19 TK 결정(관제 #107·#112 답 반영, PR #66 전달).
+
+- **하차 직전 쟁반 확인**: 관제 하차 평가(`pinky_check: true`)는 시작 직전에 실행기 `--step tray_check --tray-ref <logs>/tray_pre_<시각>.json`(`--pinky n`)을 먼저 돌림(동기, `pinky_check.timeout_s`). 이 미션만의 사진 파일이고 공통·다른 Pinky 기준 사진으로 대신하지 않음(Guide 실행기). `tray_check: "ok"`, `tray_reference: "pre_mission"`, `reference_at`이 있을 때만 평가를 시작. 그 밖(`not_empty`(`not_empty_why`), `no_frame`, `camera_moved`, `tray_marker_present`, `tray_not_found`, 시간 초과, 결과 없음, 실행기가 `--tray-ref`를 모름 `runner_unsupported`)은 로봇을 움직이지 않고 400 거절: `{"error", "refused": "tray_check", "tray_check": {tray_check, tray_reference, tray_ref_file, reference_at, observed_at, observed_ts, not_empty_why, tray_empty_verified, box_on_tray_ids, tray_changed, photo_top, returncode, checked_at, elapsed_s}}`
+- 평가 뒤 상차 확인(`pinky_read`)에도 같은 `--tray-ref`를 넘겨 그 사진하고만 비교. `last_result.pinky`에 실행기의 `tray_reference`(`pre_mission`), `tray_reference_state`, `reference_at` 그대로 + 패널 확인 `pre_mission_match`(실행기가 pre_mission이라 했고 기준 시각이 작업 직전 사진과 같음), `pre_mission`(작업 직전 확인 결과). 기준이 없거나 못 쓰면 실행기가 `on_pinky: null`
+- 배포 순서: 실행기의 `TRAY_REF_MODE "pre_mission"`과 같은 때 바꿈(실행기가 `--tray-ref`를 모르면 하차를 시작하지 않음)
+- **놓음 근거(입고, `placement.source: "eval_judge"`)**: `tips_clear`(두 손끝이 상자 앞면·선반 앞 경계 −3 cm보다 뒤, FK), `tip_y {left, right}`·`y_out`(m), `gripper {left, right}`(판정 순간), `judged_at`·`judged_ts`. `observed_at`·`observed_ts`는 판정에 쓴 위 카메라 프레임을 카메라가 받은 시각(`observed_clock: "capture"`, 모르면 제어 스텝 시각 `"control_step"`)
+- **평가 끝 실측(`placement.source: "align"` 등 실행기 판독)**: `placement.eval_end {at, ts, end_reason, returned, aborted, arms {left|right: {at_home, gripper, gripper_state}}, all_at_home}` = 평가가 끝난 순간 마지막으로 잰 팔 자세(모델 홈 여부는 그리퍼 빼고)와 그 측정 시각
+- 카메라 보기 프레임 시각(`/api/snapshot`의 `X-Frame-Ts`, 실행기의 `observed_*`)도 패널이 읽은 시각 대신 카메라가 받은 시각으로
+- 실행기 옵션 확인(`--home-pose`, `--handover-wait`, `--tray-ref`)을 옵션 이름 전체로: 소스에 `--tray-ref-reset`만 있는 실행기를 `--tray-ref`를 안다고 보지 않음
+- 시험: 사본 단위 26 + omx_run 6, Guide 실행기 사본(`--tray-ref`, dry-run 사진) 통합 10(빈 쟁반→상자 올라감 on_pinky true, 빈 채 끝 false, 직전에 상자 400, 다른 Pinky·사진 없음 null, 현장 실행기 runner_unsupported), 회귀 3.18.0 30·3.19.0 17
+
 ## 3.19.0 (2026-11-18) - 글로벌 카메라 front_3·front_4 추가
 
 - 로봇 구성의 카메라 역할에 `front_3`, `front_4`(선택)를 추가(단일·협동 모두). 지정하면 카메라 화면·녹화·자동으로 찾기·카메라 뒤바뀜 검사(기준 화면)에 그대로 들어감. 카메라가 5대 이상이면 화면을 3열로 보여 줌

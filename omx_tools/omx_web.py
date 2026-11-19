@@ -162,6 +162,19 @@ def apply_setup(setup: dict | None) -> None:
 apply_setup(load_setup())
 
 
+def capture_time(cam, frame) -> float | None:
+    """When the camera took this frame (epoch s, 3.20.0): LeRobot's read thread stamps each frame (perf_counter) and
+    async_read hands out that same array, so it is paired by identity. None when a newer frame replaced it."""
+    lock = getattr(cam, "frame_lock", None)
+    if lock is None or frame is None:
+        return None
+    with lock:
+        if getattr(cam, "latest_frame", None) is not frame or getattr(cam, "latest_timestamp", None) is None:
+            return None
+        ts = cam.latest_timestamp
+    return time.time() - (time.perf_counter() - ts)
+
+
 def list_cameras() -> list[dict]:
     """Every camera plugged into this PC, by USB port (identical cameras share serials, so the port is the id)."""
     out = []
@@ -1172,7 +1185,7 @@ class Preview:
                     frame = cam.async_read(timeout_ms=500)
                 except Exception:
                     continue
-                read_at = time.time()
+                read_at = capture_time(cam, frame) or time.time()  # 3.20.0: when the camera took it
                 raw = None
                 if name == "front" and (self.marker_show or self.marker_target is not None):
                     try:
@@ -2929,7 +2942,7 @@ def take_placement(source: str) -> bool:
     if not isinstance(d, dict):
         return False
     d.setdefault("on_shelf", None)
-    LAST_RESULT["placement"] = dict(d, source=source, reported_at=now_iso(),
+    LAST_RESULT["placement"] = dict(d, source=source, reported_at=now_iso(), eval_end=eval_end_evidence(),
                                     **({"first": {k: prev.get(k) for k in ("source", "on_shelf", "observed_at", "reported_at")}} if prev else {}))
     return True
 
@@ -2955,9 +2968,46 @@ def placement_from_result(source: str, r: dict, slot: str | None, box) -> None:
         LAST_RESULT["placement"] = {"on_shelf": r.get("on_shelf"), "shelf": r.get("shelf"), "slot": r.get("slot") or slot,
                                     "box": box, "observed_at": r.get("observed_at"), "observed_ts": r.get("observed_ts"),
                                     "observed_src": r.get("observed_src"), "source": source, "from_result": True,
-                                    "reported_at": now_iso()}
+                                    "eval_end": eval_end_evidence(), "reported_at": now_iso()}
     else:
         placement_skipped("결과 없음", slot, box)
+
+
+def judge_evidence(end: dict, judge: dict) -> dict:
+    """The eval's placed judgement (3.20.0, 11/19 TK + 관제): observed_* = when the top camera took the frame the
+    judge used (camera read thread's stamp; the control step's time when unknown, observed_clock tells which);
+    tips_clear = both fingertips behind the box front / shelf edge minus 3 cm (FK), with tip_y / y_out (m) and the
+    grippers at that moment."""
+    frame_ts = judge.get("frame_ts")
+    ts = frame_ts or judge.get("judged_ts")
+    ty = judge.get("tip_y") if isinstance(judge.get("tip_y"), list) else []
+    y_out = judge.get("y_out")
+    joints = judge.get("joints") or {}
+    sides = ("left", "right")
+    return {"observed_at": judge.get("frame_at") or end.get("judged_at"), "observed_ts": ts, "observed_src": "front",
+            "observed_clock": "capture" if frame_ts else "control_step",
+            "judged_at": end.get("judged_at"), "judged_ts": judge.get("judged_ts"),
+            "tips_clear": bool(max(ty) < y_out) if len(ty) == 2 and y_out is not None else None,
+            "tip_y": dict(zip(sides, ty)) if len(ty) == 2 else None, "y_out": y_out,
+            "gripper": {s: joints.get(f"{s}_gripper") for s in sides}}
+
+
+def eval_end_evidence() -> dict | None:
+    """Where the arms were when the eval that just ran ended (3.20.0): its last measured pose, per arm at the model's
+    home or not (gripper left out) and the gripper, with the measurement's time. None when not measured."""
+    try:
+        end = json.loads(EPISODE_END_FILE.read_text())
+    except (OSError, ValueError):
+        return None
+    if end.get("repo_id") != LAST_RESULT.get("repo_id"):
+        return None
+    arms = {(a.get("side") or name): {"at_home": a.get("at_home"), "gripper": a.get("gripper"),
+                                      "gripper_state": a.get("gripper_state")}
+            for name, a in (LAST_RESULT.get("arms") or {}).items()}
+    homes = [a["at_home"] for a in arms.values()]
+    return {"at": end.get("state_at"), "ts": end.get("state_ts"), "end_reason": end.get("end_reason"),
+            "returned": end.get("returned"), "aborted": end.get("aborted"), "arms": arms or None,
+            "all_at_home": None if not homes or None in homes else all(homes)}
 
 
 def placement_skipped(why: str, slot: str | None, box) -> None:
@@ -3076,6 +3126,70 @@ def pinky_plan(body: dict, run: dict) -> dict | None:
             "timeout_s": float(s.get("timeout_s") or 20), **command_pinky(body)}
 
 
+TRAY_RESULT_FILE = LOG_DIR / "tray_check_result.json"  # the runner's --step tray_check result (3.20.0)
+TRAY_LOCK = threading.Lock()
+TRAY_WHY = {"not_empty": "쟁반이 비어 있지 않습니다", "no_frame": "위 카메라(front) 사진을 찍지 못했습니다",
+            "camera_moved": "위 카메라가 움직여 쟁반 위치를 믿을 수 없습니다",
+            "tray_marker_present": "쟁반 마커가 붙어 있습니다(마커를 뗀 쟁반이 기준)", "tray_not_found": "쟁반을 찾지 못했습니다",
+            "timeout": "쟁반 확인이 시간 안에 끝나지 않았습니다", "no_result": "쟁반 확인 결과가 없습니다"}
+
+
+class Refused(RuntimeError):
+    """A refusal the Host can read (3.20.0): the message, plus keys merged into the 400 answer."""
+
+    def __init__(self, message: str, **extra):
+        super().__init__(message)
+        self.extra = extra
+
+
+def tray_check_before(plan: dict) -> dict:
+    """Unloading (11/19 TK): right before the eval, the runner's --step tray_check photographs the Pinky tray into a
+    file of this mission only (--tray-ref <logs>/tray_pre_<time>.json; never the shared or another Pinky's photo).
+    Only "ok" with tray_reference "pre_mission" and its reference_at starts the eval; the pinky_read after the eval
+    gets the same --tray-ref and compares with that photo only. Anything else, a missing photo or a runner without
+    --tray-ref included, refuses the start (400, "refused": "tray_check")."""
+    if not runner_takes(plan["cmd"], "--tray-ref"):
+        raise Refused("하차 시작 전 쟁반 확인: 실행기가 작업 직전 쟁반 사진(--tray-ref)을 지원하지 않습니다. 평가를 시작하지 않았습니다.",
+                      refused="tray_check", tray_check={"tray_check": "runner_unsupported"})
+    if JOB.running():
+        raise RuntimeError("다른 작업이 실행 중입니다.")
+    if not TRAY_LOCK.acquire(blocking=False):
+        raise RuntimeError("쟁반 확인이 이미 진행 중입니다.")
+    try:
+        TRAY_RESULT_FILE.unlink(missing_ok=True)
+        ref = LOG_DIR / f"tray_pre_{dt.datetime.now():%Y%m%d_%H%M%S_%f}.json"  # this mission's own photo
+        args = ["--box", str(plan["box"]), "--slot", plan["slot"], "--step", "tray_check", "--auto",
+                "--result", str(TRAY_RESULT_FILE), "--tray-ref", str(ref)]
+        if plan.get("pinky_no") is not None:
+            args += ["--pinky", str(plan["pinky_no"])]
+        t0, rc, timed_out = time.time(), None, False
+        try:
+            rc = subprocess.run(plan["cmd"] + args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=plan["timeout_s"], cwd=str(HOME),
+                                env=dict(os.environ, OMX_PANEL_URL=f"http://127.0.0.1:{PORT}")).returncode
+        except subprocess.TimeoutExpired:
+            timed_out = True  # subprocess.run has killed it
+        try:
+            res = json.loads(TRAY_RESULT_FILE.read_text())
+            r = res.get("result") if isinstance(res.get("result"), dict) else {}
+        except (OSError, ValueError, AttributeError):
+            r = {}
+        status = r.get("tray_check") or ("timeout" if timed_out else "no_result")
+        out = {"tray_check": status, "tray_reference": r.get("tray_reference"), "tray_ref_file": str(ref),
+               "reference_at": r.get("reference_at") or r.get("tray_reference_at"), "observed_at": r.get("observed_at"),
+               "not_empty_why": r.get("tray_not_empty_why"), "tray_empty_verified": r.get("tray_empty_verified"),
+               "observed_ts": r.get("observed_ts"), "observed_src": r.get("observed_src"),
+               "box_on_tray_ids": r.get("box_on_tray_ids"), "tray_changed": r.get("tray_changed"),
+               "photo_top": r.get("photo_top"), "returncode": rc, "checked_at": now_iso(),
+               "elapsed_s": round(time.time() - t0, 1)}
+        if status != "ok" or out["tray_reference"] != "pre_mission" or not out["reference_at"]:
+            why = TRAY_WHY.get(status, status) if status != "ok" else "작업 직전 쟁반 사진을 기준으로 남기지 못했습니다"
+            raise Refused(f"하차 시작 전 쟁반 확인: {why}. 평가를 시작하지 않았습니다.", refused="tray_check", tray_check=out)
+        return out
+    finally:
+        TRAY_LOCK.release()
+
+
 def pinky_after_eval(plan: dict, eval_proc) -> None:
     """Called when the eval has ended. Every end but 비상 정지 (arms held in place) and 강제 종료 goes on to the
     camera check; last_result stays final=False until it is over."""
@@ -3083,6 +3197,8 @@ def pinky_after_eval(plan: dict, eval_proc) -> None:
              "pinky_id": plan.get("pinky_id"), "pinky_no": plan.get("pinky_no"), "returncode": None, "skipped": None}
     if plan.get("pinky_id_ignored"):
         pinky["pinky_id_ignored"] = True
+    if plan.get("tray"):  # 3.20.0: the empty-tray photo taken right before the eval
+        pinky["pre_mission"] = plan["tray"]
     stopped = LAST_RESULT.get("stopped_by")
     if stopped in ("비상 정지", "강제 종료"):
         LAST_RESULT["pinky"] = dict(pinky, skipped=stopped, reported_at=now_iso())
@@ -3113,6 +3229,8 @@ def start_pinky_read(plan: dict) -> None:
     args = ["--box", str(plan["box"]), "--slot", plan["slot"], "--step", "pinky_read", "--auto", "--result", str(PINKY_RESULT_FILE)]
     if plan.get("pinky_no") is not None:
         args += ["--pinky", str(plan["pinky_no"])]
+    if (plan.get("tray") or {}).get("tray_ref_file"):  # 3.20.0: compare with this mission's photo only
+        args += ["--tray-ref", plan["tray"]["tray_ref_file"]]
     JOB.start("pinky_read", plan["cmd"] + args,
               {"phase": "상차 확인 중 (카메라만)", "box": plan["box"], "eval_repo_id": LAST_RESULT.get("repo_id")},
               need_leader=False, env_extra={"OMX_PANEL_URL": f"http://127.0.0.1:{PORT}"})
@@ -3151,16 +3269,23 @@ def pinky_read_ended(job, proc) -> None:
         p["skipped"] = f"결과 없음 (종료 코드 {rc})"
     p.setdefault("on_pinky", None)
     p.setdefault("on_shelf", None)
+    pre = p.get("pre_mission") or {}
+    if pre:  # 3.20.0: was the read compared with the photo taken right before this mission? (runner's own word + time)
+        used_at = r.get("reference_at") or r.get("tray_reference_at")
+        same = r.get("tray_reference") == "pre_mission" and bool(pre.get("reference_at")) and used_at == pre.get("reference_at")
+        p.update(reference_at=used_at, pre_mission_match=same)
     LAST_RESULT["pinky"] = p
     LAST_RESULT.update(stage="done", final=True)
 
 
 def runner_takes(cmd: list, flag: str) -> bool:
-    """Does the runner script (the .py in the command) know this option? Read from its source, not by running it."""
+    """Does the runner script (the .py in the command) know this option? Read from its source, not by running it.
+    The whole option name only: --tray-ref-reset is not --tray-ref (3.20.0)."""
+    pat = re.compile(re.escape(flag) + r"(?![\w-])")
     for c in cmd:
         if c.endswith(".py"):
             try:
-                return flag in Path(c).read_text(errors="replace")
+                return bool(pat.search(Path(c).read_text(errors="replace")))
             except OSError:
                 return False
     return False
@@ -3526,8 +3651,7 @@ def handover_after_eval(job, proc) -> None:
         return
     # placed and the ports were closed with the torque on: the box is on its slot (seen from above)
     LAST_RESULT["placement"] = {"on_shelf": True, "shelf": "ok", "slot": plan["slot"], "box": plan["box"],
-                                "observed_at": end.get("judged_at"), "observed_ts": judge.get("judged_ts"),
-                                "observed_src": "front", "source": "eval_judge", "judge_version": judge.get("version"),
+                                **judge_evidence(end, judge), "source": "eval_judge", "judge_version": judge.get("version"),
                                 "reported_at": now_iso()}
     LAST_RESULT.update(stage="align", final=False,
                        align={"ran": False, "ok": None, "box": plan["box"], "slot": plan["slot"], "handover": True})
@@ -3710,6 +3834,8 @@ def start_eval(body: dict) -> dict:
             home = None  # e.g. the training data is gone: start from where the arm is, as before
     # eval_{model display name}__{p10 | free}_{run settings}_{MMDD_HHMM}; _2, _3 ... when the name is taken
     # (a second start in the same minute, or a folder left by a run that failed to start)
+    if pinky:
+        pinky["tray"] = tray_check_before(pinky)  # 3.20.0: an unloading starts only on an empty tray (this photo)
     step = run.get("step")  # set when an intermediate save was chosen
     base = names.eval_name(run.get("display") or names.display_name(run["id"]), preset, opts,
                            f"{dt.datetime.now():%m%d_%H%M}", step)
@@ -4582,7 +4708,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json({"error": "not found"}, 404)
         except Exception as exc:
-            self._json({"error": str(exc)}, 400)
+            self._json({"error": str(exc), **(getattr(exc, "extra", None) or {})}, 400)
 
 
 # Control PC: closing the panel window stops the server. The page sends /api/bye when it goes away; if no

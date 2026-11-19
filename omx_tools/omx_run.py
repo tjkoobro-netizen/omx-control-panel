@@ -104,6 +104,7 @@ def _make_target() -> TargetOverlay | None:
 TARGET: TargetOverlay | None = None
 LAST_STATE: dict = {}  # motor values of the latest episode step (its end: before any reset move or safe stop)
 EPISODE_END: dict = {}  # how the latest evaluation episode ended: {"returned": bool, "elapsed_s": float}
+STATE_TS = {"t": None}  # 3.20.0: wall time of the observation in LAST_STATE (the arms' last measured pose)
 
 
 class ReturnWatch:
@@ -170,7 +171,7 @@ class PlaceWatch:
         self.version = getattr(handover_judge, "VERSION", "?")
         self.judge = handover_judge.Judge(cfg.get("fk_json"), box_ids=tuple(int(b) for b in cfg["box_ids"]))
         self.lock, self.new = threading.Lock(), threading.Event()
-        self.frame = self.joints = self.t = None
+        self.frame = self.joints = self.t = self.frame_ts = None
         self.taken_at = 0.0
         self.hit: dict | None = None
         self.last: dict | None = None
@@ -183,8 +184,9 @@ class PlaceWatch:
             self.judge.reset(t0)
             self.hit, self.last, self.updates, self.errors, self.frame = None, None, 0, 0, None
 
-    def feed(self, obs: dict, t: float) -> None:
-        """Called every control step with the raw observation; copies a frame only when the thread is due."""
+    def feed(self, obs: dict, t: float, frame_ts: float | None = None) -> None:
+        """Called every control step with the raw observation; copies a frame only when the thread is due.
+        frame_ts (3.20.0): when the camera captured that frame (epoch s), None when unknown."""
         if t - self.taken_at < self.period or self.new.is_set():
             return
         img = obs.get(self.camera)
@@ -194,7 +196,7 @@ class PlaceWatch:
 
         joints = {k.removesuffix(".pos"): float(v) for k, v in obs.items() if k.endswith(".pos")}
         with self.lock:
-            self.frame, self.joints, self.t = np.array(img, copy=True), joints, t
+            self.frame, self.joints, self.t, self.frame_ts = np.array(img, copy=True), joints, t, frame_ts
         self.taken_at = t
         self.new.set()
 
@@ -204,7 +206,7 @@ class PlaceWatch:
         while True:
             self.new.wait()
             with self.lock:
-                img, joints, t = self.frame, self.joints, self.t
+                img, joints, t, frame_ts = self.frame, self.joints, self.t, self.frame_ts
             try:
                 gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img  # camera frames are RGB
                 r = self.judge.update(gray, joints, t)
@@ -215,7 +217,8 @@ class PlaceWatch:
                 self.errors += bool(r.get("error"))
                 self.last = r
                 if r.get("placed") and self.hit is None:
-                    self.hit = dict(r, judged_ts=t, judged_at=_iso(t), joints=joints, version=self.version)
+                    self.hit = dict(r, judged_ts=t, judged_at=_iso(t), joints=joints, version=self.version,
+                                    frame_ts=frame_ts, frame_at=_iso(frame_ts) if frame_ts else None)
             self.new.clear()
 
     def placed(self) -> dict | None:
@@ -226,6 +229,20 @@ class PlaceWatch:
         with self.lock:
             return {"version": self.version, "shadow": self.shadow, "updates": self.updates, "errors": self.errors,
                     "hit": self.hit, "last": self.last}
+
+
+def _frame_ts(robot, name: str, frame) -> float | None:
+    """When the camera captured this frame (3.20.0): LeRobot's read thread stamps each frame (perf_counter); the
+    observation holds that same array, so it is paired by identity. None when a newer frame replaced it."""
+    cam = (getattr(robot, "cameras", None) or {}).get(name)
+    lock = getattr(cam, "frame_lock", None)
+    if cam is None or lock is None or frame is None:
+        return None
+    with lock:
+        if cam.latest_frame is not frame or cam.latest_timestamp is None:
+            return None
+        ts = cam.latest_timestamp
+    return time.time() - (time.perf_counter() - ts)
 
 
 def _iso(t: float) -> str:
@@ -280,6 +297,7 @@ def _write_episode_end(repo_id: str, index: int) -> None:
         with open(tmp, "w") as f:
             json.dump({"repo_id": repo_id, "episode": index, "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                        "aborted": bool(ABORT["on"]), **EPISODE_END,
+                       "state_ts": STATE_TS["t"], "state_at": _iso(STATE_TS["t"]) if STATE_TS["t"] else None,
                        "state": {k: round(float(v), 2) for k, v in LAST_STATE.items()}}, f, default=_jsonable)
         os.replace(tmp, path)
     except Exception as exc:  # the report is optional: never stop a run over it
@@ -835,12 +853,13 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
         obs = robot.get_observation()
         if dataset is not None:
             LAST_STATE.update({k: v for k, v in obs.items() if k.endswith(".pos")})
+            STATE_TS["t"] = time.time()
         if watch and RETURN(LAST_STATE, t0):
             EPISODE_END.update(returned=True, elapsed_s=round(t0 - start, 1), end_reason="returned")
             _say(f"[omx] 작업 끝 감지: 처음 자세로 복귀, 그리퍼 놓음 ({t0 - start:.1f}초) - 이 시도를 마칩니다")
             break
         if watch and PLACE is not None:  # the raw frame, before the target circle is drawn
-            PLACE.feed(obs, time.time())
+            PLACE.feed(obs, time.time(), _frame_ts(robot, PLACE.camera, obs.get(PLACE.camera)))
             hit = PLACE.placed()
             if hit is not None and not PLACE.shadow:
                 EPISODE_END.update(end_reason="placed", elapsed_s=round(t0 - start, 1), judged_at=hit["judged_at"],
