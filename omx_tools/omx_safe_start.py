@@ -70,6 +70,11 @@ LANDING = threading.Event()
 # gripper close, a 0.5 s fade instead of 3 s, both arms at once. Set by omx_run.py just before its safe stop.
 FAST_LAND = threading.Event()
 FAST_RAMP_S = 0.5
+# handover (3.18.0): the eval ended because the box was placed and the shelf alignment runner is waiting to take the
+# arms over where they are: no landing at all, the torque stays on (the motors hold their last goal), ports closed only.
+# Set by omx_run.py just before its safe stop; never together with 비상 정지 (FREEZE wins).
+HOLD_EXIT = threading.Event()
+HOLD_LANDED = threading.Event()  # an arm was landed after all (비상 정지 came first): the handover must not happen
 PWM_MAX = 885  # X-series Goal_PWM full scale
 
 DEFAULTS = {
@@ -747,6 +752,9 @@ def install() -> None:
                     LANDING.clear()
 
     def _land(self, *args, **kwargs):
+        hold = HOLD_EXIT.is_set() and not FREEZE.is_set()  # decided before any 비상 정지 wait: a freeze always lands
+        if HOLD_EXIT.is_set() and not hold:
+            HOLD_LANDED.set()
         if FREEZE.is_set():
             # 비상 정지: hold here (torque on, last goal) until [홈 위치로 이동]
             _say("제자리에서 기다립니다. [홈 위치로 이동]를 누르면 천천히 돌아갑니다", "freeze")
@@ -754,6 +762,12 @@ def install() -> None:
             RELEASE.clear()
             FREEZE.clear()
             _say("초기 위치로 돌아갑니다", "freeze")
+        if hold and not FREEZE.is_set():
+            _say("넘겨받기: 착지하지 않고 토크를 켠 채 포트만 닫습니다", "stop")
+            self.config.disable_torque_on_disconnect = False  # LeRobot's disconnect then closes the port only
+            return original_disconnect(self, *args, **kwargs)
+        if HOLD_EXIT.is_set():
+            HOLD_LANDED.set()
         try:
             if getattr(self.config, "disable_torque_on_disconnect", True):
                 fast_land(self) if FAST_LAND.is_set() and not FREEZE.is_set() else soft_land(self)

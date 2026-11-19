@@ -151,6 +151,125 @@ class ReturnWatch:
 RETURN = ReturnWatch()
 
 
+class PlaceWatch:
+    """OMX_PLACE_JUDGE=<json> (3.18.0, control-tower eval with end_on_place): Guide's handover judge (handover_judge.py)
+    on the raw top-camera frame (before the target circle is drawn) and the joints, in its own thread at rate_hz so the
+    control loop never waits for it. When it says "placed" the episode ends (end_reason "placed") and the shelf
+    alignment takes the arms over with the torque on. "shadow": true only records what it saw (the episode goes on).
+    Config keys: box_ids, camera ("front"), rate_hz (6), fk_json (optional), shadow (false)."""
+
+    def __init__(self, path: str):
+        import threading
+
+        import handover_judge
+
+        cfg = json.loads(Path(path).read_text())
+        self.shadow = bool(cfg.get("shadow"))
+        self.camera = cfg.get("camera", "front")
+        self.period = 1.0 / float(cfg.get("rate_hz", 6))
+        self.version = getattr(handover_judge, "VERSION", "?")
+        self.judge = handover_judge.Judge(cfg.get("fk_json"), box_ids=tuple(int(b) for b in cfg["box_ids"]))
+        self.lock, self.new = threading.Lock(), threading.Event()
+        self.frame = self.joints = self.t = None
+        self.taken_at = 0.0
+        self.hit: dict | None = None
+        self.last: dict | None = None
+        self.updates = 0
+        self.errors = 0
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def reset(self, t0: float) -> None:
+        with self.lock:
+            self.judge.reset(t0)
+            self.hit, self.last, self.updates, self.errors, self.frame = None, None, 0, 0, None
+
+    def feed(self, obs: dict, t: float) -> None:
+        """Called every control step with the raw observation; copies a frame only when the thread is due."""
+        if t - self.taken_at < self.period or self.new.is_set():
+            return
+        img = obs.get(self.camera)
+        if img is None:
+            return
+        import numpy as np
+
+        joints = {k.removesuffix(".pos"): float(v) for k, v in obs.items() if k.endswith(".pos")}
+        with self.lock:
+            self.frame, self.joints, self.t = np.array(img, copy=True), joints, t
+        self.taken_at = t
+        self.new.set()
+
+    def _run(self) -> None:
+        import cv2
+
+        while True:
+            self.new.wait()
+            with self.lock:
+                img, joints, t = self.frame, self.joints, self.t
+            try:
+                gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img  # camera frames are RGB
+                r = self.judge.update(gray, joints, t)
+            except Exception as exc:  # noqa: BLE001  (the judge returns errors as a key; this is a last guard)
+                r = {"placed": False, "error": f"{type(exc).__name__}: {exc}"[:160]}
+            with self.lock:
+                self.updates += 1
+                self.errors += bool(r.get("error"))
+                self.last = r
+                if r.get("placed") and self.hit is None:
+                    self.hit = dict(r, judged_ts=t, judged_at=_iso(t), joints=joints, version=self.version)
+            self.new.clear()
+
+    def placed(self) -> dict | None:
+        with self.lock:
+            return self.hit
+
+    def summary(self) -> dict:
+        with self.lock:
+            return {"version": self.version, "shadow": self.shadow, "updates": self.updates, "errors": self.errors,
+                    "hit": self.hit, "last": self.last}
+
+
+def _iso(t: float) -> str:
+    import datetime as dt
+
+    return dt.datetime.fromtimestamp(t).astimezone().isoformat(timespec="milliseconds")
+
+
+def _make_place() -> PlaceWatch | None:
+    path = os.environ.get("OMX_PLACE_JUDGE", "").strip()
+    if not path:
+        return None
+    try:
+        return PlaceWatch(path)
+    except Exception as exc:  # noqa: BLE001  no judge = the eval runs as before (no handover)
+        _say(f"[omx] 놓음 판정을 켜지 못했습니다 ({type(exc).__name__}: {exc}). 평소처럼 평가합니다")
+        return None
+
+
+PLACE: PlaceWatch | None = None
+
+
+def _handover_ready() -> bool:
+    """The waiting alignment runner's heartbeat (OMX_HANDOVER_DIR/handover_ready.json): fresh within 1 s, pid alive."""
+    d = os.environ.get("OMX_HANDOVER_DIR")
+    if not d:
+        return False
+    try:
+        r = json.loads((Path(d) / "handover_ready.json").read_text())
+        os.kill(int(r["pid"]), 0)
+        return time.time() - float(r["ts"]) <= 1.0
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def _jsonable(o):
+    """numpy scalars / arrays in the judge's result -> plain JSON."""
+    if hasattr(o, "item") and getattr(o, "ndim", 0) == 0:
+        return o.item()
+    if hasattr(o, "tolist"):
+        return o.tolist()
+    return str(o)
+
+
 def _write_episode_end(repo_id: str, index: int) -> None:
     """OMX_EPISODE_END (eval): where the arms were when the episode ended, for the panel's last_result."""
     path = os.environ.get("OMX_EPISODE_END")
@@ -161,7 +280,7 @@ def _write_episode_end(repo_id: str, index: int) -> None:
         with open(tmp, "w") as f:
             json.dump({"repo_id": repo_id, "episode": index, "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                        "aborted": bool(ABORT["on"]), **EPISODE_END,
-                       "state": {k: round(float(v), 2) for k, v in LAST_STATE.items()}}, f)
+                       "state": {k: round(float(v), 2) for k, v in LAST_STATE.items()}}, f, default=_jsonable)
         os.replace(tmp, path)
     except Exception as exc:  # the report is optional: never stop a run over it
         _say(f"[omx] episode end: 저장하지 못함 ({exc})")
@@ -703,19 +822,32 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
     if watch:
         RETURN.reset()
         EPISODE_END.clear()
-        EPISODE_END.update(returned=False, elapsed_s=None)
+        EPISODE_END.update(returned=False, elapsed_s=None, end_reason="timeout")
+        if PLACE is not None:
+            PLACE.reset(time.time())
     while time.perf_counter() - start < seconds:
         t0 = time.perf_counter()
         if EVENTS["exit_early"]:
             EVENTS["exit_early"] = False
+            if watch:
+                EPISODE_END["end_reason"] = "stopped"
             break
         obs = robot.get_observation()
         if dataset is not None:
             LAST_STATE.update({k: v for k, v in obs.items() if k.endswith(".pos")})
         if watch and RETURN(LAST_STATE, t0):
-            EPISODE_END.update(returned=True, elapsed_s=round(t0 - start, 1))
+            EPISODE_END.update(returned=True, elapsed_s=round(t0 - start, 1), end_reason="returned")
             _say(f"[omx] 작업 끝 감지: 처음 자세로 복귀, 그리퍼 놓음 ({t0 - start:.1f}초) - 이 시도를 마칩니다")
             break
+        if watch and PLACE is not None:  # the raw frame, before the target circle is drawn
+            PLACE.feed(obs, time.time())
+            hit = PLACE.placed()
+            if hit is not None and not PLACE.shadow:
+                EPISODE_END.update(end_reason="placed", elapsed_s=round(t0 - start, 1), judged_at=hit["judged_at"],
+                                   judge={k: v for k, v in hit.items() if k != "judged_at"})
+                EVENTS["stop_recording"] = True  # no reset move and no next attempt: the alignment takes the arms
+                _say(f"[omx] 놓음 감지: 상자 {hit.get('box')} 선반 칸 안착, 손끝 빠짐 ({t0 - start:.1f}초) - 평가를 마치고 정렬에 넘깁니다")
+                break
         if TARGET is not None:  # before the preview, the policy and the dataset: all see the same marked frame
             obs = TARGET.apply(obs)
         _show(obs)
@@ -833,6 +965,11 @@ def run_episodes(cfg: RunConfig, robot, teleop, policy: Policy | None, dataset, 
                 _land_now()
         if policy is not None:
             _report_loop_rate(index, times)
+            if len(times) >= 10:
+                per = sorted(b - a for a, b in zip(times, times[1:]))
+                EPISODE_END["loop_ms"] = {"p50": round(1000 * per[len(per) // 2], 1), "p99": round(1000 * per[int(0.99 * (len(per) - 1))], 1)}
+            if PLACE is not None:
+                EPISODE_END["judge_watch"] = PLACE.summary()
             _write_episode_end(d.repo_id, index)
         if not EVENTS["stop_recording"] and (recorded < d.num_episodes - 1 or EVENTS["rerecord_episode"]):
             logging.info("Reset the environment")
@@ -898,8 +1035,11 @@ def run(cfg: RunConfig) -> None:
     install_wrist_offset(teleop)
     ABORT["robot"] = robot
     install_live_view(robot)
-    global MOTOR_OUT, TARGET
+    global MOTOR_OUT, TARGET, PLACE
     TARGET = _make_target()
+    PLACE = _make_place()
+    if PLACE is not None:
+        _say(f"[omx] 놓음 판정 {PLACE.version} ({'기록만' if PLACE.shadow else '놓으면 평가를 마치고 정렬에 넘김'})")
     if TARGET is not None:
         _say(f"[omx] target marker {TARGET.marker_id} on camera '{TARGET.camera}'")
     try:
@@ -929,13 +1069,29 @@ def run(cfg: RunConfig) -> None:
         clean = True
     finally:
         logging.info("Stop recording")
-        if (os.environ.get("OMX_FAST_RELEASE") == "1" and clean and EPISODE_END.get("returned")
+        hold_exit = (EPISODE_END.get("end_reason") == "placed" and clean and not ABORT["on"]
+                     and not omx_safe_start.FREEZE.is_set() and _handover_ready())
+        if hold_exit:  # the alignment runner is waiting: leave the torque on, close the ports only (3.18.0)
+            omx_safe_start.HOLD_EXIT.set()
+            _say("[omx] 넘겨받기: 정렬 실행기가 기다리고 있어 토크를 켠 채 포트만 닫습니다")
+        elif EPISODE_END.get("end_reason") == "placed":
+            _say("[omx] 넘겨받기 안 함: 정렬 실행기가 준비되지 않았거나 멈춤이 있어 평소처럼 내려놓습니다")
+        if (not hold_exit and os.environ.get("OMX_FAST_RELEASE") == "1" and clean and EPISODE_END.get("returned")
                 and not ABORT["on"] and not omx_safe_start.FREEZE.is_set()):
             # the shelf alignment follows and takes the arms from here: the short safe stop (omx_safe_start)
             omx_safe_start.FAST_LAND.set()
             _say("[omx] 빠른 놓기: 복귀 감지로 끝나 원위치·손목·그리퍼 정리 없이 두 팔을 함께 0.5초에 내려놓습니다")
         dataset.finalize()
         _disconnect(robot)  # safe stop; after 비상 정지 it waits here for [홈 위치로 이동]
+        if hold_exit and omx_safe_start.HOLD_LANDED.is_set():
+            _say("[omx] 넘겨받기 취소: 비상 정지로 팔을 내려놓았습니다")
+        elif hold_exit and os.environ.get("OMX_HOLD_EXIT_FILE"):
+            try:  # the panel tells the runner only after this process has let go of the ports
+                f = os.environ["OMX_HOLD_EXIT_FILE"]
+                Path(f + ".tmp").write_text(json.dumps({"at": _iso(time.time()), "ts": time.time(), "repo_id": cfg.dataset.repo_id}))
+                os.replace(f + ".tmp", f)
+            except OSError as exc:
+                _say(f"[omx] 넘겨받기 표시를 쓰지 못함 ({exc})")
         if teleop is not None and teleop.is_connected:
             teleop.disconnect()
         if cfg.dataset.push_to_hub and dataset.num_episodes > 0:

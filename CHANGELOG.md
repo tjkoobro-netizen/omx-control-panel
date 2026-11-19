@@ -1,5 +1,16 @@
 # OMX 제어판 버전 기록
 
+## 3.18.0 (2026-11-18) - 넘겨받기: 상자를 놓은 순간 평가를 끝내고 토크를 켠 채 정렬에 넘김
+
+- **명령 `end_on_place: true`**(관제 평가, 선반 정렬이 이어지는 입고, 시도 1번만): 평가 프로세스 안에서 Guide의 놓음 판정(`handover_judge.py` 1117e, 위 카메라 원본 프레임(목표 원을 그리기 전)과 관절값, 별도 스레드 6 Hz)이 "상자가 명령 칸에 안정 + 손끝이 선반에서 빠짐"을 보면 그 시도를 끝냄(`last_episode.end_reason: "placed"`, `judged_at`, 원위치 이동·다음 시도 없음)
+- **정렬 실행기 대기**: 평가 시작 직후 패널이 정렬 실행기를 `--handover-wait <episode_end.json> --repo-id <평가> --handover-dir <logs>`(+ `--home-pose`)로 함께 띄움(nice 10, 수학 스레드 1, 포트·카메라 안 엶). 실행기는 `handover_ready.json`을 0.5초마다 갱신
+- **토크 켠 채 종료(HOLD_EXIT)**: 놓음으로 끝났고 중지·즉시 중단·비상 정지·오류가 없고 실행기 준비 신호가 1초 안이면, 평가는 착지하지 않고 토크를 켠 채 포트만 닫음(`handover_hold_exit.json`). 비상 정지가 먼저면 언제나 평소처럼 착지하고 넘기지 않음. 그 밖이면 평소처럼 착지
+- **넘김**: 평가 프로세스가 끝나면 패널이 `handover_eval_done`(`hold_exit`, `end_reason`)을 쓰고, 넘길 때는 그 실행기를 정렬 작업으로 이어 붙임(정지·비상 정지 버튼, 로그, 끝 처리 그대로). 넘기지 않을 때는 `handover_stop`도 쓰고 지금까지와 같은 정렬(실행기 새로 시작)
+- **감시**: 넘긴 뒤 8초 안에 실행기가 `handover_state.json`에 "taken"을 쓰지 않으면 멈추고 패널이 홈으로 보냄(`omx_return_home`: 4 cm 들기 → 동기 보간 → 착지). 실행기가 레지스터가 달라(`regs_mismatch`) 또는 정지로(`stopped`) 안 잡았으면 토크 켠 채 제자리 HOLD(`stage: "hold"`), [홈 위치로 이동]이 `omx_return_home`을 돌린 뒤 `final: true`. armed가 꺼져 있으면 넘기지 않고 패널이 홈으로 보냄
+- **결과**: `last_result.placement`가 판정 순간 `source: "eval_judge"`(on_shelf true, slot, box, observed_at=판정 시각)로 먼저 나오고, 실행기가 선반을 읽으면 `source: "align"`으로 바뀜(앞 값은 `first`). `last_result.handover` = `{mode, state(taken|not_placed|not_ready|failed|stopped|regs_mismatch|off), reason, judged_at, gap_s, judge{box, version, judged_ts, tip_y}, judge_watch, loop_ms, fallback(null|home|hold), fallback_ok}`. `/api/status`에 `handover {standby, hold, ready_age_s}`
+- **`place_shadow: true`**: 같은 판정을 돌려 기록만(시도는 끝내지 않음, 넘기지 않음, `handover.mode: "shadow"`, `state: "off"`). 실행기가 `--handover-wait`를 모르면 `end_on_place`도 이 모드로(`off_reason`)
+- 정렬 실행기(Guide `real_runner.py`)의 `--handover-wait` 지원이 있어야 실제로 넘김. 실물 확인은 TK 입회로 단계별(레지스터 읽기 → 홈에서 넘기기 → 뻗은 자세 → 그림자 → 전체)
+
 ## 3.17.3 (2026-11-18) - 홈으로 가기 전 손끝 먼저 4 cm 들기
 
 - 안전 정지(stop)·에피소드 사이 홈(reset)·즉시 중단 뒤 복귀(`omx_return_home.py`)·비상 정지 뒤 [홈 위치로 이동]에서, 협동 로봇의 각 팔이 홈으로 가기 전에 손끝(손가락 몸체)을 지금 손 기울기 그대로 수직으로 4 cm 들어 올림(1 cm 웨이포인트, 웨이포인트 사이도 동기 보간, 가장 먼 관절 12 units/s, 출력 30%, 관절 1~4만 바뀌고 손목 롤·그리퍼 그대로). 손이 선반 판 아래면 먼저 칸 앞으로 곧게 뺀 뒤 2 cm만 듦. 그다음 3.17.2 동기 보간으로 홈

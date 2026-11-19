@@ -1293,29 +1293,56 @@ class Job:
         self.reader = threading.Thread(target=self._read_output, daemon=True)
         self.reader.start()
 
+    def adopt(self, kind: str, standby: "Standby", info: dict) -> None:
+        """Take a process that is already running (the alignment runner that waited during the eval, 3.18.0) as
+        the robot job: its output, stop buttons and end handling from now on, as if started here."""
+        if self.running():
+            raise RuntimeError("이미 실행 중인 작업이 있습니다.")
+        self._acquire_lock(kind)
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        self.log_file = open(LOG_DIR / f"{dt.datetime.now():%Y%m%d_%H%M%S}_{kind}.log", "w")
+        self.log_file.write("$ (평가 중 대기하던 실행기를 넘겨받음) " + " ".join(standby.cmd or []) + "\n")
+        self.lines.clear()
+        for line in list(standby.lines):
+            self.lines.append(line)
+            self.log_file.write(line + "\n")
+        self.kind, self.info, self.started = kind, info, standby.started
+        info.setdefault("base_phase", info.get("phase"))
+        self.slow = collections.deque(maxlen=2000)
+        self.slow_total = 0
+        self.proc = proc = standby.proc
+        self.reader = standby.collector  # running() lasts until it has run the end handling below
+        standby.attach(self._handle_line, lambda: self._finish(proc))
+
+    def _handle_line(self, raw: str) -> None:
+        line = ANSI_RE.sub("", raw).rstrip()
+        if not line:
+            return
+        if line.startswith("Teleop loop time"):
+            self.info["loop"] = line.split(":", 1)[1].strip()
+            return
+        if TABLE_RE.match(line):
+            return
+        if m := SLOW_RE.search(line):
+            # omx_run.py warns on every slow loop iteration: count them instead of flooding the log view
+            self.slow.append((time.time(), float(m.group(1))))
+            self.slow_total += 1
+            if self.log_file:
+                self.log_file.write(line + "\n")
+            return
+        self._parse(line)
+        self.lines.append(line)
+        if self.log_file:
+            self.log_file.write(line + "\n")
+            self.log_file.flush()
+
     def _read_output(self) -> None:
         proc = self.proc
         for raw in output_lines(proc):
-            line = ANSI_RE.sub("", raw).rstrip()
-            if not line:
-                continue
-            if line.startswith("Teleop loop time"):
-                self.info["loop"] = line.split(":", 1)[1].strip()
-                continue
-            if TABLE_RE.match(line):
-                continue
-            if m := SLOW_RE.search(line):
-                # omx_run.py warns on every slow loop iteration: count them instead of flooding the log view
-                self.slow.append((time.time(), float(m.group(1))))
-                self.slow_total += 1
-                if self.log_file:
-                    self.log_file.write(line + "\n")
-                continue
-            self._parse(line)
-            self.lines.append(line)
-            if self.log_file:
-                self.log_file.write(line + "\n")
-                self.log_file.flush()
+            self._handle_line(raw)
+        self._finish(proc)
+
+    def _finish(self, proc) -> None:
         proc.wait()
         self.info["phase"] = "끝남"
         self.info["returncode"] = proc.returncode
@@ -1333,13 +1360,18 @@ class Job:
             set_armed(False, f"이상 정지 {self.info['err']['name']}")
         if self.kind == "eval":
             LAST_RESULT.clear()
-            LAST_RESULT.update(eval_result(self), stage="done", final=True, align=None, pinky=None, placement=None)
-            if self.info.get("shelf_align"):
+            LAST_RESULT.update(eval_result(self), stage="done", final=True, align=None, pinky=None, placement=None,
+                               handover=None)
+            if self.info.get("handover"):
+                handover_after_eval(self, proc)  # 3.18.0: placed -> the waiting runner; otherwise the usual alignment
+            elif self.info.get("shelf_align"):
                 align_after_eval(self.info["shelf_align"], proc)
             if self.info.get("pinky_check"):
                 pinky_after_eval(self.info["pinky_check"], proc)
         if self.kind in ("align", "align_release"):
             align_ended(self, proc)
+        if self.kind == "home" and self.info.get("handover_fallback"):
+            handover_home_ended(self, proc)
         if self.kind == "shelf_read":
             shelf_read_ended(self, proc)
         if self.kind == "pinky_read":
@@ -2404,10 +2436,12 @@ def home_return() -> dict:
     if not EVAL_HOME_FILE.exists():
         raise RuntimeError("돌아갈 홈 자세 기록이 없습니다.")
     data = json.loads(EVAL_HOME_FILE.read_text())
+    info = {"phase": "홈 위치로 이동 중", "repo_id": data.get("repo_id", "")}
+    if HANDOVER.pop("hold", None):  # a handover the runner did not take: the arms wait with the torque on (3.18.0)
+        info["handover_fallback"] = "hold_release"
     JOB.start("home", [str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_return_home.py"), str(EVAL_HOME_FILE),
                        data.get("repo_id", "")],
-              {"phase": "홈 위치로 이동 중", "repo_id": data.get("repo_id", "")},
-              need_leader=False, env_extra={"OMX_HOME_GRIPPER": "open"})
+              info, need_leader=False, env_extra={"OMX_HOME_GRIPPER": "open"})
     return {"ok": True, "mode": "return_home"}
 
 
@@ -2773,7 +2807,8 @@ def eval_result(job) -> dict:
             "ended_at": dt.datetime.now().isoformat(timespec="seconds"), "returncode": rc,
             "exit_ok": rc == 0 and not err and stopped is None, "stopped_by": stopped, "err": err,
             "target_marker": info.get("target_marker"), "target_drawn": info.get("target_drawn"),
-            "last_episode": {k: end.get(k) for k in ("episode", "at", "aborted", "returned", "elapsed_s")} if end else None,
+            "last_episode": {k: end.get(k) for k in ("episode", "at", "aborted", "returned", "elapsed_s", "end_reason",
+                                                     "judged_at", "loop_ms")} if end else None,
             "arms": arms or None,
             "home_check": "unknown" if not checks or None in checks else "ok" if all(checks) else "far"}
 
@@ -2869,8 +2904,10 @@ def command_pinky(body: dict) -> dict:
 
 
 def take_placement(source: str) -> bool:
-    """The runner's placement file -> last_result.placement (once per alignment / shelf read)."""
-    if LAST_RESULT.get("placement"):
+    """The runner's placement file -> last_result.placement (once per alignment / shelf read). A handover's first
+    report from the eval's judge (source "eval_judge", 3.18.0) is replaced by the runner's own shelf read, kept as "first"."""
+    prev = LAST_RESULT.get("placement")
+    if prev and prev.get("source") != "eval_judge":
         return True
     try:
         d = json.loads(PLACEMENT_FILE.read_text())
@@ -2879,7 +2916,8 @@ def take_placement(source: str) -> bool:
     if not isinstance(d, dict):
         return False
     d.setdefault("on_shelf", None)
-    LAST_RESULT["placement"] = dict(d, source=source, reported_at=now_iso())
+    LAST_RESULT["placement"] = dict(d, source=source, reported_at=now_iso(),
+                                    **({"first": {k: prev.get(k) for k in ("source", "on_shelf", "observed_at", "reported_at")}} if prev else {}))
     return True
 
 
@@ -2898,6 +2936,8 @@ def placement_from_result(source: str, r: dict, slot: str | None, box) -> None:
     """The runner ended without a placement file (an older runner, a stop): its final result, when it has one."""
     if take_placement(source):
         return
+    if (LAST_RESULT.get("placement") or {}).get("source") == "eval_judge" and r.get("on_shelf") is None:
+        return  # the runner read nothing itself: keep the judge's report
     if "on_shelf" in r or "shelf" in r:
         LAST_RESULT["placement"] = {"on_shelf": r.get("on_shelf"), "shelf": r.get("shelf"), "slot": r.get("slot") or slot,
                                     "box": box, "observed_at": r.get("observed_at"), "observed_ts": r.get("observed_ts"),
@@ -3209,6 +3249,8 @@ def align_ended(job, proc) -> None:
         ALIGN.pop("hold", None)
         align_done_later(proc)
         return
+    if info.get("handover") and handover_align_ended(job, proc):
+        return
     res, r = runner_result()
     rc = info.get("returncode")
     stopped = ("즉시 중단" if info.get("abort_sent") else "비상 정지" if info.get("frozen")
@@ -3252,6 +3294,359 @@ def align_ended(job, proc) -> None:
         LAST_RESULT.update(stage="hold", final=False)
     else:
         align_done_later(proc)
+
+
+# ---------------------------------------------------------------- 넘겨받기 (3.18.0): 놓은 순간 평가를 끝내고 정렬에 넘김
+HANDOVER_JUDGE_FILE = LOG_DIR / "place_judge.json"  # omx_run's judge settings (OMX_PLACE_JUDGE)
+HANDOVER_HOLD_EXIT_FILE = LOG_DIR / "handover_hold_exit.json"  # omx_run: "I closed the ports with the torque on"
+HANDOVER_READY = LOG_DIR / "handover_ready.json"  # the waiting runner's heartbeat (pid, ts, ready_at)
+HANDOVER_STOP = LOG_DIR / "handover_stop"  # panel -> runner: do not take the arms
+HANDOVER_EVAL_DONE = LOG_DIR / "handover_eval_done"  # panel -> runner: the eval process has ended (hold_exit, end_reason)
+HANDOVER_STATE = LOG_DIR / "handover_state.json"  # runner -> panel: taken | regs_mismatch | stopped | not_placed
+HANDOVER_WATCH_S = 8.0  # the runner must have taken the arms this long after the eval ended, else the panel lands them
+HANDOVER_JUDGE_HZ = 6
+HANDOVER: dict = {}  # the running / last handover: mode, box, slot, repo_id; "hold" while the arms wait for [홈 위치로 이동]
+
+
+class Standby:
+    """The shelf alignment runner started together with the eval (--handover-wait): it prepares while the policy runs
+    and opens no port or camera until the panel says the eval has let go of them. Its output is kept here until
+    JOB.adopt() makes it the robot job. Started with nice 10 and one math thread so the eval loop keeps its rate."""
+
+    def __init__(self) -> None:
+        self.proc: subprocess.Popen | None = None
+        self.cmd: list | None = None
+        self.started = 0.0
+        self.lines: collections.deque[str] = collections.deque(maxlen=400)
+        self.lock = threading.Lock()
+        self.sink = self.on_end = None
+        self.ended = False
+        self.collector: threading.Thread | None = None
+        self.log_file = None
+
+    def alive(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def start(self, cmd: list, env_extra: dict) -> None:
+        if self.alive():
+            self.terminate()
+        env = dict(os.environ, PYTHONUNBUFFERED="1", OMX_PORT=str(PORT), OMP_NUM_THREADS="1", MKL_NUM_THREADS="1",
+                   OPENBLAS_NUM_THREADS="1", **env_extra)
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        self.lines.clear()
+        self.sink = self.on_end = None
+        self.ended = False
+        self.cmd, self.started = cmd, time.time()
+        self.log_file = open(LOG_DIR / f"{dt.datetime.now():%Y%m%d_%H%M%S}_align_standby.log", "w")
+        self.log_file.write("$ " + " ".join(cmd) + "\n")
+        self.proc = subprocess.Popen(cmd, cwd=LEROBOT_DIR, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True,
+                                     preexec_fn=lambda: os.nice(10))
+        self.collector = threading.Thread(target=self._collect, args=(self.proc,), daemon=True)
+        self.collector.start()
+
+    def _collect(self, proc) -> None:
+        for raw in output_lines(proc):
+            with self.lock:
+                sink = self.sink
+            if sink is not None:
+                sink(raw)
+                continue
+            line = ANSI_RE.sub("", raw).rstrip()
+            if line:
+                self.lines.append(line)
+                if self.log_file:
+                    self.log_file.write(line + "\n")
+                    self.log_file.flush()
+        proc.wait()
+        with self.lock:
+            self.ended, end = True, self.on_end
+            if self.log_file:
+                self.log_file.close()
+                self.log_file = None
+        if end is not None:
+            end()
+
+    def attach(self, sink, on_end) -> None:
+        """From now on every line goes to sink and on_end runs when the process has ended (now, if it already has)."""
+        with self.lock:
+            self.sink, self.on_end, ended = sink, on_end, self.ended
+            if self.log_file:
+                self.log_file.close()
+                self.log_file = None
+        if ended:
+            on_end()
+
+    def wait(self, timeout: float) -> bool:
+        try:
+            self.proc.wait(timeout=timeout)
+            return True
+        except (subprocess.TimeoutExpired, AttributeError):
+            return self.proc is None
+
+    def terminate(self, grace_s: float = 3.0) -> None:
+        if not self.alive():
+            return
+        try:
+            os.killpg(self.proc.pid, signal.SIGTERM)
+        except OSError:
+            pass
+        if not self.wait(grace_s):
+            try:
+                os.killpg(self.proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+
+STANDBY = Standby()
+
+
+def _write_json(path: Path, obj: dict) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False))
+    os.replace(tmp, path)
+
+
+def handover_plan(body: dict, plan: dict | None, episodes: int) -> dict | None:
+    """Control-tower command "end_on_place": true (3.18.0): end the eval the moment the box is placed and hand the arms,
+    torque on, to the alignment runner that waited during the eval. "place_shadow": true runs the same judge but only
+    records what it saw (no handover). Both need the shelf alignment to follow; end_on_place needs one attempt."""
+    want, shadow = bool(body.get("end_on_place")), bool(body.get("place_shadow"))
+    if not (want or shadow):
+        return None
+    if not plan:
+        raise RuntimeError("end_on_place·place_shadow는 선반 정렬이 이어지는 관제 평가(상자 번호, 정렬 모델)에서만 씁니다.")
+    if want and episodes != 1:
+        raise RuntimeError("end_on_place는 시도 1번(episodes 1) 평가에서만 씁니다.")
+    ho = {"mode": "handover" if want else "shadow", "box": plan["box"], "slot": plan["slot"], "off_reason": None}
+    s = align_settings() or {}
+    if want and not runner_takes(s.get("cmd") or [], "--handover-wait"):
+        ho.update(mode="shadow", off_reason="정렬 실행기가 넘겨받기(--handover-wait)를 모름: 판정만 기록")
+    return ho
+
+
+def handover_env(ho: dict) -> dict:
+    """omx_run settings: the judge (shadow unless this is a real handover) and where the handover files live."""
+    for f in (HANDOVER_STOP, HANDOVER_EVAL_DONE, HANDOVER_STATE, HANDOVER_HOLD_EXIT_FILE):
+        f.unlink(missing_ok=True)
+    _write_json(HANDOVER_JUDGE_FILE, {"box_ids": [int(ho["box"])], "camera": "front", "rate_hz": HANDOVER_JUDGE_HZ,
+                                      "shadow": ho["mode"] != "handover"})
+    env = {"OMX_PLACE_JUDGE": str(HANDOVER_JUDGE_FILE)}
+    if ho["mode"] == "handover":
+        env |= {"OMX_HANDOVER_DIR": str(LOG_DIR), "OMX_HOLD_EXIT_FILE": str(HANDOVER_HOLD_EXIT_FILE)}
+    return env
+
+
+def handover_standby_start(ho: dict, plan: dict, repo_id: str, home: dict | None) -> None:
+    """Right after the eval has started: the alignment runner in its waiting mode."""
+    HANDOVER.clear()
+    HANDOVER.update(mode=ho["mode"], box=plan["box"], slot=plan["slot"], repo_id=repo_id)
+    s = align_settings()
+    try:
+        ALIGN_RESULT_FILE.unlink(missing_ok=True)
+        PLACEMENT_FILE.unlink(missing_ok=True)
+        ALIGN_HOME_FILE.unlink(missing_ok=True)
+        args = ["--box", str(plan["box"]), "--auto", "--slot", plan["slot"], "--step", "shelf_align",
+                "--result", str(ALIGN_RESULT_FILE), "--handover-wait", str(EPISODE_END_FILE), "--repo-id", repo_id,
+                "--handover-dir", str(LOG_DIR)]
+        if home and (home.get("joints") or {}) and runner_takes(s["cmd"], "--home-pose"):
+            ALIGN_HOME_FILE.write_text(json.dumps(home, ensure_ascii=False, indent=2))
+            args += ["--home-pose", str(ALIGN_HOME_FILE)]
+        STANDBY.start(s["cmd"] + args, {"OMX_PANEL_URL": f"http://127.0.0.1:{PORT}"})
+        JOB.lines.append(f"[omx] 넘겨받기: 정렬 실행기를 대기 모드로 띄웠습니다 (PID {STANDBY.proc.pid})")
+    except Exception as exc:  # no runner: omx_run sees no heartbeat and lands the arms as usual
+        HANDOVER["standby_error"] = str(exc)[:200]
+        JOB.lines.append(f"[omx] 넘겨받기: 정렬 실행기를 띄우지 못해 평소처럼 진행합니다 ({exc})")
+
+
+def _episode_end_now(job) -> dict:
+    try:
+        end = json.loads(EPISODE_END_FILE.read_text())
+        return end if end.get("repo_id") == job.info.get("repo_id") else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def handover_status() -> dict:
+    """/api/status: the waiting runner (3.18.0) and a handover hold."""
+    out = {"standby": STANDBY.alive(), "hold": bool(HANDOVER.get("hold")), "ready_age_s": None}
+    try:
+        out["ready_age_s"] = round(time.time() - float(json.loads(HANDOVER_READY.read_text())["ts"]), 1) if out["standby"] else None
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return out
+
+
+def handover_after_eval(job, proc) -> None:
+    """The eval with a judge has ended. Shadow: record what the judge saw, then the usual alignment. Handover: if the
+    eval closed its ports with the torque on (box placed, runner ready, nothing stopped), tell the runner and make it
+    the alignment job; otherwise tell it not to take the arms (they were landed as usual) and run the usual alignment."""
+    ho, plan = job.info["handover"], job.info["shelf_align"]
+    end = _episode_end_now(job)
+    judge = end.get("judge") or {}
+    seen = {"mode": ho["mode"], "end_reason": end.get("end_reason"), "judged_at": end.get("judged_at"),
+            "judge": {k: judge.get(k) for k in ("box", "version", "judged_ts", "tip_y", "marker_seen") if k in judge} or None,
+            "judge_watch": {k: v for k, v in (end.get("judge_watch") or {}).items() if k in ("version", "updates", "errors", "hit")} or None,
+            "loop_ms": end.get("loop_ms"), "off_reason": ho.get("off_reason"), "state": None, "fallback": None}
+    LAST_RESULT["handover"] = seen
+    if ho["mode"] != "handover":
+        seen["state"] = "off"
+        align_after_eval(plan, proc)
+        return
+    try:
+        hold_exit = HANDOVER_HOLD_EXIT_FILE.stat().st_mtime >= job.started
+    except OSError:
+        hold_exit = False
+    _write_json(HANDOVER_EVAL_DONE, {"at": now_iso(), "ts": time.time(), "hold_exit": hold_exit,
+                                     "end_reason": end.get("end_reason")})
+    if not hold_exit:
+        HANDOVER_STOP.write_text(now_iso())  # the arms were landed: the runner must not take them
+        seen["state"] = "not_placed" if end.get("end_reason") != "placed" else "not_ready"
+        LAST_RESULT.update(stage="align", final=False, align={"ran": False, "ok": None, "box": plan["box"], "slot": plan["slot"]})
+
+        def later() -> None:  # the waiting runner ends on its own; then the alignment as before
+            if not STANDBY.wait(5.0):
+                STANDBY.terminate()
+            align_after_eval(plan, proc)
+
+        threading.Thread(target=later, daemon=True).start()
+        return
+    # placed and the ports were closed with the torque on: the box is on its slot (seen from above)
+    LAST_RESULT["placement"] = {"on_shelf": True, "shelf": "ok", "slot": plan["slot"], "box": plan["box"],
+                                "observed_at": end.get("judged_at"), "observed_ts": judge.get("judged_ts"),
+                                "observed_src": "front", "source": "eval_judge", "judge_version": judge.get("version"),
+                                "reported_at": now_iso()}
+    LAST_RESULT.update(stage="align", final=False,
+                       align={"ran": False, "ok": None, "box": plan["box"], "slot": plan["slot"], "handover": True})
+    seen["state"] = "waiting"
+    if not ARMED["on"] or not STANDBY.alive():
+        why = f"armed 꺼짐 ({ARMED['off_reason']})" if not ARMED["on"] else "정렬 실행기가 이미 끝남"
+        HANDOVER_STOP.write_text(now_iso())
+        seen.update(state="stopped", reason=why)
+        threading.Thread(target=handover_fallback_home, args=(why, proc), daemon=True).start()
+        return
+    ALIGN.clear()
+    ALIGN.update(box=plan["box"], slot=plan["slot"], before=None)
+
+    def adopt_later() -> None:
+        # this runs inside the eval job's end handling: the job counts as running until that has finished
+        end = time.time() + 10
+        while JOB.proc is proc and JOB.running() and time.time() < end:
+            time.sleep(0.02)
+        try:
+            JOB.adopt("align", STANDBY, {"phase": "정렬 중 · 넘겨받는 중", "box": plan["box"], "slot": plan["slot"],
+                                         "eval_repo_id": job.info.get("repo_id"), "handover": True})
+        except Exception as exc:
+            HANDOVER_STOP.write_text(now_iso())
+            seen.update(state="stopped", reason=f"넘겨받지 못함: {exc}"[:200])
+            handover_fallback_home(seen["reason"])
+            return
+        watch_placement(JOB.proc, "align")
+        handover_watch(JOB.proc)
+
+    threading.Thread(target=adopt_later, daemon=True).start()
+
+
+def handover_state_now(since: float) -> dict:
+    try:
+        if HANDOVER_STATE.stat().st_mtime < since:
+            return {}
+        return json.loads(HANDOVER_STATE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def handover_watch(proc) -> None:
+    """The runner must say "taken" (handover_state.json) within HANDOVER_WATCH_S, or the panel stops it and lands the
+    arms itself (lift, synchronized home, safe stop: omx_return_home)."""
+    since = HANDOVER_EVAL_DONE.stat().st_mtime if HANDOVER_EVAL_DONE.exists() else time.time()
+    end = time.time() + HANDOVER_WATCH_S
+    ho = LAST_RESULT.get("handover") or {}
+    while time.time() < end:
+        st = handover_state_now(since)
+        if st.get("state"):
+            ho.update(state=st["state"], reason=st.get("reason"), state_at=now_iso())
+            if st["state"] == "taken":
+                ho["gap_s"] = round(float(st.get("ts", time.time())) - float((ho.get("judge") or {}).get("judged_ts") or since), 2)
+            return
+        if JOB.proc is not proc or not JOB.running():
+            break  # it ended without saying: align_ended decides from its result
+        time.sleep(0.1)
+    if JOB.proc is proc and JOB.running() and not handover_state_now(since).get("state"):
+        ho.update(state="failed", reason=f"{HANDOVER_WATCH_S:.0f}초 안에 팔을 잡지 못함")
+        JOB.lines.append(f"[omx] 넘겨받기 실패: 정렬 실행기가 {HANDOVER_WATCH_S:.0f}초 안에 팔을 잡지 못해 멈추고 패널이 홈으로 보냅니다")
+        HANDOVER_STOP.write_text(now_iso())
+        JOB.info["handover_failed"] = True
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except OSError:
+            pass
+
+
+def handover_align_ended(job, proc) -> bool:
+    """align_ended for an adopted runner. True when handled here (it never took the arms); False: the usual path."""
+    res, r = runner_result()
+    ho = LAST_RESULT.get("handover") or {}
+    since = HANDOVER_EVAL_DONE.stat().st_mtime if HANDOVER_EVAL_DONE.exists() else job.started
+    st = handover_state_now(since).get("state") or r.get("handover")
+    if job.info.get("handover_failed"):
+        st = "failed"
+    if st == "taken":
+        ho.setdefault("state", "taken")
+        return False
+    ho["state"] = st or "failed"
+    ho.setdefault("reason", r.get("handover_reason") or ("결과 없음" if not r else None))
+    LAST_RESULT["align"] = dict(LAST_RESULT.get("align") or {}, ran=False, ok=False, returncode=job.info.get("returncode"),
+                                skipped=f"넘겨받지 못함 ({ho['state']})", log=res.get("log"), reported_at=now_iso())
+    if ho["state"] in ("regs_mismatch", "stopped") or job.info.get("frozen"):
+        # the arms stay where they are with the torque on: a person checks, then [홈 위치로 이동] (omx_return_home)
+        ho["fallback"] = "hold"
+        HANDOVER["hold"] = True
+        LAST_RESULT.update(stage="hold", final=False)
+        job.lines.append("[omx] 넘겨받기 안 됨: 팔은 토크가 켜진 채 제자리입니다. 상자와 팔을 확인한 뒤 [홈 위치로 이동]을 누르세요")
+        return True
+    threading.Thread(target=handover_fallback_home, args=(ho.get("reason") or ho["state"], proc), daemon=True).start()
+    return True
+
+
+def handover_fallback_home(why: str, after_proc=None) -> None:
+    """Nobody took the arms (failed, runner gone, armed off): omx_return_home lifts them, goes home synchronized and
+    lands them. If it cannot start, the arms wait with the torque on for [홈 위치로 이동]. No alignment follows."""
+    ho0 = LAST_RESULT.get("handover") or {}
+    LAST_RESULT["align"] = dict(LAST_RESULT.get("align") or {}, ran=False, ok=False,
+                                skipped=(LAST_RESULT.get("align") or {}).get("skipped") or f"넘겨받지 못함 ({ho0.get('state')}: {why})"[:200],
+                                reported_at=now_iso())
+    end = time.time() + 30
+    while after_proc is not None and JOB.proc is after_proc and JOB.running() and time.time() < end:
+        time.sleep(0.2)
+    if not STANDBY.wait(5.0):
+        STANDBY.terminate()
+    time.sleep(0.5)
+    ho = LAST_RESULT.get("handover") or {}
+    ho["fallback"] = "home"
+    LAST_RESULT.update(stage="release", final=False)
+    try:
+        data = json.loads(EVAL_HOME_FILE.read_text())
+        JOB.start("home", [str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_return_home.py"), str(EVAL_HOME_FILE),
+                           data.get("repo_id", "")],
+                  {"phase": "넘겨받기 안 됨 · 홈으로 이동 중", "repo_id": data.get("repo_id", ""), "handover_fallback": "home",
+                   "why": why},
+                  need_leader=False, env_extra={"OMX_HOME_GRIPPER": "open"})
+    except Exception as exc:
+        ho.update(fallback="hold", fallback_error=str(exc)[:200])
+        HANDOVER["hold"] = True
+        LAST_RESULT.update(stage="hold", final=False)
+
+
+def handover_home_ended(job, proc) -> None:
+    ho = LAST_RESULT.get("handover") or {}
+    ho["fallback_ok"] = job.info.get("returncode") == 0
+    if job.info.get("frozen") or job.info.get("killed"):
+        HANDOVER["hold"] = True
+        LAST_RESULT.update(stage="hold", final=False)
+        return
+    LAST_RESULT.update(stage="done", final=True)
+
 
 
 def start_eval(body: dict) -> dict:
@@ -3368,6 +3763,9 @@ def start_eval(body: dict) -> dict:
     eval_info["target_drawn"] = bool(tenv)
     if plan:
         eval_info["shelf_align"] = plan
+    ho = handover_plan(body, plan, episodes)
+    if ho:
+        eval_info["handover"] = ho
     if pinky:
         eval_info["pinky_check"] = pinky
         eval_info.setdefault("target_marker", pinky["box"])
@@ -3379,9 +3777,12 @@ def start_eval(body: dict) -> dict:
               need_leader=False, env_extra=thread_env(threads) | home_env(reset_home, open_gripper, repo_id) | async_env
               | ({"OMX_HOME_POSE": str(omx_home.write_run_file(home, RUN_HOME_FILE))} if home else {}) | tenv
               | {"OMX_EPISODE_END": str(EPISODE_END_FILE)} | ({"OMX_END_ON_RETURN": "1"} if end_on_return else {})
-              | ({"OMX_FAST_RELEASE": "1"} if fast_release else {}) | ({} if record else {"OMX_NO_RECORD": "1"}))
+              | ({"OMX_FAST_RELEASE": "1"} if fast_release else {}) | ({} if record else {"OMX_NO_RECORD": "1"})
+              | (handover_env(ho) if ho else {}))
     EVAL_HOME_POSE.clear()
     EVAL_HOME_POSE.update(repo_id=repo_id, home=home)
+    if ho and ho["mode"] == "handover":
+        handover_standby_start(ho, plan, repo_id, home)
     if preset:
         protocol_target(JOB)
         if preset["detector"] != "none":
@@ -3786,6 +4187,7 @@ class Handler(BaseHTTPRequestHandler):
                 "robot_mode": ROBOT_MODE,
                 "cameras": [{"name": n, "label": CAMERA_LABELS.get(n, n)} for n in CAMERAS],
                 "job": JOB.status(),
+                "handover": handover_status(),
                 "cpu": cpu_status(),
                 "log": list(JOB.lines)[-120:],
                 "datasets": merged_datasets() if CONTROL else list_datasets(),
