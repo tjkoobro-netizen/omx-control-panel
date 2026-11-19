@@ -527,7 +527,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.20.0</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.20.1</span></div>
       </div>
     </div>
     <div class="status">
@@ -619,7 +619,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
           </label>
         </div>
         <div class="align-cams" id="alignCams"></div>
-        <p class="meta-line" style="margin:0" id="alignResult">카메라를 켜고 기준을 고르면 front 카메라 화면 위에 학습 화면의 윤곽(빨간 선)이 겹쳐 보입니다.</p>
+        <p class="meta-line" style="margin:0" id="alignResult">카메라를 켜고 기준을 고르면 글로벌 카메라(front·front_2·front_3·front_4) 화면 위에 학습 화면의 윤곽(빨간 선)이 겹쳐 보입니다. 고른 기준에 없는 카메라는 그 카메라로 녹화한 최신 실물 데이터셋(없으면 로봇 구성을 저장할 때의 화면)으로 대신 보여 줍니다.</p>
         <p class="muted" style="margin:0">윤곽은 학습 화면의 것입니다. 긴 직선(선반 턱, 책상·테이프 모서리)은 하늘색 굵은 선, 나머지는 빨간 선입니다. 지금 화면의 같은 선이 이 선 위에 겹치면 맞은 것입니다. 중심과 네 모서리를 색으로 나눠 보여 줍니다(흰 중심, 빨강 왼쪽 위, 파랑 오른쪽 위, 초록 왼쪽 아래, 주황 오른쪽 아래). 십자는 학습 때 그 점의 자리, 동그라미는 지금 그 점이 보이는 자리, 화살표는 밀린 방향과 크기를 5배로 키운 것입니다. 화살표가 짧아지고 동그라미가 십자 가운데로 들어오도록 카메라를 아주 조금씩 움직이세요. 목표는 모서리 최대 3px 이하(초록)이고, 8px 이하는 노랑입니다. 맞춘 뒤에는 카메라를 테이프나 거치대로 고정하세요.</p>
         <div class="row"><button type="button" id="alignSaveRefs" title="연결상태 점검이 카메라 위치를 비교할 기준 사진을 지금 화면으로 바꿉니다 (로봇 구성 저장과 같은 기준)">지금 화면을 카메라 점검 기준으로 저장</button></div>
       </details>
@@ -1351,7 +1351,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <li>상태 칸에 경과 시간과 제어 주기(정상은 약 60Hz)가 표시됩니다.</li>
         <li><b>중지</b>: 안전 정지(시작할 때 자세로 천천히 이동 → 손목 카메라가 위를 보게 돌리고 그리퍼 닫기 → 출력 서서히 줄이기 → 토크 끄기)로 끝냅니다. 몇 초 걸립니다(협동 로봇은 두 팔을 차례로). 안전 정지 중에 중지를 다시 눌러도 내려놓기를 끝까지 마칩니다. 바로 멈춰야 하면 <b>강제 종료</b>를 누르세요.</li>
         <li><b>손목 회전 보정</b>(로봇 구성 → 구성 바꾸기): 리더 그리퍼가 팔로워 집게와 90° 돌아가게 조립된 세트는 +90° 또는 −90°를 고릅니다. 텔레옵·녹화에서 팔로워 손목이 리더 손목 + 보정값으로 움직이고, 녹화되는 동작도 보정된 값입니다(평가에는 쓰지 않음). 손목은 한 바퀴(±180°) 안에서만 움직이므로, 보정한 쪽으로는 손목을 90° 덜 돌릴 수 있습니다. 보정을 바꾸기 전과 후의 녹화는 서로 다른 데이터셋에 담으세요.</li>
-        <li><b>글로벌 카메라 추가</b>(3.19.0): front, front_2 말고도 <b>front_3</b>, <b>front_4</b>(선택)를 지정할 수 있습니다. 지정한 카메라는 화면에 나오고 녹화에도 모두 들어갑니다. 카메라 수가 다른 데이터셋끼리는 합칠 수 없으니, 카메라를 늘린 뒤의 녹화는 새 데이터셋에 담으세요. 평가는 모델이 학습한 카메라만 엽니다(front_3·front_4 없이 학습한 모델이면 두 카메라는 열지 않음).</li>
+        <li><b>글로벌 카메라 추가</b>(3.19.0): front, front_2 말고도 <b>front_3</b>, <b>front_4</b>(선택)를 지정할 수 있습니다. 지정한 카메라는 화면에 나오고 녹화에도 모두 들어갑니다. 카메라 수가 다른 데이터셋끼리는 합칠 수 없으니, 카메라를 늘린 뒤의 녹화는 새 데이터셋에 담으세요. 평가는 모델이 학습한 카메라만 엽니다(front_3·front_4 없이 학습한 모델이면 두 카메라는 열지 않음). [카메라 위치 맞추기]의 윤곽도 front_3·front_4에 나옵니다(3.20.1). 고른 기준(예: 양팔 모델)에 그 카메라가 없으면 그 카메라로 녹화한 최신 실물 데이터셋을, 그것도 없으면 로봇 구성을 저장할 때의 화면을 기준으로 쓰고, 무엇을 썼는지 카메라 이름 아래에 적습니다.</li>
         <li>기본은 카메라 없이 실행합니다. 화면은 왼쪽 카메라 보기로 확인합니다. <a href="#h-rerun">Rerun 보기</a>를 켜면 카메라를 포함해 실행하고 영상을 Rerun으로 보냅니다.</li>
       </ul>
     </section>
@@ -3848,11 +3848,14 @@ async function checkAlign() {
   $("alignResult").hidden = true;
   $("alignCams").innerHTML = alignCams().map(cam => {
     const r = align.stats[cam] || {};
-    if (r.error || !r.ok) return `<div class="align-cam"><b>${cam}</b><span class="r">${r.error || r.msg || "계산 중…"}</span></div>`;
+    const esc = (t) => String(t ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+    // 3.20.1: the chosen reference has no such camera (front_3/front_4 with a two-arm model): say what stands in
+    const src = !r.ref_source ? "" : `<span class="muted">기준: ${r.ref_source === "setup" ? "로봇 구성 저장 때 화면 (이 카메라로 녹화한 데이터 없음)" : esc(r.ref_source) + " (고른 기준에 이 카메라가 없어 대신 씀)"}</span>`;
+    if (r.error || !r.ok) return `<div class="align-cam"><b>${cam}</b><span class="r">${esc(r.error || r.msg || "계산 중…")}</span>${src}</div>`;
     const cls = r.corner <= 3 ? "g" : r.corner <= 8 ? "y" : "r";
     const way = (dx, dy) => [Math.abs(dx) > 0.5 ? `${dx > 0 ? "오른쪽" : "왼쪽"} ${Math.abs(dx).toFixed(1)}` : "", Math.abs(dy) > 0.5 ? `${dy > 0 ? "아래" : "위"} ${Math.abs(dy).toFixed(1)}` : ""].filter(Boolean).join(", ") || "맞음";
     const pts = r.vectors.map(([, , dx, dy], i) => `<span class="align-pt"><i style="background:${(ALIGN_PTS[i] || [])[1]}"></i>${(ALIGN_PTS[i] || [""])[0]} ${way(dx, dy)}${Math.hypot(dx, dy) > 0.5 ? "px" : ""}</span>`).join("");
-    return `<div class="align-cam"><b>${cam}</b><span class="num"><span class="${cls}">모서리 최대 ${r.corner.toFixed(1)}px</span> · 중심 (${r.dx.toFixed(1)}, ${r.dy.toFixed(1)})px · 회전 ${r.rot.toFixed(2)}° · 크기 ${r.scale.toFixed(3)} · 일치점 ${r.inliers}${r.inliers < 40 ? ' <span class="y">(적음: 결과 불안정)</span>' : ""}</span><span class="align-pts">${pts}</span><span>${alignHint(r)}</span></div>`;
+    return `<div class="align-cam"><b>${cam}</b><span class="num"><span class="${cls}">모서리 최대 ${r.corner.toFixed(1)}px</span> · 중심 (${r.dx.toFixed(1)}, ${r.dy.toFixed(1)})px · 회전 ${r.rot.toFixed(2)}° · 크기 ${r.scale.toFixed(3)} · 일치점 ${r.inliers}${r.inliers < 40 ? ' <span class="y">(적음: 결과 불안정)</span>' : ""}</span><span class="align-pts">${pts}</span><span>${alignHint(r)}</span>${src}</div>`;
   }).join("");
   updateGhost();
 }

@@ -4052,14 +4052,53 @@ def real_episodes(root: Path, episodes: list[int]) -> list[int]:
     return episodes
 
 
-def reference_frame(repo: str, cam: str = "front", model: str = "") -> bytes:
+class NoCameraRef(RuntimeError):
+    """No real recording has this camera yet (3.20.1): where the camera is, its setup picture stands in."""
+    extra = {"no_camera_ref": True}
+
+
+def camera_ref_repos(cam: str, owner: str = "") -> list[str]:
+    """Real recordings that have this camera, the chosen reference's owner first, then the newest (3.20.1): a
+    reference without front_3/front_4 (a two-arm model) still shows those cameras' outlines from data that has them.
+    Eval runs and names with "sim" are left out (their views can be renders)."""
+    key, found = f"observation.images.{cam}", []
+    for info in DATA_HOME.glob("*/*/meta/info.json"):
+        repo = info.parent.parent
+        if repo.name.startswith("eval_") or "sim" in repo.name.lower():
+            continue
+        try:
+            if key in (json.loads(info.read_text()).get("features") or {}):
+                found.append((repo.parent.name == owner, info.stat().st_mtime, f"{repo.parent.name}/{repo.name}"))
+        except (OSError, ValueError):
+            continue
+    return [r for *_, r in sorted(found, reverse=True)]
+
+
+def reference_view(repo: str, cam: str = "front", model: str = "") -> tuple[bytes, str]:
+    """reference_frame, and where it came from: "" = the chosen model or dataset, else the recording used because
+    the chosen one has no such camera (3.20.1). NoCameraRef when no recording has it."""
+    episodes = None
+    if model:
+        d = json.loads((Path(model) / "train_config.json").read_text())["dataset"]
+        repo, episodes = d["repo_id"], d.get("episodes")
+    root = dataset_dir(repo)
+    if f"observation.images.{cam}" in (json.loads((root / "meta/info.json").read_text()).get("features") or {}):
+        return reference_frame(repo, cam, episodes=episodes), ""
+    for other in camera_ref_repos(cam, repo.split("/")[0])[:5]:
+        try:
+            return reference_frame(other, cam), other
+        except Exception:
+            continue
+    raise NoCameraRef(f"{cam}: 고른 기준에 이 카메라가 없고, 이 카메라로 녹화한 실물 데이터셋도 없습니다.")
+
+
+def reference_frame(repo: str, cam: str = "front", model: str = "", episodes: list | None = None) -> bytes:
     """The training view of one camera as JPEG: the median of the frame REF_TIME_S into up to REF_EPISODES
     episodes of a dataset, or of the dataset a model was trained on (its episodes only). Cached on disk."""
     import av
     import numpy as np
     import pandas as pd
 
-    episodes = None
     if model:
         d = json.loads((Path(model) / "train_config.json").read_text())["dataset"]
         repo, episodes = d["repo_id"], d.get("episodes")
@@ -4110,14 +4149,25 @@ def reference_entry(repo: str, model: str, cam: str) -> dict:
 
     k = (repo, model, cam)
     if k not in REF_CACHE:
-        if CONTROL and (model or not (DATA_HOME / repo).exists()):
-            q = urllib.parse.urlencode({"repo": repo, "model": model, "cam": cam})
-            status, _, body = remote.gpu_request("GET", "/api/reference?" + q, None, timeout=120)
-            if status != 200:
-                raise RuntimeError(json.loads(body or b"{}").get("error") or "GPU 노트북에서 기준 장면을 받지 못했습니다.")
-        else:
-            body = reference_frame(repo, cam, model)
-        gray = cv2.imdecode(np.frombuffer(body, np.uint8), cv2.IMREAD_GRAYSCALE)
+        try:
+            if CONTROL and (model or not (DATA_HOME / repo).exists()):
+                q = urllib.parse.urlencode({"repo": repo, "model": model, "cam": cam})
+                status, ctype, body = remote.gpu_request("GET", "/api/reference?" + q, None, timeout=120)
+                if status != 200:
+                    err = json.loads(body or b"{}")
+                    raise (NoCameraRef if err.get("no_camera_ref") else RuntimeError)(err.get("error") or "GPU 노트북에서 기준 장면을 받지 못했습니다.")
+                m = re.search(r'source="([^"]*)"', ctype or "")
+                source = m.group(1) if m else ""
+            else:
+                body, source = reference_view(repo, cam, model)
+            gray = cv2.imdecode(np.frombuffer(body, np.uint8), cv2.IMREAD_GRAYSCALE)
+        except NoCameraRef:
+            # no recording with this camera yet: the view saved with the robot setup (cam_refs, 320x240 grey)
+            gray = cv2.imread(str(camauto.ref_path(CAM_REFS, ROBOT_MODE, cam)), cv2.IMREAD_GRAYSCALE)
+            if gray is None:
+                raise
+            gray = cv2.resize(gray, (640, 480), interpolation=cv2.INTER_LINEAR)
+            body, source = cv2.imencode(".jpg", gray)[1].tobytes(), "setup"
         kp, des = cv2.ORB_create(3000).detectAndCompute(gray, None)
         edges = cv2.Canny(cv2.GaussianBlur(gray, (5, 5), 0), 60, 140)
         n, lab, st, _ = cv2.connectedComponentsWithStats(edges, connectivity=8)
@@ -4133,19 +4183,23 @@ def reference_entry(repo: str, model: str, cam: str) -> dict:
             cv2.line(rgba, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 0, 230), 9, cv2.LINE_AA)
         for x1, y1, x2, y2 in (segs[:, 0] if segs is not None else []):
             cv2.line(rgba, (int(x1), int(y1)), (int(x2), int(y2)), (255, 230, 0, 255), 5, cv2.LINE_AA)
-        REF_CACHE[k] = {"jpg": body, "kp": kp, "des": des, "edges": cv2.imencode(".png", rgba)[1].tobytes()}
+        REF_CACHE[k] = {"jpg": body, "kp": kp, "des": des, "edges": cv2.imencode(".png", rgba)[1].tobytes(), "source": source}
     return REF_CACHE[k]
 
 
 def alignment(repo: str, model: str = "", cam: str = "front") -> dict:
     """How far the live view of one camera sits from its training view (ORB + RANSAC similarity): centre shift,
     rotation, scale, largest corner shift (px), the shift of the centre and the four corners, matches kept."""
-    import numpy as np
-
     live = PREVIEW.raw.get(cam) or PREVIEW.frames.get(cam)
     if not live:
         raise RuntimeError("카메라를 먼저 켜세요.")
     ref = reference_entry(repo, model, cam)
+    return dict(_alignment(ref, live), ref_source=ref["source"])
+
+
+def _alignment(ref: dict, live: bytes) -> dict:
+    import numpy as np
+
     gray = cv2.imdecode(np.frombuffer(live, np.uint8), cv2.IMREAD_GRAYSCALE)
     kp, des = cv2.ORB_create(3000).detectAndCompute(gray, None)
     if ref["des"] is None or des is None or len(kp) < 20:
@@ -4348,15 +4402,15 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/reference?"):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             try:
-                body = reference_frame(q.get("repo", [""])[0], q.get("cam", ["front"])[0], q.get("model", [""])[0])
+                body, source = reference_view(q.get("repo", [""])[0], q.get("cam", ["front"])[0], q.get("model", [""])[0])
                 self.send_response(200)
-                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Type", f'image/jpeg; source="{source}"' if source else "image/jpeg")
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "max-age=300")
                 self.end_headers()
                 self.wfile.write(body)
             except Exception as exc:
-                self._json({"error": str(exc)}, 400)
+                self._json({"error": str(exc), **(getattr(exc, "extra", None) or {})}, 400)
         elif self.path.startswith("/api/align?"):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             try:
