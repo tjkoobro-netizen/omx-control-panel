@@ -3116,6 +3116,9 @@ def align_after_eval(plan: dict, eval_proc) -> None:
     if not LAST_RESULT.get("exit_ok"):  # the Host fails the mission on the eval error itself: nobody looks
         LAST_RESULT["align"] = dict(align, ok=False, skipped="평가가 정상으로 끝나지 않음", on_shelf=None)
         placement_skipped("평가가 정상으로 끝나지 않음", plan["slot"], plan["box"])
+        # 3.21.1: final here too. A handover eval that ended in an error (not placed) had already set stage "align"
+        # before coming here, and nothing closed it: the Host waited for a final result (HOST_BUSY, 11/21 14:02)
+        LAST_RESULT.update(stage="done", final=True)
         return
     LAST_RESULT.update(stage="align", final=False, align=align)
 
@@ -3453,6 +3456,17 @@ def align_ended(job, proc) -> None:
     elif start_pose:  # the runner goes back to where it found the arms: compare with that, not the eval's end
         ALIGN["before"] = start_pose
     LAST_RESULT["align"]["rest_ref"] = ref or ("eval_end" if ALIGN.get("before") else None)
+    if info.get("handover") and r.get("handover_align") == "hold":
+        # 3.21.1: after taking the arms the runner found no safe way home and stopped in place with the torque on
+        # (exit 2): the arms wait for a person, as when the handover was not taken. [홈 위치로 이동] on the screen
+        # (omx_return_home) after checking; a control-tower home return is refused while this holds
+        ho = LAST_RESULT.get("handover") or {}
+        ho["fallback"] = "hold"
+        HANDOVER["hold"] = True
+        LAST_RESULT.update(stage="hold", final=False)
+        job.lines.append("[omx] 정렬 실행기가 안전한 홈 경로를 찾지 못해 팔을 토크가 켜진 채 제자리에 두었습니다. "
+                         "상자와 팔을 확인한 뒤 팔을 받친 채 [홈 위치로 이동]을 누르세요")
+        return
     if info.get("land_after"):
         LAST_RESULT.update(stage="release", final=False)
 
@@ -4790,6 +4804,11 @@ class Handler(BaseHTTPRequestHandler):
                 # a control-tower (Host) request moves the arms only while armed is on (TK 11/16); the screen button as before
                 if body.get("source") == "mqtt" and not ARMED["on"]:
                     raise RuntimeError(f"armed 꺼짐: 관제 홈 복귀 거절 ({ARMED.get('off_reason') or '꺼짐'})")
+                if body.get("source") == "mqtt" and (ALIGN.get("hold") or HANDOVER.get("hold")):
+                    # 3.21.1: the arms were left in place with the torque on (no safe way back): a person checks first
+                    raise Refused("팔이 토크가 켜진 채 제자리에서 기다리는 중이라 관제 홈 복귀를 거절합니다. "
+                                  "현장에서 상자와 팔을 확인한 뒤 화면의 [홈 위치로 이동]을 누르세요", refused="hold",
+                                  hold="align" if ALIGN.get("hold") else "handover")
                 self._json(home_return())
             elif self.path == "/api/kill":
                 set_armed(False, {"home": "즉시 중단", "freeze": "비상 정지"}.get(body.get("mode"), "강제 종료"))

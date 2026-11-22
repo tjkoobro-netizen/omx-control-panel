@@ -238,7 +238,12 @@ def request_hold_release(hold_id: str, checks: dict, wait_s: float = 10.0) -> di
                 res = json.loads(files["result"].read_text())
                 if res.get("request_id") == request_id:
                     return res
-            except (OSError, ValueError):
+                # the Host keeps recent answers by request_id (RO:PORT #103): a newer request's
+                # answer on top must not hide ours
+                mine = (res.get("results") or {}).get(request_id)
+                if isinstance(mine, dict):
+                    return mine
+            except (OSError, ValueError, AttributeError):
                 pass
             time.sleep(0.1)
         return None

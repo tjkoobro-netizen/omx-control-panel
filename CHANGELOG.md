@@ -1,5 +1,12 @@
 # OMX 제어판 버전 기록
 
+## 3.21.1 (2026-11-21) - 넘겨받기: 평가 오류 뒤 결과 닫기, 제자리 정지 뒤 관제 홈 복귀 거절
+
+- 넘겨받기 모드에서 평가가 오류로 끝나고(예: 추론 통신 끊김) 정렬 실행기가 `not_placed`로 끝나면, 결과(`last_result`)를 `stage "done"`, `final true`로 닫음. 평가 오류(`exit_ok`, `err`)는 그대로. 지금까지는 `stage "align"`, `final false`로 남아 Host가 최종 결과를 기다리며 새 명령을 거절했음(`HOST_BUSY`)
+- 넘겨받은 뒤 정렬 실행기가 안전한 홈 경로를 못 찾아 팔을 토크가 켜진 채 제자리에 두면(`result.handover_align "hold"`, 종료 코드 2), 패널도 대기로 둠: `stage "hold"`, `handover.fallback "hold"`, 작업 기록에 안내. 화면의 [홈 위치로 이동]은 그대로 씀(사람이 확인한 뒤). 지금까지는 끝남으로 처리해 관제 홈 복귀가 선반 근처 자세에서 바로 움직일 수 있었음
+- 정렬이나 넘겨받기가 제자리에서 기다리는 동안(`hold`) 관제의 `/api/home/return`(`"source": "mqtt"`)은 400 거절, `"refused": "hold"`, `"hold": "align" | "handover"`. 화면 버튼은 그대로
+- 계기: 11/21 14:02 넘겨받기 첫 실물 시험(평가 중 UDP 추론 timed out → Host가 HOST_BUSY에 묶임), Host 세션이 찾은 빈틈. TK 승인(Host 세션 전달)
+
 ## 3.21.0 (2026-11-19) - 협동 구성에서 한 팔 모델 평가
 
 - 평가 설정에 **실행할 팔**(협동 구성에서만 보임): 두 팔(기본, 관절 12개 모델) / 왼팔만 / 오른팔만(관절 6개 모델). API `/api/eval/start`의 `"arm": "left" | "right"`
