@@ -152,6 +152,12 @@ class ReturnWatch:
 RETURN = ReturnWatch()
 
 
+def reinit_from_env() -> None:
+    """Objects of this module that read the environment when created at import: made again from the current one
+    (warm_wait, 3.22.3). Anything new of that kind belongs here too (sbw/te.py compares a warm start with a cold one)."""
+    RETURN.__init__()
+
+
 class PlaceWatch:
     """OMX_PLACE_JUDGE=<json> (3.18.0, control-tower eval with end_on_place): Guide's handover judge (handover_judge.py)
     on the raw top-camera frame (before the target circle is drawn) and the joints, in its own thread at rate_hz so the
@@ -263,6 +269,20 @@ def _make_place() -> PlaceWatch | None:
 
 
 PLACE: PlaceWatch | None = None
+DROP = None  # omx_dropwatch.DropWatch (OMX_DROP_WATCH, 3.23.0): records a dropped box, never acts
+
+
+def _make_drop():
+    path = os.environ.get("OMX_DROP_WATCH", "").strip()
+    if not path:
+        return None
+    try:
+        import omx_dropwatch
+
+        return omx_dropwatch.DropWatch(path)
+    except Exception as exc:  # noqa: BLE001  no watcher = the eval runs as before
+        _say(f"[omx] 떨어뜨림 감지를 켜지 못했습니다 ({type(exc).__name__}: {exc}). 평소처럼 평가합니다")
+        return None
 
 
 def _handover_ready() -> bool:
@@ -837,6 +857,9 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
     interval = 1 / fps
     start = due = time.perf_counter()  # frames on a fixed schedule (start + k / fps): no drift over an episode
     watch = policy is not None and dataset is not None and RETURN.on
+    drop = DROP is not None and policy is not None and dataset is not None  # 3.23.0: not tied to RETURN.on
+    if drop:
+        DROP.reset(time.time())
     if watch:
         RETURN.reset()
         EPISODE_END.clear()
@@ -851,6 +874,7 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
                 EPISODE_END["end_reason"] = "stopped"
             break
         obs = robot.get_observation()
+        raw = obs  # before the target circle is drawn (the drop watch reads the raw top frame)
         if dataset is not None:
             LAST_STATE.update({k: v for k, v in obs.items() if k.endswith(".pos")})
             STATE_TS["t"] = time.time()
@@ -880,6 +904,11 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
             if filt is not None:
                 act = filt(act)
             action = make_robot_action(act, dataset.features)
+            if drop:
+                try:
+                    DROP.feed(raw, action, time.time())
+                except Exception:  # noqa: BLE001  record only: never disturb the loop
+                    pass
         elif teleop is not None:
             action = teleop.get_action()
         else:
@@ -989,6 +1018,12 @@ def run_episodes(cfg: RunConfig, robot, teleop, policy: Policy | None, dataset, 
                 EPISODE_END["loop_ms"] = {"p50": round(1000 * per[len(per) // 2], 1), "p99": round(1000 * per[int(0.99 * (len(per) - 1))], 1)}
             if PLACE is not None:
                 EPISODE_END["judge_watch"] = PLACE.summary()
+            if DROP is not None:
+                EPISODE_END["drop_watch"] = DROP.finish()
+                for s in EPISODE_END["drop_watch"]["signals"]:
+                    if not s.get("ignored"):
+                        _say(f"[omx] 떨어뜨림 감지(기록만): {s['side']} 팔 {s['since_start_s']}초, "
+                             f"{(s.get('stage2') or {}).get('result')} - {(s.get('stage2') or {}).get('why')}")
             _write_episode_end(d.repo_id, index)
         if not EVENTS["stop_recording"] and (recorded < d.num_episodes - 1 or EVENTS["rerecord_episode"]):
             logging.info("Reset the environment")
@@ -1042,6 +1077,36 @@ def run_teleop(cfg: RunConfig, robot, teleop) -> None:
             teleop.disconnect()
 
 
+def wrist_check(robot) -> None:
+    """3.22.0 (OMX_WRIST_CHECK, evaluation): which wrist camera is on which arm, from a small gripper move
+    (omx_wristcheck). Exchanged: this run swaps them (the panel corrects robot.json). Unclear: no policy start."""
+    if not os.environ.get("OMX_WRIST_CHECK"):
+        return
+    import omx_wristcheck
+
+    def stop() -> bool:
+        return ABORT["on"] or EVENTS["stop_recording"] or omx_safe_start.FREEZE.is_set()
+
+    try:
+        res = omx_wristcheck.check(robot, stop)
+    except InterruptedError:
+        return  # 중지 / 즉시 중단 / 비상 정지 during the move: handled as at any other moment before the start
+    except Exception as exc:  # a camera that gives no frame: no guess either
+        res = {"ok": False, "swapped": False, "why": f"확인 중 오류 ({type(exc).__name__}: {exc})"[:200]}
+    if res is None:
+        return
+    _say(omx_wristcheck.line(res))
+    if res["ok"] and res["swapped"]:
+        ROBOT_CAMS.update(robot.cameras)  # the live views follow the exchange
+        _say(f"[omx] 손목 카메라 확인: 저장된 배정과 반대입니다. 이번 실행에서 wrist_left와 wrist_right를 바꿔 시작합니다 "
+             f"(로봇 구성도 고침, {res['ms']}ms)")
+    elif res["ok"]:
+        _say(f"[omx] 손목 카메라 확인: 그리퍼를 움직여 본 카메라가 저장된 배정과 같습니다 ({res['ms']}ms)")
+    else:
+        _say(f"[omx] 손목 카메라 확인 실패: {res['why']}. 정책을 시작하지 않습니다")
+        raise SystemExit(2)
+
+
 def run(cfg: RunConfig) -> None:
     omx_safe_start.install()
     problems = omx_safe_start.preflight(omx_safe_start.run_arms(cfg.robot, cfg.teleop))
@@ -1061,6 +1126,10 @@ def run(cfg: RunConfig) -> None:
     global MOTOR_OUT, TARGET, PLACE
     TARGET = _make_target()
     PLACE = _make_place()
+    global DROP
+    DROP = _make_drop()
+    if DROP is not None:
+        _say(f"[omx] 떨어뜨림 감지 {getattr(sys.modules.get('omx_dropwatch'), 'VERSION', '?')} (기록만: 평가와 팔 동작은 그대로)")
     if PLACE is not None:
         _say(f"[omx] 놓음 판정 {PLACE.version} ({'기록만' if PLACE.shadow else '놓으면 평가를 마치고 정렬에 넘김'})")
     if TARGET is not None:
@@ -1088,6 +1157,8 @@ def run(cfg: RunConfig) -> None:
         if teleop is not None:
             teleop.connect()
         robot.connect()
+        if teleop is None and policy is not None:
+            wrist_check(robot)
         run_episodes(cfg, robot, teleop, policy, dataset, viewer)
         clean = True
     finally:
@@ -1150,5 +1221,40 @@ def main() -> None:
     os._exit(0)
 
 
-if __name__ == "__main__":
+WARM_FLAG = "--omx-warm"
+WARM_BUSY = "/dev/shm/omx_warm_busy_{pid}"  # this warm process took a run: it holds the robot now (other accounts see it)
+
+
+def warm_wait() -> None:
+    """3.22.2 (--omx-warm): the panel keeps one process ready for the next evaluation, the imports done (about
+    2-3 s of a start). It holds no robot, camera or model. One line on stdin {"argv": [...], "env": {...}} starts
+    the run as if launched with them; stdin then carries the usual controls. stdin closed (the panel ended): exit."""
+    t = time.perf_counter()
+    for name in ("torch", "cv2", "lerobot.datasets.lerobot_dataset", "lerobot.policies.factory", "omx_async",
+                 "omx_infer", "omx_wristcheck", "omx_camstats"):
+        try:
+            __import__(name)
+        except Exception as exc:  # the run imports it again and reports it there
+            _say(f"[omx] warm: {name} 미리 불러오기 실패 ({exc})")
+    ready = time.perf_counter()
+    line = sys.stdin.readline()
+    if not line.strip():
+        os._exit(0)
+    req = json.loads(line)
+    Path(WARM_BUSY.format(pid=os.getpid())).write_text(str(time.time()))
+    os.environ.clear()
+    os.environ.update(req["env"])
+    # 3.22.3: what this module built from the environment when it was imported (before the run's environment was
+    # known) is built again. RETURN read OMX_END_ON_RETURN at import: in 3.22.2 a warm evaluation ran with it off,
+    # and with it the placement judge (handover) and the end on return (11/24 00:28, found by the Guide session)
+    reinit_from_env()
+    sys.argv = [sys.argv[0], *req["argv"]]
+    _say(f"[omx] warm: 미리 띄운 평가 프로그램으로 시작합니다 (불러오기 {ready - t:.1f}초는 미리 끝남)")
     main()
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == [WARM_FLAG]:
+        warm_wait()
+    else:
+        main()
