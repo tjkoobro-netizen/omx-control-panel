@@ -25,6 +25,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -312,10 +313,58 @@ def camera_gate() -> None:
     if len(refs) < 2:
         return
     PREVIEW.stop()  # the check needs the cameras itself
-    wrong = camauto.swapped(cameras, refs, {p: camauto.grab_gray(p) for p in cameras.values() if Path(p).exists()})
+    # 3.22.1: all at once (one after another 2.7 s for 4 cameras, at once 0.6 s: most of the start's answer time)
+    paths = [p for p in cameras.values() if Path(p).exists()]
+    with ThreadPoolExecutor(max_workers=max(1, len(paths))) as pool:
+        frames = dict(zip(paths, pool.map(camauto.grab_gray, paths)))
+    wrong = camauto.swapped(cameras, refs, frames)
     if wrong:
         raise RuntimeError(f"{', '.join(wrong)} 화면이 다른 카메라의 기준 화면과 일치합니다. 케이블이 바뀐 것 같습니다. "
                            "로봇 구성에서 화면을 확인하고 저장한 뒤 시작하세요.")
+
+
+DROP_WATCH_FILE = LOG_DIR / "drop_watch.json"  # omx_run's drop watch settings (OMX_DROP_WATCH, 3.23.0)
+DROP_FRAMES = LOG_DIR / "drop_frames"  # the top frame at each confirmed drop
+
+
+def drop_env(eval_info: dict, arm: str | None, cams: dict) -> dict:
+    """3.23.0: the box drop watch of a cooperative evaluation, record mode (never ends the run, never moves an arm).
+    Its own switch, not tied to end_on_return. cfg "drop_watch": false turns it off; "drop_tray_roi" [v0, v1, u0, u1]
+    replaces the tray region of the top camera."""
+    if ROBOT_MODE != "bimanual" or arm or CFG.get("drop_watch", True) is False or "front" not in cams:
+        return {}
+    box = eval_info.get("target_marker")
+    conf = {"box_ids": [int(box)] if box is not None else None, "camera": "front", "frame_dir": str(DROP_FRAMES),
+            "repo_id": eval_info.get("repo_id")}
+    if CFG.get("drop_tray_roi"):
+        conf["tray_roi"] = CFG["drop_tray_roi"]
+    _write_json(DROP_WATCH_FILE, {k: v for k, v in conf.items() if v is not None})
+    return {"OMX_DROP_WATCH": str(DROP_WATCH_FILE)}
+
+
+WRIST_CHECK_PREFIX = "[omx] wrist_check "  # omx_run.py / omx_wristcheck.py (3.22.0)
+
+
+def wrist_check_on() -> bool:
+    """3.22.0: before a cooperative evaluation starts, each gripper opens a little and the wrist camera whose picture
+    changed is that arm's (both wrist cameras are the same model with the same serial). cfg "wrist_check": false
+    turns it off."""
+    return ROBOT_MODE == "bimanual" and CFG.get("wrist_check", True) is not False
+
+
+def wrist_swap_setup(chk: dict) -> str:
+    """The evaluation's wrist check found wrist_left / wrist_right exchanged and swapped them in that run: robot.json
+    follows at once (the alignment runner reads it after the eval). No person needed, the evidence is the gripper move
+    (TK 11/23). Only when the saved paths still are the ones the run started with."""
+    setup = load_setup() or {}
+    by = {c.get("name"): c for c in (setup.get("cameras") or {}).get("bimanual") or []}
+    left, right, was = by.get("wrist_left"), by.get("wrist_right"), chk.get("was") or {}
+    if not left or not right or (left.get("path"), right.get("path")) != (was.get("left"), was.get("right")):
+        return "kept: 저장된 손목 경로가 실행을 시작할 때와 달라 고치지 않음"
+    left["path"], right["path"] = right["path"], left["path"]
+    SETUP_FILE.write_text(json.dumps(setup, ensure_ascii=False, indent=2))
+    apply_setup(setup)
+    return "fixed"
 
 
 WRIST_OFFSETS = (0, 90, -90)  # degrees; 180 would leave no range once clamped to one turn
@@ -422,6 +471,8 @@ def other_robot_processes() -> list[str]:
         user, pid, args = (line.split(None, 2) + ["", ""])[:3]
         if pid in mine or "omx_web.py" in args:
             continue
+        if WARM_FLAG in args and not Path(WARM_BUSY.format(pid=pid)).exists():
+            continue  # a ready evaluation process (3.22.2) that has not taken a run: it holds no robot
         if re.search(r"lerobot-(teleoperate|record)|omx_(run|record|teleop|return_home)\.py", args):
             found.append(f"{user} (PID {pid})")
     return found
@@ -1308,10 +1359,16 @@ class Job:
         self.slow = collections.deque(maxlen=2000)  # (time, Hz) of "Record loop is running slower" warnings
         self.slow_total = 0
         env = dict(os.environ, PYTHONUNBUFFERED="1", OMX_PORT=str(PORT), **(env_extra or {}))  # same LIVE files
-        self.proc = subprocess.Popen(
-            cmd, cwd=LEROBOT_DIR, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True,
-        )
+        warm = WARM.take(cmd, env) if kind == "eval" else None
+        if warm is not None:
+            self.proc = warm
+            info["warm"] = True
+            self.log_file.write(f"$ (미리 띄운 평가 프로그램 PID {warm.pid}에 위 인자를 넘김)\n")
+        else:
+            self.proc = subprocess.Popen(
+                cmd, cwd=LEROBOT_DIR, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True,
+            )
         self.reader = threading.Thread(target=self._read_output, daemon=True)
         self.reader.start()
 
@@ -1366,6 +1423,7 @@ class Job:
 
     def _finish(self, proc) -> None:
         proc.wait()
+        Path(WARM_BUSY.format(pid=proc.pid)).unlink(missing_ok=True)
         self.info["phase"] = "끝남"
         self.info["returncode"] = proc.returncode
         self.info["err"] = omx_errors.classify(self.lines, proc.returncode)
@@ -1479,6 +1537,14 @@ class Job:
             self.info["safe_start"] = line.split("safe freeze:", 1)[1].strip()
             if "기다립니다" in line:
                 self.info["phase"] = "비상 정지 · 제자리에서 기다림 ([홈 위치로 이동])"
+        elif line.startswith(WRIST_CHECK_PREFIX) and self.kind == "eval":
+            try:
+                chk = json.loads(line[len(WRIST_CHECK_PREFIX):])
+            except ValueError:
+                chk = {"ok": False, "why": "결과를 읽지 못함"}
+            if chk.get("ok") and chk.get("swapped") and chk.get("mode") == "pair":
+                chk["setup"] = wrist_swap_setup(chk)
+            self.info["wrist_check"] = chk
         elif "[omx] safe stop:" in line:
             self.info["landing"] = True
             self.info["phase"] = "천천히 내려놓는 중"
@@ -2391,6 +2457,87 @@ def thread_env(threads: int) -> dict:
     return {"OMP_NUM_THREADS": n, "MKL_NUM_THREADS": n, "OPENBLAS_NUM_THREADS": n, "OMX_TORCH_THREADS": n}
 
 
+WARM_FLAG = "--omx-warm"  # omx_run.py: wait, imports done, for the next evaluation (3.22.2)
+WARM_BUSY = "/dev/shm/omx_warm_busy_{pid}"  # written by that process when it takes a run (it holds the robot then)
+# read when torch / numpy / LeRobot are imported: a ready process started with other values is not used
+WARM_IMPORT_KEYS = re.compile(r"^(OMP_|MKL_|OPENBLAS_|HF_|CUDA_|PYTORCH_|TORCH_|LEROBOT|PYTHON)")
+WARM_IDLE_S = 5.0  # nothing ran here this long: start the next ready process (never during a run: its imports use CPU)
+WARM_RETRY_S = 30.0  # a ready process that ended by itself is started again only after this
+
+
+class Warm:
+    """3.22.2: one omx_run.py kept ready for the next evaluation (python, torch, LeRobot and the panel's modules
+    imported, about 2-3 s of each start). It holds no robot, camera or model, so it is not a job: /api/status
+    job.running stays false until an evaluation takes it. An evaluation hands it its arguments and environment on
+    stdin (omx_run.warm_wait); anything that does not fit (another python, other thread settings) starts as before.
+    It ends by itself when the panel ends (its stdin closes). cfg "warm_eval": false turns it off."""
+
+    def __init__(self) -> None:
+        self.proc, self.cmd, self.env, self.started, self.error = None, None, None, 0.0, None
+        self.idle_since = time.time()
+        self.lock = threading.Lock()
+
+    def enabled(self) -> bool:
+        return CFG.get("warm_eval", True) is not False
+
+    def alive(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def ensure(self) -> None:
+        """From the status poll: one ready process while nothing runs here and an arm of this setup is plugged in."""
+        if JOB.running() or STANDBY.alive():
+            self.idle_since = time.time()
+            return
+        if not self.enabled() or not robot_here() or time.time() - self.idle_since < WARM_IDLE_S:
+            return
+        with self.lock:
+            if self.alive() or (self.proc is not None and time.time() - self.started < WARM_RETRY_S):
+                return
+            cmd = [str(VENV_BIN / "python"), str(TOOLS_DIR / "omx_run.py"), WARM_FLAG]
+            env = dict(os.environ, PYTHONUNBUFFERED="1", OMX_PORT=str(PORT), **thread_env(EVAL_THREADS))
+            self.proc = subprocess.Popen(cmd, cwd=LEROBOT_DIR, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                         stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True)
+            self.cmd, self.env, self.started, self.error = cmd, env, time.time(), None
+
+    def take(self, cmd: list, env: dict):
+        """The ready process, now running this evaluation; None: start it as before."""
+        with self.lock:
+            proc, self.proc = self.proc, None
+            self.idle_since = time.time()
+            if proc is None:
+                return None
+            same = {k: v for k, v in self.env.items() if WARM_IMPORT_KEYS.match(k)} == \
+                   {k: v for k, v in env.items() if WARM_IMPORT_KEYS.match(k)}
+            if proc.poll() is not None or list(cmd[:2]) != self.cmd[:2] or not same:
+                self._end(proc)
+                return None
+            try:
+                proc.stdin.write(json.dumps({"argv": list(cmd[2:]), "env": env}, ensure_ascii=False) + "\n")
+                proc.stdin.flush()
+            except OSError:
+                self._end(proc)
+                return None
+            return proc
+
+    @staticmethod
+    def _end(proc) -> None:
+        if proc.poll() is None:
+            proc.terminate()  # it waits on stdin and holds nothing: nothing to land
+
+    def stop(self) -> None:
+        with self.lock:
+            proc, self.proc = self.proc, None
+        if proc is not None:
+            self._end(proc)
+
+    def status(self) -> dict:
+        return {"on": self.enabled(), "ready": self.alive(), "pid": self.proc.pid if self.alive() else None,
+                "age_s": round(time.time() - self.started) if self.alive() else None, "error": self.error}
+
+
+WARM = Warm()
+
+
 EVAL_HOME_FILE = LOG_DIR / "eval_home_pose.json"  # start pose of the running eval (for omx_return_home.py)
 FREEZE_WAIT_S = 3.0  # 비상 정지: force-quit when the eval does not confirm the stop by then
 ABORT_WAIT_S = 5.0  # 즉시 중단: kill and use omx_return_home.py if the safe stop has not started by then
@@ -2877,7 +3024,8 @@ def eval_result(job) -> dict:
             "target_marker": info.get("target_marker"), "target_drawn": info.get("target_drawn"),
             "last_episode": {k: end.get(k) for k in ("episode", "at", "aborted", "returned", "elapsed_s", "end_reason",
                                                      "judged_at", "loop_ms")} if end else None,
-            "arms": arms or None,
+            "arms": arms or None, "wrist_check": info.get("wrist_check"),
+            "drop_watch": (end or {}).get("drop_watch"),
             "home_check": "unknown" if not checks or None in checks else "ok" if all(checks) else "far"}
 
 
@@ -3978,7 +4126,8 @@ def start_eval(body: dict) -> dict:
               | ({"OMX_HOME_POSE": str(omx_home.write_run_file(home, RUN_HOME_FILE))} if home else {}) | tenv
               | {"OMX_EPISODE_END": str(EPISODE_END_FILE)} | ({"OMX_END_ON_RETURN": "1"} if end_on_return else {})
               | ({"OMX_FAST_RELEASE": "1"} if fast_release else {}) | ({} if record else {"OMX_NO_RECORD": "1"})
-              | (handover_env(ho) if ho else {}) | ({"OMX_ARM_SIDE": arm} if arm else {}))
+              | (handover_env(ho) if ho else {}) | ({"OMX_ARM_SIDE": arm} if arm else {})
+              | ({"OMX_WRIST_CHECK": "1"} if wrist_check_on() else {}) | drop_env(eval_info, arm, eval_cams))
     EVAL_HOME_POSE.clear()
     EVAL_HOME_POSE.update(repo_id=repo_id, home=home)
     if ho and ho["mode"] == "handover":
@@ -4423,7 +4572,12 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/motor_output":
             self._json(motor_output())
         elif self.path == "/api/status":
+            try:
+                WARM.ensure()
+            except Exception as exc:
+                WARM.error = str(exc)[:200]
             self._json({
+                "warm": WARM.status(),
                 "user": USER,
                 "version": VERSION,
                 "gpu_name": CFG.get("gpu_name"),
