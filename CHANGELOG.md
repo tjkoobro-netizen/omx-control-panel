@@ -1,5 +1,10 @@
 # OMX 제어판 버전 기록
 
+## 3.24.1 (2026-11-24) - 쟁반 놓음 판정 결과에 이번 미션 쟁반 사진 확인 여부
+
+- 출고 쟁반 놓음 판정(`tray_placed`, `last_result.placement`, `last_result.pinky`)에 `tray_reference`, `tray_reference_state`("ok" | "not_checked"), `pre_mission_match`, `start_vs_mission_ref`를 넣음. 판정기가 첫 위 카메라 프레임을 이번 미션 직전 쟁반 사진(tray_check)과 비교해 비었음을 확인했을 때만 "ok"·true. 관제 Host는 평가 뒤 상차 확인과 같은 규칙으로 이 값이 있을 때만 쟁반 판독을 믿음
+- 계기: Host가 판정 순간 첫 완료 보고(Pinky 출발)를 보내도록 맞추며(TK 11/24)
+
 ## 3.24.0 (2026-11-24) - 출고 평가 중 쟁반 놓음 판정, 홈 복귀 중 쟁반 구역 재진입 감시
 
 - 관제 출고(`pinky_check`) 평가에서 Guide의 쟁반 놓음 판정(`tray_judge.py` 1124b, omx_tools에 함께 설치)을 평가 루프 옆 별도 스레드로 약 6Hz 돌림. 입력은 front(쟁반)·front_2(칸) 원본 프레임, 관절, 두 팔 그리퍼 명령·실제값. 촬영 시각이 3초 넘게 지난 프레임은 넘기지 않음. 복귀하면 끝내기(`end_on_return`)와 상관없이 따로 켜짐

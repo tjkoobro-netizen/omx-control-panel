@@ -3451,6 +3451,7 @@ def pinky_after_eval(plan: dict, eval_proc) -> None:
         LAST_RESULT["pinky"] = {"ran": False, "skipped": "tray_placed", "source": "eval_judge", "box": plan["box"],
                                 "slot": plan["slot"], "pinky_id": plan.get("pinky_id"), "pinky_no": plan.get("pinky_no"),
                                 **{k: placed.get(k) for k in ("on_pinky", "slot_empty", "tray_marker", "tray_changed",
+                                                              "tray_reference", "tray_reference_state", "pre_mission_match",
                                                               "observed_ts", "observed_clock", "judged_at")},
                                 "on_shelf": False if placed.get("slot_empty") else None, "reported_at": now_iso(),
                                 **({"pre_mission": plan["tray"]} if plan.get("tray") else {})}

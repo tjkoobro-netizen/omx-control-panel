@@ -349,10 +349,18 @@ class TrayWatch:
                 if r.get("placed") and self.hit is None:
                     h = dict(getattr(self.judge, "hit", None) or r)
                     obs_ts = min(used.values()) if used else None
+                    # 3.24.1: was the tray compared with this mission's own empty-tray photo (tray_check right
+                    # before the eval)? The judge says so when its first top frame was checked against it; the
+                    # Host trusts the tray reading only then (same rule as the pinky_check after an unloading)
+                    ref = (h.get("tray_info") or {}).get("tray_reference")
+                    checked = ref == "first_frame(checked_vs_pre_mission)"
                     self.hit = {"operation": "OUTBOUND", "on_pinky": h.get("on_pinky"), "slot_empty": h.get("slot_empty"),
                                 "slot": self.slot, "box": self.box, "tips_clear": h.get("tips_clear"),
                                 "grippers_released": h.get("grippers_released"), "tray_marker": h.get("tray_marker"),
-                                "tray_changed": h.get("tray_changed"), "observed_ts": obs_ts, "observed_clock": "capture",
+                                "tray_changed": h.get("tray_changed"), "tray_reference": ref,
+                                "tray_reference_state": "ok" if checked else "not_checked", "pre_mission_match": checked,
+                                "start_vs_mission_ref": (h.get("tray_info") or {}).get("start_vs_mission_ref"),
+                                "observed_ts": obs_ts, "observed_clock": "capture",
                                 "observed_cameras": {c: {"ts": v, "at": _iso(v)} for c, v in used.items()},
                                 "source": "eval_judge", "judge_version": self.version, "mode": self.mode,
                                 "judged_ts": t, "judged_at": _iso(t), "evidence": {k: h.get(k) for k in (
