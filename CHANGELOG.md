@@ -1,5 +1,19 @@
 # OMX 제어판 버전 기록
 
+## 3.25.0 (2026-11-24) - 관제 한팔 미션(2A 왼팔·2C 오른팔), 한팔 평가 카메라 5대·모델 카메라 이름·층 입력
+
+- 관제 한팔 미션(관제 `arm_action_command` → Host → 패널, TK 11/24): 칸 A = OMX 1(왼팔), C = OMX 2(오른팔), 2층(2A·2C). 칸과 팔이 맞지 않거나, 2B·1층이거나, 선반 정렬·넘겨받기를 같이 보내면 시작 전에 거절. 입고는 `end_on_place`, 출고는 `pinky_check` 하나만
+  - 입고: Guide 놓음 판정(`handover_judge.py` 1124a, 2A·2C, 한팔 관절 이름)이 위 카메라 front로 상자가 칸에 놓이고 손이 빠진 순간 평가를 끝냄(복귀하면 끝내기와 상관없이). 팔은 평소처럼 홈으로. 정렬 실행기는 없음(2B 전용). 근거 `last_result.placement` = {`operation` "INBOUND", `on_shelf`, `slot`, `box`, `source` "eval_judge", `one_arm`, `arm`, `observed_ts`(촬영), `judged_at`}. 판정이 안 잡히면 `on_shelf` null(사람 확인)
+  - 출고: Guide 쟁반 판정(`tray_judge.py` 1124c)이 그 팔 쪽 측면 카메라(2A front_3, 2C front_4)와 front_2로 판정해 평가를 끝냄(설정 `"tray_judge_one_arm"`, 기본 on). 홈 복귀 중 손끝이 그 팔 쪽 쟁반 구역에 다시 들어오면 3.24.0처럼 들어 올리고 5초면 멈춤. 팔을 내려놓은 뒤 같은 카메라로 쟁반·칸을 다시 읽어(`[omx] tray_recheck {json}`) `last_result.pinky`에 남김 = 평가 뒤 상차 확인(Pinky는 완료 보고까지 기다림). 쟁반 기준은 이번 평가 첫 측면 프레임(`tray_reference_state` "eval_first_frame"). 위 카메라용 작업 직전 쟁반 사진(tray_check)과 정렬 실행기 상차 확인은 하지 않음(측면 쟁반을 못 봄)
+  - `/api/arms?model=…&arm=left|right`: 한팔 모델의 홈 자세를 그 팔에 비교. 한팔 평가 결과(`last_result.arms`)도 그 팔 이름으로
+- 판정기: `handover_judge.py` 1117e → 1124a, `tray_judge.py` 1124b → 1124c(Guide 확정). 둘 다 2B 동작은 이전 판과 같음(Guide 재생 확인)
+- 협동 구성의 한팔 평가(3.21.0)가 글로벌 카메라 4대(front, front_2, front_3, front_4)와 그 팔의 손목 카메라를 모두 엶(TK 11/24: 모델과 판정에 쓰는 카메라는 모두 켬). 모델에는 학습한 카메라만 넘김(`OMX_POLICY_CAMERAS`). GPU 노트북으로 보내는 영상도 그것뿐
+- 모델이 패널과 다른 카메라 이름으로 학습했으면 이름을 맞춤(정책 rename 처리): `shelf` = front_2, `pinky_side` = 그 팔 쪽 측면(오른팔 front_4, 왼팔 front_3), `wrist` = 그 팔 손목, `top` = front. 맞는 카메라가 없으면 시작 전에 거절(이름을 알려 줌)
+- 로봇에서 읽지 않는 모델 입력 `observation.environment_state`(선반 층 one-hot [2])를 채움: 명령 칸 1층 [1, 0], 2층 [0, 1], 칸이 없으면 [0, 1](학습 때 값). GPU 노트북 추론 서버(overrides `constant_inputs`)와 이 PC 추론 모두
+- 확인: 실제 모델로 GPU 노트북에서 패널 카메라 이름의 화면을 넣어 #36·#37(오른팔 trimstart, 이름 대응·층 입력)과 #27·#28(왼팔, 카메라 4대만) 모두 행동 100단계 정상. 층 입력을 빼면 KeyError로 멈추는 것과 층 값에 따라 출력이 달라지는 것도 확인. 양팔 2B 모델 2개는 같은 입력에 지금 판과 출력이 완전히 같음
+- 이 제어 PC에서 도는 한팔 평가(GPU 노트북 원격 추론)는 요청에 비동기 설정이 없으면 `actions_per_chunk` 100, `chunk_size_threshold` 0.2, 겹치는 구간 `weighted_average`(이전 0.3 + 새 0.7)를 씀(TK 11/24). 설정 `"one_arm_async"`로 바꿈. 관제 한팔 경로도 같은 값으로 둘 예정
+- 양팔 평가는 그대로(카메라 선택, 모델 입력, 비동기 설정 모두)
+
 ## 3.24.1 (2026-11-24) - 쟁반 놓음 판정 결과에 이번 미션 쟁반 사진 확인 여부
 
 - 출고 쟁반 놓음 판정(`tray_placed`, `last_result.placement`, `last_result.pinky`)에 `tray_reference`, `tray_reference_state`("ok" | "not_checked"), `pre_mission_match`, `start_vs_mission_ref`를 넣음. 판정기가 첫 위 카메라 프레임을 이번 미션 직전 쟁반 사진(tray_check)과 비교해 비었음을 확인했을 때만 "ok"·true. 관제 Host는 평가 뒤 상차 확인과 같은 규칙으로 이 값이 있을 때만 쟁반 판독을 믿음

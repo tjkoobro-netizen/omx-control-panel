@@ -343,7 +343,8 @@ def drop_env(eval_info: dict, arm: str | None, cams: dict) -> dict:
 
 
 TRAY_JUDGE_FILE = LOG_DIR / "tray_judge.json"  # omx_run's unloading tray judge settings (OMX_TRAY_JUDGE, 3.24.0)
-TRAY_PREFIX = {"placed": "[omx] tray_placed ", "record": "[omx] tray_judge ", "reentry": "[omx] tray_reentry "}
+TRAY_PREFIX = {"placed": "[omx] tray_placed ", "record": "[omx] tray_judge ", "reentry": "[omx] tray_reentry ",
+               "recheck": "[omx] tray_recheck "}
 
 
 def tray_settings() -> dict:
@@ -358,6 +359,18 @@ def tray_env(eval_info: dict, arm: str | None, cams: dict) -> dict:
     """3.24.0: the "placed on the Pinky tray" judge of a control-tower unloading (pinky_check) on the cooperative robot."""
     plan = eval_info.get("pinky_check")
     st = tray_settings()
+    if arm and plan and plan.get("one_arm"):
+        # 3.25.0: one arm, its side top camera (front_3 left / front_4 right); cfg "tray_judge_one_arm" (default on:
+        # the eval ends on the judge, the tray is checked again with the arm home, one report after that)
+        c = CFG.get("tray_judge_one_arm") or {}
+        mode, hold = c.get("mode", "on"), float(c.get("hold_s", 1.0))
+        cam = {"A": "front_3", "C": "front_4"}[plan["slot"][1:]]
+        if mode not in ("record", "on") or not {cam, "front_2"} <= set(cams) or not (TOOLS_DIR / "tray_judge.py").exists():
+            raise RuntimeError(f"한팔 출고 쟁반 판정에는 {cam}·front_2 카메라와 tray_judge.py가 필요합니다.")
+        _write_json(TRAY_JUDGE_FILE, {"box": int(plan["box"]), "slot": plan["slot"], "mode": mode, "hold_s": hold,
+                                      "tray_ref_file": None, "rate_hz": 6, "max_age_s": 3.0, "one_arm": True, "arm": arm})
+        eval_info["tray_judge"] = {"mode": mode, "hold_s": hold, "one_arm": True, "camera": cam}
+        return {"OMX_TRAY_JUDGE": str(TRAY_JUDGE_FILE)}
     if not plan or ROBOT_MODE != "bimanual" or arm or st["mode"] not in ("record", "on") \
             or not {"front", "front_2"} <= set(cams) or not (TOOLS_DIR / "tray_judge.py").exists():
         return {}
@@ -379,6 +392,8 @@ def tray_line(job, kind: str, line: str) -> None:
         job.info["tray_placed"] = d
     elif kind == "record":
         job.info["tray_judge_record"] = d
+    elif kind == "recheck":
+        job.info["tray_recheck"] = d  # 3.25.0: one-arm unloading, the tray seen again with the arm home
     else:
         job.info.setdefault("tray_reentry", []).append(d)
         if d.get("event") == "hold":
@@ -1491,15 +1506,20 @@ class Job:
             LAST_RESULT.clear()
             LAST_RESULT.update(eval_result(self), stage="done", final=True, align=None, pinky=None, placement=None,
                                handover=None)
-            if self.info.get("tray_placed"):  # 3.24.0: the unloading ended on the tray judge
-                LAST_RESULT["placement"] = self.info["tray_placed"]
+            if self.info.get("tray_placed") and not (self.info.get("pinky_check") or {}).get("one_arm"):
+                LAST_RESULT["placement"] = self.info["tray_placed"]  # 3.24.0: the unloading ended on the tray judge
+            if self.info.get("one_arm_place"):  # 3.25.0: one-arm loading, the judged placement is the evidence
+                LAST_RESULT["placement"] = one_arm_placement(self.info, _episode_end_now(self))
             if self.info.get("tray_hold"):
                 LAST_RESULT["hold"] = dict(self.info["tray_hold"], released_at=now_iso())
             if self.info.get("handover"):
                 handover_after_eval(self, proc)  # 3.18.0: placed -> the waiting runner; otherwise the usual alignment
             elif self.info.get("shelf_align"):
                 align_after_eval(self.info["shelf_align"], proc)
-            if self.info.get("pinky_check"):
+            if (self.info.get("pinky_check") or {}).get("one_arm"):
+                # 3.25.0: one-arm unloading: the tray was checked again in the run with the arm home
+                LAST_RESULT["pinky"] = one_arm_pinky(self.info, self.info["pinky_check"])
+            elif self.info.get("pinky_check"):
                 pinky_after_eval(self.info["pinky_check"], proc)
         if self.kind in ("align", "align_release"):
             align_ended(self, proc)
@@ -2397,6 +2417,8 @@ def remote_eval_settings(local_model: Path, gpu_model: str, extra_args: list, as
             overrides["n_action_steps"] = int(a.split("=", 1)[1])
     if opts.get("diffusion_steps"):
         overrides["diffusion_steps"] = int(opts["diffusion_steps"])
+    if opts.get("constant_inputs"):  # 3.25.0: e.g. observation.environment_state of the one-arm right models
+        overrides["constant_inputs"] = opts["constant_inputs"]
     if opts.get("rtc"):
         overrides["rtc"] = {"horizon": int(body.get("rtc_horizon") or 10), "weight": float(body.get("rtc_weight") or 10.0)}
     env = dict(async_env)  # may hold only the output filter's settings
@@ -2421,6 +2443,8 @@ def remote_eval_settings(local_model: Path, gpu_model: str, extra_args: list, as
 
 
 ARM_KO = {"left": "왼팔", "right": "오른팔"}
+SLOT_ARM = {"A": "left", "C": "right"}  # shelf column -> the arm that works it alone (control tower SLOTS, 11/24)
+ONE_ARM_ASYNC = {"async_mode": True, "actions_per_chunk": 100, "chunk_size_threshold": 0.2, "aggregate_fn": "weighted_average"}
 
 
 def one_arm(body: dict) -> str | None:
@@ -2435,7 +2459,18 @@ def one_arm(body: dict) -> str | None:
     if ROBOT_MODE != "bimanual":
         raise RuntimeError("한 팔 선택은 협동 로봇(팔 2개) 구성에서만 씁니다. 지금은 단일 로봇 구성이라 팔을 고르지 않고 시작하세요.")
     if body.get("source") == "mqtt" or body.get("pinky_check") or body.get("end_on_place") or body.get("end_on_return"):
-        raise RuntimeError("한 팔 평가는 패널에서 직접 하는 평가만 됩니다. 관제 미션(상차 확인, 선반 정렬, 넘겨받기)은 아직 두 팔 모델로만 합니다.")
+        # 3.25.0 (TK 11/24): a control-tower one-arm mission (arm_action_command): column A = OMX 1 (left), C = OMX 2
+        # (right), level 2 (the judges know 2A / 2C). Loading ends on the placement judge, unloading on the tray judge
+        # with the camera check after the arm is home; no shelf alignment, no hand-over.
+        slot = command_slot(body) or ""
+        if SLOT_ARM.get(slot[1:]) != arm:
+            raise RuntimeError(f"한팔 관제 미션은 칸 A(왼팔)·C(오른팔)를 그 팔로 보냅니다 (받은 칸 {slot or '없음'}, 팔 {ARM_KO[arm]}).")
+        if slot[:1] != "2":
+            raise RuntimeError(f"한팔 관제 미션은 아직 2층(2A·2C)만 됩니다 (받은 칸 {slot}).")
+        if body.get("shelf_align") or body.get("place_shadow"):
+            raise RuntimeError("한팔 미션에는 선반 정렬·넘겨받기가 없습니다. shelf_align·place_shadow 없이 보내세요.")
+        if bool(body.get("pinky_check")) == bool(body.get("end_on_place")):
+            raise RuntimeError("한팔 관제 미션은 입고면 end_on_place, 출고면 pinky_check 하나만 보냅니다.")
     return arm
 
 
@@ -2446,11 +2481,49 @@ def one_arm_robot_args(arm: str) -> list:
             "--robot.id=omx_follower_arm"]
 
 
+def model_camera_map(cfg: dict, arm: str | None = None) -> tuple[list, dict]:
+    """3.25.0: the panel cameras a model reads, and the names it learned them under when those differ (rename_map
+    panel name -> model name). The right-arm models trained on the one-arm datasets (TK 11/24, #36 / #37) use
+    shelf = front_2, pinky_side = the side top view of that arm (front_4 right, front_3 left), wrist = that arm's
+    wrist camera. Raises when a model camera has no panel camera."""
+    names = [k.split(".")[-1] for k in (cfg.get("input_features") or {}) if k.startswith("observation.images.")]
+    used, rename = [], {}
+    for n in names:
+        if n in CAMERAS or n.startswith("camera"):
+            used.append(n)
+            continue
+        alias = {"shelf": "front_2", "top": "front",
+                 "wrist": f"wrist_{arm}" if arm else ("wrist" if "wrist" in CAMERAS else None),
+                 "pinky_side": {"right": "front_4", "left": "front_3"}.get(arm or "")}.get(n)
+        if not alias or alias not in CAMERAS:
+            raise RuntimeError(f"이 모델의 카메라 '{n}'에 맞는 카메라가 지금 구성에 없습니다. 지금 구성의 카메라: {', '.join(CAMERAS)}.")
+        used.append(alias)
+        rename[f"observation.images.{alias}"] = f"observation.images.{n}"
+    return used, rename
+
+
+def constant_inputs(cfg: dict, body: dict) -> dict:
+    """3.25.0: model inputs that are not read from the robot. observation.environment_state [2] of the one-arm right
+    models (#36 / #37) is the shelf level one-hot: [1, 0] level 1, [0, 1] level 2 (it was [0, 1] all through their
+    training, Guide 11/24). The level comes from the commanded slot ("2A" -> level 2), else level 2."""
+    feat = (cfg.get("input_features") or {}).get("observation.environment_state")
+    if not feat:
+        return {}
+    shape = feat.get("shape") or []
+    if shape != [2]:
+        raise RuntimeError(f"이 모델의 observation.environment_state 모양 {shape}을 패널이 채울 수 없습니다 (층 one-hot [2]만 지원).")
+    slot = str(body.get("slot") or "").upper()
+    level = int(slot[0]) if slot[:1] in ("1", "2") else 2
+    return {"observation.environment_state": [1.0, 0.0] if level == 1 else [0.0, 1.0]}
+
+
 def check_model_fits(cfg: dict, arm: str | None = None) -> None:
     """A model drives the robot it was trained on: 6 joints = one arm, 12 = a cooperative pair; and the same
     cameras by name. On a cooperative robot a 6-joint model runs on the arm the person chose (3.21.0)."""
     shape = ((cfg.get("output_features") or {}).get("action") or {}).get("shape") or [None]
     cams = {k.split(".")[-1] for k in (cfg.get("input_features") or {}) if k.startswith("observation.images.")}
+    if arm:  # 3.25.0: a one-arm model's own camera names map to the panel's (model_camera_map)
+        cams = set(model_camera_map(cfg, arm)[0])
     want = 12 if ROBOT_MODE == "bimanual" and not arm else 6
     if shape[0] == 6 and want == 12:
         side = "left" if "wrist_left" in cams and "wrist_right" not in cams else "right" if "wrist_right" in cams and "wrist_left" not in cams else ""
@@ -2476,9 +2549,24 @@ def eval_cameras(cfg: dict, arm: str | None = None) -> dict:
     was not trained with (3.19.0). The usual cameras stay open as before: the judges read front / front_2.
     One arm (3.21.0): only the model's cameras (no judges run; the other arm's wrist camera stays closed)."""
     used = {k.split(".")[-1] for k in (cfg.get("input_features") or {}) if k.startswith("observation.images.")}
-    if arm and used and used <= set(CAMERAS):
-        return {n: p for n, p in CAMERAS.items() if n in used}
+    if arm:
+        # 3.25.0 (TK 11/24): every global camera (the judges read front / front_2 / front_3 / front_4) and this arm's
+        # wrist camera; the model is given only the ones it learned (OMX_POLICY_CAMERAS, one_arm_env)
+        return {n: p for n, p in CAMERAS.items() if not n.startswith("wrist") or n == f"wrist_{arm}"}
     return {n: p for n, p in CAMERAS.items() if n not in EXTRA_CAMERA_ROLES or n in used}
+
+
+def one_arm_env(cfg: dict, arm: str | None, body: dict) -> dict:
+    """3.25.0: a one-arm run feeds its model only the cameras it learned (the others are open for the judges), and the
+    model's constant inputs (environment_state) - this process; the GPU laptop gets them in the overrides."""
+    if not arm:
+        return {}
+    used, _ = model_camera_map(cfg, arm)
+    env = {"OMX_POLICY_CAMERAS": json.dumps(used)}
+    consts = constant_inputs(cfg, body)
+    if consts:
+        env["OMX_CONST_INPUTS"] = json.dumps(consts)
+    return env
 
 
 def find_model(model_path: str) -> dict:
@@ -2963,9 +3051,16 @@ def armed_status() -> dict:
     return {"armed": ARMED["on"], "armed_since": ARMED["since"], "armed_off_reason": ARMED["off_reason"]}
 
 
-def arm_states(state: dict, home: dict | None) -> dict:
+def arm_states(state: dict, home: dict | None, arm: str | None = None) -> dict:
     """Per arm (set name): joints at the end of the last episode, gripper, and whether it is at the model's
-    home pose (omx_home.diff, gripper left out). None where it was not measured: never a guess."""
+    home pose (omx_home.diff, gripper left out). None where it was not measured: never a guess.
+    arm (3.25.0): a one-arm model / run on the cooperative robot - its unprefixed joint names are that arm's."""
+    if arm in ("left", "right"):
+        def side_names(d):
+            return {(k if k.startswith(("left_", "right_")) else f"{arm}_{k}"): v for k, v in (d or {}).items()}
+        state = side_names(state)
+        if home:
+            home = dict(home, joints=side_names(home.get("joints")), std=side_names(home.get("std")))
     out = {}
     for side, name in ARM_NAMES.items():
         pre = f"{side}_" if side else ""
@@ -3025,7 +3120,7 @@ def control_home_pose(model_path: str) -> dict | None:
     return home
 
 
-def arms_now(model_path: str = "") -> dict:
+def arms_now(model_path: str = "", arm: str | None = None) -> dict:
     """/api/arms: where the arms are now, for the control tower's readiness check (MQTT Host).
     Read from the bus (no torque change) only while no robot program runs; otherwise unknown.
     One read is reused for ARMS_NOW_TTL_S unless a robot program ran since.
@@ -3052,7 +3147,7 @@ def arms_now(model_path: str = "") -> dict:
             home = model_home_pose(model_path)
         except Exception as exc:
             out["error"] = f"모델 홈 자세를 알 수 없습니다: {exc}"[:200]
-    out["arms"] = arm_states({f"{k}.pos": v for k, v in current.items()}, home)
+    out["arms"] = arm_states({f"{k}.pos": v for k, v in current.items()}, home, arm if arm in ("left", "right") else None)
     out["home_known"] = bool(home)
     return out
 
@@ -3071,7 +3166,7 @@ def eval_result(job) -> dict:
     stopped = ("즉시 중단" if info.get("abort_sent") else "비상 정지" if info.get("frozen")
                else "강제 종료" if info.get("killed") else "중지" if info.get("stopping") else None)
     rc, err = info.get("returncode"), info.get("err")
-    arms = arm_states(end.get("state") or {}, home) if end else {}
+    arms = arm_states(end.get("state") or {}, home, info.get("arm")) if end else {}
     checks = [a["at_home"] for a in arms.values()]
     return {"kind": "eval", "source": info.get("source", "panel"), "repo_id": info.get("repo_id"),
             "recorded": info.get("record", True),
@@ -3355,7 +3450,7 @@ def align_after_eval(plan: dict, eval_proc) -> None:
     threading.Thread(target=start_later, daemon=True).start()
 
 
-def pinky_plan(body: dict, run: dict) -> dict | None:
+def pinky_plan(body: dict, run: dict, arm: str | None = None) -> dict | None:
     """Unloading (OUTBOUND, 11/16): a control-tower eval with "pinky_check": true is followed by a camera-only check
     (real_runner.py --step pinky_read: front = box on the Pinky tray, front_2 = left on the shelf). Checked at the
     start of the eval, so the Host hears of a wrong request before anything moves."""
@@ -3366,6 +3461,11 @@ def pinky_plan(body: dict, run: dict) -> dict | None:
     marker = str(body.get("target_marker", "")).strip()
     if not marker.isdigit():
         raise RuntimeError("상차 확인(pinky_check)에는 상자 번호(target_marker)가 필요합니다.")
+    if arm:
+        # 3.25.0: one arm. Its Pinky stands outside the arm (N21 / N22): the tray is seen by that side's top camera
+        # (tray_judge), not by the runner's front camera. The tray judge ends the eval and checks the tray again once
+        # the arm is home (omx_run TrayWatch.recheck), while the Pinky still waits (one report after the arm is home).
+        return {"box": int(marker), "slot": command_slot(body), "one_arm": True, "arm": arm, **command_pinky(body)}
     if align_plan(body, run):
         raise RuntimeError("선반 정렬(shelf_align)과 상차 확인(pinky_check)은 함께 쓸 수 없습니다. 하차 명령은 \"shelf_align\": false로 보내세요.")
     a = omx_config.CFG.get("shelf_align") or {}
@@ -3837,6 +3937,59 @@ def handover_plan(body: dict, plan: dict | None, episodes: int) -> dict | None:
     return ho
 
 
+ONE_ARM_PLACE_FILE = LOG_DIR / "place_judge_one_arm.json"  # 3.25.0
+
+
+def place_one_arm_env(body: dict, arm: str | None, eval_info: dict, episodes: int, cams: dict) -> dict:
+    """3.25.0: a one-arm loading mission ("end_on_place") ends the moment the judge (handover_judge 2A / 2C) sees the
+    box placed in its slot with the hand clear; then the arm goes home as usual (no alignment, no hand-over) and the
+    judged placement is the evidence (last_result.placement)."""
+    if not arm or not body.get("end_on_place"):
+        return {}
+    marker = str(body.get("target_marker", "")).strip()
+    if not marker.isdigit():
+        raise RuntimeError("한팔 입고(end_on_place)에는 상자 번호(target_marker)가 필요합니다.")
+    if episodes != 1:
+        raise RuntimeError("end_on_place는 시도 1번(episodes 1) 평가에서만 씁니다.")
+    if "front" not in cams:
+        raise RuntimeError("한팔 입고 놓음 판정에는 위 카메라 front가 필요합니다.")
+    slot = command_slot(body)
+    _write_json(ONE_ARM_PLACE_FILE, {"box_ids": [int(marker)], "camera": "front", "rate_hz": HANDOVER_JUDGE_HZ,
+                                     "shadow": False, "slot": slot, "arm": arm, "independent": True})
+    eval_info["one_arm_place"] = {"box": int(marker), "slot": slot, "arm": arm}
+    eval_info.setdefault("target_marker", int(marker))
+    return {"OMX_PLACE_JUDGE": str(ONE_ARM_PLACE_FILE)}
+
+
+def one_arm_placement(info: dict, end: dict | None) -> dict:
+    """last_result.placement of a one-arm loading: the judge's moment (placed) or why there is none."""
+    plan = info["one_arm_place"]
+    out = {"operation": "INBOUND", "slot": plan["slot"], "box": plan["box"], "source": "eval_judge", "one_arm": True,
+           "arm": plan["arm"], "on_shelf": None}
+    judge = (end or {}).get("judge") or {}
+    if (end or {}).get("end_reason") == "placed" and judge:
+        ts = judge.get("frame_ts")
+        out.update(on_shelf=True, judged_at=(end or {}).get("judged_at"), judge_version=judge.get("version"),
+                   tips_clear=True, observed_ts=ts, observed_clock="capture" if ts else None,
+                   tip_y=judge.get("tip_y"))
+    else:
+        out["not_placed"] = (end or {}).get("end_reason") or "no_episode_end"
+    return out
+
+
+def one_arm_pinky(info: dict, plan: dict) -> dict:
+    """last_result.pinky of a one-arm unloading: the tray checked again with the arm home (TrayWatch.recheck)."""
+    r = info.get("tray_recheck") or {}
+    base = {"box": plan["box"], "slot": plan["slot"], "pinky_id": plan.get("pinky_id"), "pinky_no": plan.get("pinky_no"),
+            "one_arm": True, "arm": plan["arm"], "source": "tray_recheck", "reported_at": now_iso()}
+    if not r:
+        return base | {"ran": False, "on_pinky": None, "on_shelf": None, "skipped": "다시 확인한 결과 없음"}
+    return base | {"ran": True, **{k: r.get(k) for k in ("on_pinky", "slot_empty", "tray_marker", "tray_changed",
+                                                          "tray_reference", "tray_reference_state", "observed_ts",
+                                                          "observed_clock", "camera", "error", "placed_at")},
+                   "on_shelf": None if r.get("slot_empty") is None else not r.get("slot_empty")}
+
+
 def handover_env(ho: dict) -> dict:
     """omx_run settings: the judge (shadow unless this is a real handover) and where the handover files live."""
     for f in (HANDOVER_STOP, HANDOVER_EVAL_DONE, HANDOVER_STATE, HANDOVER_HOLD_EXIT_FILE):
@@ -4079,8 +4232,13 @@ def start_eval(body: dict) -> dict:
     if not 1 <= threads <= (os.cpu_count() or 24):
         raise RuntimeError(f"CPU 스레드 수는 1~{os.cpu_count() or 24} 사이로 정하세요.")
     arm = one_arm(body)  # 3.21.0: a one-arm model on the arm the person chose (refused for missions)
+    if arm and CONTROL and "async_mode" not in body:
+        # 3.25.0 (TK 11/24): a one-arm run from this control PC (GPU laptop over UDP) uses these async settings unless
+        # the request names its own: 100 actions per chunk, the next chunk at 20 % left, overlaps weighted 0.3/0.7.
+        # cfg "one_arm_async" replaces them.
+        body = {**body, **ONE_ARM_ASYNC, **(CFG.get("one_arm_async") or {})}
     command_slot(body)  # a wrong slot is refused before anything moves
-    pinky = pinky_plan(body, run)  # a wrong unloading request is refused before anything moves
+    pinky = pinky_plan(body, run, arm)  # a wrong unloading request is refused before anything moves
     camera_gate()
     if CONTROL:
         udp_ready()
@@ -4089,6 +4247,13 @@ def start_eval(body: dict) -> dict:
     check_model_fits(model_cfg, arm)
     eval_cams = eval_cameras(model_cfg, arm)
     extra_args, async_env, opts = policy_eval_options(str(local_model), body)
+    if arm:  # 3.25.0: the model's own camera names (e.g. shelf = front_2), for the policy's rename processor
+        _, rename = model_camera_map(model_cfg, arm)
+        if rename and not any(a.startswith("--dataset.rename_map=") for a in extra_args):
+            extra_args.append("--dataset.rename_map=" + json.dumps(rename))
+            opts["camera_names"] = {k.split(".")[-1]: v.split(".")[-1] for k, v in rename.items()}
+    if constant_inputs(model_cfg, body):
+        opts["constant_inputs"] = constant_inputs(model_cfg, body)
     if CONTROL:
         async_env = remote_eval_settings(local_model, run["model_path"], extra_args, async_env, opts, body)
         extra_args = [a for a in extra_args if a.startswith("--dataset.")] + ["--policy.device=cpu"]
@@ -4109,7 +4274,7 @@ def start_eval(body: dict) -> dict:
             home = None  # e.g. the training data is gone: start from where the arm is, as before
     # eval_{model display name}__{p10 | free}_{run settings}_{MMDD_HHMM}; _2, _3 ... when the name is taken
     # (a second start in the same minute, or a folder left by a run that failed to start)
-    if pinky:
+    if pinky and not pinky.get("one_arm"):
         pinky["tray"] = tray_check_before(pinky)  # 3.20.0: an unloading starts only on an empty tray (this photo)
     step = run.get("step")  # set when an intermediate save was chosen
     base = names.eval_name(run.get("display") or names.display_name(run["id"]), preset, opts,
@@ -4198,7 +4363,8 @@ def start_eval(body: dict) -> dict:
               | ({"OMX_FAST_RELEASE": "1"} if fast_release else {}) | ({} if record else {"OMX_NO_RECORD": "1"})
               | (handover_env(ho) if ho else {}) | ({"OMX_ARM_SIDE": arm} if arm else {})
               | ({"OMX_WRIST_CHECK": "1"} if wrist_check_on() else {}) | drop_env(eval_info, arm, eval_cams)
-              | tray_env(eval_info, arm, eval_cams))
+              | tray_env(eval_info, arm, eval_cams) | one_arm_env(model_cfg, arm, body)
+              | place_one_arm_env(body, arm, eval_info, episodes, eval_cams))
     EVAL_HOME_POSE.clear()
     EVAL_HOME_POSE.update(repo_id=repo_id, home=home)
     if ho and ho["mode"] == "handover":
@@ -4718,7 +4884,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(home_status(q.get("model", [""])[0]))
         elif self.path.startswith("/api/arms?") or self.path == "/api/arms":
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
-            self._json(arms_now(q.get("model", [""])[0]))
+            self._json(arms_now(q.get("model", [""])[0], q.get("arm", [""])[0] or None))  # arm: a one-arm model (3.25.0)
         elif self.path.startswith("/api/eval/report?"):
             q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             self._json(report_status(q.get("repo", [""])[0]))

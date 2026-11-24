@@ -81,6 +81,9 @@ HOLD_EXIT = threading.Event()
 # m to rise, "escape_s": 5.0, "report": fn(dict)}. "held" is set once it held: after the person's [홈 위치로 이동] the
 # arm goes home without the watch (a person has looked).
 TRAY_GUARD: dict = {}
+# 3.25.0: called with the arm after it has landed at home (torque off), before its port and cameras close: the one-arm
+# unloading reads the tray again there (omx_run._tray_recheck)
+AFTER_LAND: list = []
 HOLD_LANDED = threading.Event()  # an arm was landed after all (비상 정지 came first): the handover must not happen
 PWM_MAX = 885  # X-series Goal_PWM full scale
 
@@ -855,6 +858,11 @@ def install() -> None:
                 fast_land(self) if FAST_LAND.is_set() and not FREEZE.is_set() else soft_land(self)
         except Exception as exc:  # never block the normal shutdown
             _say(f"건너뜀 ({exc})", "stop")
+        for fn in list(AFTER_LAND):
+            try:
+                fn(self)
+            except Exception as exc:  # noqa: BLE001  never block the shutdown
+                _say(f"착지 뒤 확인 건너뜀 ({exc})", "stop")
         return original_disconnect(self, *args, **kwargs)
 
     cls.connect, cls.send_action, cls.disconnect = connect, send_action, disconnect

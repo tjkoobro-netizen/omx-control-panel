@@ -79,6 +79,10 @@ class PolicyRunner:
             self.policy.init_rtc_processor()
             self.rtc = True
         self.rtc_capable = cfg.type in ("smolvla", "pi0", "pi05")
+        # 3.25.0: inputs the robot does not measure (overrides "constant_inputs", e.g. observation.environment_state)
+        import numpy as np
+
+        self.constants = {k: np.asarray(v, dtype=np.float32) for k, v in (o.get("constant_inputs") or {}).items()}
         self.lock = threading.Lock()
 
     def reset(self) -> None:
@@ -95,7 +99,7 @@ class PolicyRunner:
         dev = self.device
         amp = torch.autocast(device_type=dev.type) if dev.type == "cuda" and self.cfg.use_amp else nullcontext()
         with self.lock, torch.inference_mode(), amp:
-            batch = self.pre(prepare_observation_for_inference(copy(obs), dev, task, robot_type))
+            batch = self.pre(prepare_observation_for_inference({**obs, **self.constants}, dev, task, robot_type))
             action = self.policy.select_action(batch)
             return self.post(action).squeeze(0).to("cpu")
 
@@ -116,7 +120,7 @@ class PolicyRunner:
         policy, dev = self.policy, self.device
 
         def prep(obs):
-            return self.pre(prepare_observation_for_inference(copy(obs), dev, task, robot_type))
+            return self.pre(prepare_observation_for_inference({**obs, **self.constants}, dev, task, robot_type))
 
         amp = torch.autocast(device_type=dev.type) if dev.type == "cuda" and self.cfg.use_amp else nullcontext()
         grad = nullcontext() if self.rtc else torch.inference_mode()  # RTC steers the denoising with gradients

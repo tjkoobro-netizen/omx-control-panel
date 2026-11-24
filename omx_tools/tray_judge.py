@@ -23,7 +23,7 @@ import time
 
 import numpy as np
 
-VERSION = "1124b"   # 1124a 초안 + hold_s 인자·ok_now, 첫 프레임 쟁반 테두리 찾기 대체 경로. 11/24 두 팔 출고 72회 재생: 잘못 뜬 판정 0
+VERSION = "1124c"   # 1124c: 한팔 2A(front_3)·2C(front_4) 측면 카메라 쟁반 + 팔별 손끝 구역, 2B 는 1124b 와 같음 / 1124b: 1124a 초안 + hold_s 인자·ok_now, 첫 프레임 쟁반 테두리 찾기 대체 경로. 11/24 두 팔 출고 72회 재생: 잘못 뜬 판정 0
 HERE = pathlib.Path(__file__).resolve().parent
 ALIGN_DIR = HERE.parent if (HERE.parent / "shelf_ref.json").exists() else pathlib.Path("~/il_ws/src/omx_sim_align").expanduser()
 
@@ -35,6 +35,19 @@ TRAY_ZONE_HX = 0.115          # |x − TRAY_CX| < 이 값
 TRAY_ZONE_Y = (-0.10, 0.08)
 TRAY_ZONE_ZMAX = 0.28
 TIP_MARGIN_M = 0.03
+# 11/24 TK: 한팔 출고(2A 왼팔 · 2C 오른팔) — Pinky 는 로봇 바깥 양옆, 쟁반은 측면 카메라로 본다.
+# 1118 한팔 출고 36회 놓는 순간 손끝: 왼손 x −0.437~−0.181(중앙 −0.413), 오른손 0.308~0.465(중앙 0.445), y −0.008~0.044, z 0.16~0.32.
+# 홈 자세 손끝 |x| 0.196~0.216 → 여유 3cm 를 더해도 구역 밖
+TRAY_ZONES = {   # 이름: (x 중심, x 반폭, (y 범위), z 상한)
+    "2B": (TRAY_CX, TRAY_ZONE_HX, TRAY_ZONE_Y, TRAY_ZONE_ZMAX),
+    "left": (-0.43, 0.085, (-0.10, 0.10), 0.30),
+    "right": (0.44, 0.085, (-0.10, 0.10), 0.30),
+}
+SLOT_ARM = {"2A": "left", "2B": None, "2C": "right"}
+SLOT_TRAY_CAM = {"2A": "front_3", "2B": "front", "2C": "front_4"}   # 11/24 1118 녹화: front_3 = 왼팔 쟁반, front_4 = 오른팔 쟁반(놓는 시각 일치)
+# 측면 카메라 빈 쟁반 테두리 기본 자리(1118 녹화 첫 화면 테두리 맞춤 0.85~0.90). 평가 첫 프레임에서 다시 맞춘다
+SIDE_TRAY_QUAD = {"front_3": [[347, 85], [260, 91], [268, 188], [355, 182]],
+                  "front_4": [[161, 184], [80, 184], [80, 280], [161, 280]]}
 
 GRIP_HOLD_G = 4.0             # 명령 − 실제 < −이 값 = 쥐고 있음 (DropWatch 와 같음)
 
@@ -61,11 +74,12 @@ PLACE_HOLD_S = 0.5            # 네 조건이 이만큼 이어지면 placed
 STALE_S = 1.0                 # 카메라 판독이 이보다 오래되면 그 조건은 모름(False)
 
 
-def tips_near_tray(joints, side, fk, margin=TIP_MARGIN_M):
-    """그 팔 손끝(FK.tip)이 쟁반 구역(± margin) 안인가. 홈 복귀 중 재진입 감시에도 씀. joints: 12관절 dict(handover_fk 이름)"""
+def tips_near_tray(joints, side, fk, margin=TIP_MARGIN_M, zone=None):
+    """그 팔 손끝(FK.tip)이 쟁반 구역(± margin) 안인가. 홈 복귀 중 재진입 감시에도 씀. joints: 12관절 dict(handover_fk 이름).
+    zone: None·'2B' = 두 팔 가운데 쟁반, 'left'·'right' = 한팔 작업 그 팔 바깥 쟁반 (Judge.zone)"""
+    cx, hx, (y0, y1), zmax = TRAY_ZONES[zone or "2B"]
     x, y, z = (float(v) for v in fk.tip(joints, side))
-    return bool(abs(x - TRAY_CX) < TRAY_ZONE_HX + margin and TRAY_ZONE_Y[0] - margin < y < TRAY_ZONE_Y[1] + margin
-                and z < TRAY_ZONE_ZMAX + margin)
+    return bool(abs(x - cx) < hx + margin and y0 - margin < y < y1 + margin and z < zmax + margin)
 
 
 # ---------------------------------------------------------------- 작은 도구 (unload_check 에서 옮김)
@@ -204,8 +218,17 @@ def _changed(cur, ref, inner, rim=None, diff=TRAY_DIFF, open_px=TRAY_OPEN_PX):
 
 
 class Judge:
-    def __init__(self, fk_json=None, box_id=None, slot="2B", tray_ref_file=None, shelf_ref_file=None, hold_s=PLACE_HOLD_S):
+    def __init__(self, fk_json=None, box_id=None, slot="2B", tray_ref_file=None, shelf_ref_file=None, hold_s=PLACE_HOLD_S,
+                 arm="auto", tray_cam="auto"):
+        """slot '2B'(두 팔, 쟁반 = 위 카메라 front) · '2A'(왼팔, 쟁반 = front_3) · '2C'(오른팔, 쟁반 = front_4).
+        update() 의 첫 인자는 tray_cam 카메라 회색 프레임이다(2B 는 front). 한팔 쟁반은 작업 직전 기준(tray_ref_file)이 없어 첫 프레임과 비교"""
         import cv2
+        if slot not in SLOT_ARM:
+            raise ValueError(f"slot {slot} 미지원 (2A·2B·2C)")
+        self.arm = SLOT_ARM[slot] if arm == "auto" else arm
+        self.sides = ("left", "right") if self.arm is None else (self.arm,)
+        self.zone = "2B" if self.arm is None else self.arm
+        self.tray_cam = SLOT_TRAY_CAM[slot] if tray_cam == "auto" else tray_cam
         self.hold_s = float(hold_s)   # 네 조건이 이만큼 이어지면 placed (TK 0.5 / 1.0 검토 중)
 
         from handover_judge import FK
@@ -223,7 +246,7 @@ class Judge:
         # 쟁반 기준 (작업 직전)
         self.tray_ref_file = tray_ref_file
         self.mref = None   # (회색 사진(기준 화면), quad_ref)
-        ent = _read_json(tray_ref_file) if tray_ref_file else None
+        ent = _read_json(tray_ref_file) if tray_ref_file and self.tray_cam == "front" else None   # tray_check 기준은 위 카메라 사진
         if ent and ent.get("kind") == "tray_pre_mission" and ent.get("usable") and ent.get("image"):
             g = cv2.imread(str(pathlib.Path(tray_ref_file).parent / ent["image"]), cv2.IMREAD_GRAYSCALE)
             if g is not None:
@@ -231,6 +254,8 @@ class Judge:
         self.mref_state = "ok" if self.mref is not None else ("unusable" if ent else "missing")
         dflt = (_read_json(ALIGN_DIR / "tray_empty_ref.json") or {}).get("default") or {}
         self.quad_default = np.asarray(dflt["quad_ref"], float) if dflt.get("quad_ref") else None
+        if self.tray_cam in SIDE_TRAY_QUAD:
+            self.quad_default = np.asarray(SIDE_TRAY_QUAD[self.tray_cam], float)
         # 빈 선반 기준 (front_2)
         sref = _read_json(shelf_ref_file or ALIGN_DIR / "shelf_ref.json")
         self.sref = None
@@ -395,13 +420,19 @@ class Judge:
             if self.fk is None:
                 raise RuntimeError("fk_json 없음")
             jd = {n: 0.0 for n in self.names}
-            jd.update({k.removesuffix(".pos"): float(v) for k, v in (joints or {}).items()})
-            near0 = {s: tips_near_tray(jd, s, self.fk, 0.0) for s in ("left", "right")}
+            for k, v in (joints or {}).items():   # 한 팔 평가는 'shoulder_pan.pos' 처럼 팔 접두어가 없다 → 이 판정기의 팔로
+                k = str(k).removesuffix(".pos")
+                if self.arm is not None and not k.startswith(("left_", "right_")):
+                    k = f"{self.arm}_{k}"
+                jd[k] = float(v)
+            near0 = {s: tips_near_tray(jd, s, self.fk, 0.0, self.zone) for s in self.sides}
             if any(near0.values()) and t - self.t0 > 1.0:
                 self.hands_in = True
-            tips_clear = not any(tips_near_tray(jd, s, self.fk, TIP_MARGIN_M) for s in ("left", "right"))
+            tips_clear = not any(tips_near_tray(jd, s, self.fk, TIP_MARGIN_M, self.zone) for s in self.sides)
             g = {s: (float(c) - float(m)) for s, (c, m) in (grips or {}).items()}
-            released = len(g) == 2 and all(v > -GRIP_HOLD_G for v in g.values())
+            if self.arm is not None and self.arm not in g and len(g) == 1:   # 한 팔: 이름이 달라도 하나뿐이면 그 팔
+                g = {self.arm: next(iter(g.values()))}
+            released = all(s in g and g[s] > -GRIP_HOLD_G for s in self.sides)
             if front_gray is not None:
                 self._top(front_gray, t)
             if front2_gray is not None:
