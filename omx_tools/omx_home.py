@@ -114,7 +114,20 @@ def model_home(model_path: str | Path, cache: bool = True) -> dict:
     cfg = json.loads((Path(model_path) / "train_config.json").read_text())
     d = cfg["dataset"]
     root = Path(d["root"]) if d.get("root") else DATA_HOME / d["repo_id"]
-    home = compute([(root, d.get("episodes"))], d["repo_id"])
+    episodes, source = d.get("episodes"), d["repo_id"]
+    if not (root / "meta/info.json").exists():
+        # 3.25.1: a model trained on another PC (its data path is not here). Config "home_datasets" names the local
+        # data to take the home pose from, by run folder name: {"right_inbound_trimstart_40k": "tkoo/1118_..."}
+        # (a repo id under the data folder or a path). Its first frames, all episodes (the original episode numbers
+        # are of the other data). Guide 11/24: #36 / #37 were cut from the 1118 right-arm 2C recordings, idle start
+        # only trimmed (first-frame median within 0.4 units of the moment the arm starts).
+        alt = (omx_config.CFG.get("home_datasets") or {}).get(rdir.name)
+        if not alt:
+            raise FileNotFoundError(f"{root / 'meta/info.json'} (다른 PC에서 학습한 모델: 설정 home_datasets에 "
+                                    f"'{rdir.name}'의 홈 자세 데이터를 지정하세요)")
+        root = Path(alt) if str(alt).startswith("/") else DATA_HOME / alt
+        episodes, source = None, f"{source} -> {alt}"
+    home = compute([(root, episodes)], source)
     if cache and os.access(rdir, os.W_OK) and not cached.exists():  # never overwrite; a teammate's folder is left alone
         try:
             cached.write_text(json.dumps(home, ensure_ascii=False, indent=2))
