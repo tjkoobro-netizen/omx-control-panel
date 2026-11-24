@@ -342,6 +342,55 @@ def drop_env(eval_info: dict, arm: str | None, cams: dict) -> dict:
     return {"OMX_DROP_WATCH": str(DROP_WATCH_FILE)}
 
 
+TRAY_JUDGE_FILE = LOG_DIR / "tray_judge.json"  # omx_run's unloading tray judge settings (OMX_TRAY_JUDGE, 3.24.0)
+TRAY_PREFIX = {"placed": "[omx] tray_placed ", "record": "[omx] tray_judge ", "reentry": "[omx] tray_reentry "}
+
+
+def tray_settings() -> dict:
+    """cfg "tray_judge": {"mode": "record" | "on" | "off", "hold_s": 1.0}. Default record: the judge only records when
+    it would have judged; "on" ends the unloading eval there and lets the Host report it (TK 11/24)."""
+    c = CFG.get("tray_judge")
+    c = c if isinstance(c, dict) else {"mode": "off"} if c is False else {}
+    return {"mode": c.get("mode", "record"), "hold_s": float(c.get("hold_s", 1.0))}
+
+
+def tray_env(eval_info: dict, arm: str | None, cams: dict) -> dict:
+    """3.24.0: the "placed on the Pinky tray" judge of a control-tower unloading (pinky_check) on the cooperative robot."""
+    plan = eval_info.get("pinky_check")
+    st = tray_settings()
+    if not plan or ROBOT_MODE != "bimanual" or arm or st["mode"] not in ("record", "on") \
+            or not {"front", "front_2"} <= set(cams) or not (TOOLS_DIR / "tray_judge.py").exists():
+        return {}
+    _write_json(TRAY_JUDGE_FILE, {"box": int(plan["box"]), "slot": plan["slot"], "mode": st["mode"], "hold_s": st["hold_s"],
+                                  "tray_ref_file": (plan.get("tray") or {}).get("tray_ref_file"), "rate_hz": 6,
+                                  "max_age_s": 3.0})
+    eval_info["tray_judge"] = {"mode": st["mode"], "hold_s": st["hold_s"]}
+    return {"OMX_TRAY_JUDGE": str(TRAY_JUDGE_FILE)}
+
+
+def tray_line(job, kind: str, line: str) -> None:
+    """omx_run's tray judge lines (3.24.0). placed: job.info.tray_placed at once (the Host reports the placement and the
+    Pinky may leave). reentry hold: the result says "hold" right away (the run waits, torque on, for [홈 위치로 이동])."""
+    try:
+        d = json.loads(line[len(TRAY_PREFIX[kind]):])
+    except ValueError:
+        return
+    if kind == "placed":
+        job.info["tray_placed"] = d
+    elif kind == "record":
+        job.info["tray_judge_record"] = d
+    else:
+        job.info.setdefault("tray_reentry", []).append(d)
+        if d.get("event") == "hold":
+            hold = {"reason": "tray_reentry", "side": d.get("side"), "joints": d.get("joints"), "at": d.get("at"),
+                    "after_s": d.get("after_s")}
+            job.info["tray_hold"] = hold
+            LAST_RESULT.clear()
+            LAST_RESULT.update(kind="eval", source=job.info.get("source", "panel"), repo_id=job.info.get("repo_id"),
+                               stage="hold", final=False, hold=hold, placement=job.info.get("tray_placed"),
+                               exit_ok=None, err=None)
+
+
 WRIST_CHECK_PREFIX = "[omx] wrist_check "  # omx_run.py / omx_wristcheck.py (3.22.0)
 
 
@@ -1442,6 +1491,10 @@ class Job:
             LAST_RESULT.clear()
             LAST_RESULT.update(eval_result(self), stage="done", final=True, align=None, pinky=None, placement=None,
                                handover=None)
+            if self.info.get("tray_placed"):  # 3.24.0: the unloading ended on the tray judge
+                LAST_RESULT["placement"] = self.info["tray_placed"]
+            if self.info.get("tray_hold"):
+                LAST_RESULT["hold"] = dict(self.info["tray_hold"], released_at=now_iso())
             if self.info.get("handover"):
                 handover_after_eval(self, proc)  # 3.18.0: placed -> the waiting runner; otherwise the usual alignment
             elif self.info.get("shelf_align"):
@@ -1537,6 +1590,10 @@ class Job:
             self.info["safe_start"] = line.split("safe freeze:", 1)[1].strip()
             if "기다립니다" in line:
                 self.info["phase"] = "비상 정지 · 제자리에서 기다림 ([홈 위치로 이동])"
+        elif self.kind == "eval" and line.startswith("[omx] tray_"):
+            for kind, prefix in TRAY_PREFIX.items():
+                if line.startswith(prefix):
+                    tray_line(self, kind, line)
         elif line.startswith(WRIST_CHECK_PREFIX) and self.kind == "eval":
             try:
                 chk = json.loads(line[len(WRIST_CHECK_PREFIX):])
@@ -3025,6 +3082,7 @@ def eval_result(job) -> dict:
             "last_episode": {k: end.get(k) for k in ("episode", "at", "aborted", "returned", "elapsed_s", "end_reason",
                                                      "judged_at", "loop_ms")} if end else None,
             "arms": arms or None, "wrist_check": info.get("wrist_check"),
+            "tray_judge": (end or {}).get("tray_judge"),
             "drop_watch": (end or {}).get("drop_watch"),
             "home_check": "unknown" if not checks or None in checks else "ok" if all(checks) else "far"}
 
@@ -3385,7 +3443,18 @@ def tray_check_before(plan: dict) -> dict:
 
 def pinky_after_eval(plan: dict, eval_proc) -> None:
     """Called when the eval has ended. Every end but 비상 정지 (arms held in place) and 강제 종료 goes on to the
-    camera check; last_result stays final=False until it is over."""
+    camera check; last_result stays final=False until it is over. 3.24.0: an unloading that ended on the tray judge
+    has no camera check after it (the Pinky has left by then: the tray would read empty); the judged values are it."""
+    placed = LAST_RESULT.get("placement") if (LAST_RESULT.get("placement") or {}).get("source") == "eval_judge" \
+        and (LAST_RESULT.get("placement") or {}).get("operation") == "OUTBOUND" else None
+    if placed:
+        LAST_RESULT["pinky"] = {"ran": False, "skipped": "tray_placed", "source": "eval_judge", "box": plan["box"],
+                                "slot": plan["slot"], "pinky_id": plan.get("pinky_id"), "pinky_no": plan.get("pinky_no"),
+                                **{k: placed.get(k) for k in ("on_pinky", "slot_empty", "tray_marker", "tray_changed",
+                                                              "observed_ts", "observed_clock", "judged_at")},
+                                "on_shelf": False if placed.get("slot_empty") else None, "reported_at": now_iso(),
+                                **({"pre_mission": plan["tray"]} if plan.get("tray") else {})}
+        return
     pinky = {"ran": False, "on_pinky": None, "on_shelf": None, "box": plan["box"], "slot": plan["slot"],
              "pinky_id": plan.get("pinky_id"), "pinky_no": plan.get("pinky_no"), "returncode": None, "skipped": None}
     if plan.get("pinky_id_ignored"):
@@ -4127,7 +4196,8 @@ def start_eval(body: dict) -> dict:
               | {"OMX_EPISODE_END": str(EPISODE_END_FILE)} | ({"OMX_END_ON_RETURN": "1"} if end_on_return else {})
               | ({"OMX_FAST_RELEASE": "1"} if fast_release else {}) | ({} if record else {"OMX_NO_RECORD": "1"})
               | (handover_env(ho) if ho else {}) | ({"OMX_ARM_SIDE": arm} if arm else {})
-              | ({"OMX_WRIST_CHECK": "1"} if wrist_check_on() else {}) | drop_env(eval_info, arm, eval_cams))
+              | ({"OMX_WRIST_CHECK": "1"} if wrist_check_on() else {}) | drop_env(eval_info, arm, eval_cams)
+              | tray_env(eval_info, arm, eval_cams))
     EVAL_HOME_POSE.clear()
     EVAL_HOME_POSE.update(repo_id=repo_id, home=home)
     if ho and ho["mode"] == "handover":
@@ -4958,11 +5028,13 @@ class Handler(BaseHTTPRequestHandler):
                 # a control-tower (Host) request moves the arms only while armed is on (TK 11/16); the screen button as before
                 if body.get("source") == "mqtt" and not ARMED["on"]:
                     raise RuntimeError(f"armed 꺼짐: 관제 홈 복귀 거절 ({ARMED.get('off_reason') or '꺼짐'})")
-                if body.get("source") == "mqtt" and (ALIGN.get("hold") or HANDOVER.get("hold")):
+                tray_hold = JOB.running() and JOB.kind == "eval" and JOB.info.get("tray_hold")
+                if body.get("source") == "mqtt" and (ALIGN.get("hold") or HANDOVER.get("hold") or tray_hold):
                     # 3.21.1: the arms were left in place with the torque on (no safe way back): a person checks first
+                    # 3.24.0: also a hand held over the tray zone after an unloading
                     raise Refused("팔이 토크가 켜진 채 제자리에서 기다리는 중이라 관제 홈 복귀를 거절합니다. "
                                   "현장에서 상자와 팔을 확인한 뒤 화면의 [홈 위치로 이동]을 누르세요", refused="hold",
-                                  hold="align" if ALIGN.get("hold") else "handover")
+                                  hold="align" if ALIGN.get("hold") else "handover" if HANDOVER.get("hold") else "tray")
                 self._json(home_return())
             elif self.path == "/api/kill":
                 set_armed(False, {"home": "즉시 중단", "freeze": "비상 정지"}.get(body.get("mode"), "강제 종료"))

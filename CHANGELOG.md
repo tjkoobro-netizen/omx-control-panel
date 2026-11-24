@@ -1,5 +1,20 @@
 # OMX 제어판 버전 기록
 
+## 3.24.0 (2026-11-24) - 출고 평가 중 쟁반 놓음 판정, 홈 복귀 중 쟁반 구역 재진입 감시
+
+- 관제 출고(`pinky_check`) 평가에서 Guide의 쟁반 놓음 판정(`tray_judge.py` 1124b, omx_tools에 함께 설치)을 평가 루프 옆 별도 스레드로 약 6Hz 돌림. 입력은 front(쟁반)·front_2(칸) 원본 프레임, 관절, 두 팔 그리퍼 명령·실제값. 촬영 시각이 3초 넘게 지난 프레임은 넘기지 않음. 복귀하면 끝내기(`end_on_return`)와 상관없이 따로 켜짐
+- 판정(Guide 조건): 상자가 쟁반 위(마커 0.5초 멈춤 또는 직전 빈 쟁반 대비 변화 ≥ 0.25) + front_2 칸 빔 + 양손 끝이 쟁반 구역에서 3cm 넘게 떨어짐 + 두 그리퍼 쥔 상태 아님 + 손이 한 번은 쟁반에 들어왔었음, 이것이 `hold_s`(TK 11/24: 1.0초) 동안 이어짐
+- Guide 재생 검증(11/24, 두 팔 출고 평가 35회 + 1112 시연 37회, 원본 영상 6Hz): 잘못 뜬 판정 0회, 실제로 놓은 46회 모두 판정. 쟁반 안에서 쥠이 풀린 순간부터 판정까지 유지 1.0초일 때 시연 중앙값 3.0초(p90 4.2초), 평가 3.7초(p90 5.0초). 지연은 대부분 정책이 놓은 뒤 손을 쟁반 위에 두는 시간
+- 설정 `"tray_judge": {"mode": "record" | "on" | "off", "hold_s": 1.0}`. 기본 `record`
+  - `record`: 판정됐을 순간과 근거만 기록(작업 기록 `[omx] tray_judge {json}`, `job.info.tray_judge_record`, `last_result.tray_judge`). 평가·상차 확인·완료 보고는 지금과 같음. 현장 기록을 본 뒤 `on`으로 바꿈
+  - `on`: 판정 순간 평가를 끝내고(`end_reason "tray_placed"`) 작업 기록 `[omx] tray_placed {json}` → `job.info.tray_placed`를 바로 채움(관제 Host가 첫 완료 보고 → 관제가 Pinky 출발). 끝난 뒤 `last_result.placement`도 같은 객체: {`operation` "OUTBOUND", `on_pinky`, `slot_empty`, `slot`, `box`, `tips_clear`, `grippers_released`, `tray_marker`, `tray_changed`, `observed_ts`, `observed_clock` "capture", `observed_cameras`, `source` "eval_judge", `judge_version`, `mode`, `judged_at`}
+  - `on`으로 판정된 출고는 평가 뒤 상차 확인(pinky_read)을 하지 않음. 그때는 Pinky가 떠나 쟁반이 화면에 없어 오판함(TK 11/24). `last_result.pinky` = {`ran` false, `skipped` "tray_placed", `source` "eval_judge", 판정 순간의 `on_pinky`·`slot_empty`·`tray_marker`·`tray_changed`·`observed_ts`, `pre_mission`}
+  - 판정이 안 잡히면 지금과 같음(끝까지 평가 → 상차 확인)
+- 홈 복귀 중 쟁반 구역 재진입 감시(`on`으로 판정된 뒤의 안전 정지에서만, TK 11/24): 손끝(FK)이 쟁반 구역(+3cm)에 다시 들어오면 홈 쪽 이동을 멈추고 손을 위로 듦(수직 들기 계산 재사용). 벗어나면 홈 복귀를 이어 감. 5초 안에 못 벗어나거나 4번째로 들어오면 토크를 켠 채 제자리에서 멈춤(비상 정지와 같은 대기, [홈 위치로 이동] 뒤에는 감시 없이 돌아감). 작업 기록 `[omx] tray_reentry {json}`(enter·clear·hold)
+  - 멈추면 바로 `last_result.stage "hold"`, `final` false, `hold` = {`reason` "tray_reentry", `side`, `at`, `after_s`}. 그동안 관제의 `/api/home/return`(`"source": "mqtt"`)은 400 `"refused": "hold"`, `"hold": "tray"`. 사람이 [홈 위치로 이동]을 누르면 평가가 끝나고 `final` true(`hold.released_at` 남김)
+- 협동 구성, front·front_2를 여는 출고 평가에서만. `tray_judge.py`가 설치돼 있지 않으면 꺼짐
+- 계기: 11/24 02:13 출고 77초 중 정책 끝 뒤 홈 18초·상차 확인 6초를 기다린 뒤에야 Pinky 출발, TK 요청(Host 세션 전달)
+
 ## 3.23.0 (2026-11-24) - 평가 중 상자 떨어뜨림 감지(기록 모드)
 
 - 협동 구성 평가에서 상자를 떨어뜨렸는지 기록함(`omx_dropwatch.py`, 판정 `1124b`). 평가를 끝내지 않고 팔 동작에도 관여하지 않음. 끝내기·토크 유지 정지는 현장 회차를 본 뒤 TK 결정으로 따로 켬
