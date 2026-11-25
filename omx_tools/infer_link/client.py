@@ -1,4 +1,4 @@
-# Copied from the team's robot repo (services/roport-omx/src/roport_omx/infer_link, task/omx-cooperative 749b47b, wire RPI1); keep the code identical there and here.
+# Copied from the team's robot repo (services/roport-omx/src/roport_omx/infer_link, task/omx-cooperative c2baaa0, wire RPI1); keep the code identical there and here.
 """UDP inference client for the host PC's OMX panel (wire RPI1); stdlib only.
 
 One request at a time: an InferenceClient is not thread-safe. Its one socket receives every reply,

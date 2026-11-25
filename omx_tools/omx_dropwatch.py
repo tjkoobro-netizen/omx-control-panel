@@ -29,7 +29,11 @@ One arm (1125a, TK 11/25 via Guide): a one-arm run (2A left, 2C right) names its
 
 The control loop only hands over numbers (and a frame copy at FRAME_HZ while a check runs); the work is done in
 this module's own thread, so the 30 Hz loop is not slowed. Config (OMX_DROP_WATCH=<json>): box_ids, camera,
-tray_roi [v0, v1, u0, u1] or null, shelf_roi (default handover_fk.json shelf.top_roi), frame_dir, fps.
+tray_roi [v0, v1, u0, u1] or null, shelf_roi (default handover_fk.json shelf.top_roi), frame_dir, fps, mode.
+
+Mode (3.28.0): "record" (default, as before: records only) or "on": the first "confirmed" of an episode is handed to
+the control loop (take_hit), which stops the evaluation and holds the arms in place with the torque on (the
+비상 정지 path); a person checks and presses [홈 위치로 이동]. "undecided", "uncertain" and "not_checked" stay records.
 """
 
 from __future__ import annotations
@@ -142,6 +146,9 @@ class DropWatch:
 
         cfg = json.loads(Path(path).read_text())
         self.cfg = cfg
+        self.mode = cfg.get("mode") or "record"  # 3.28.0: "record" | "on" (a confirmed drop stops and holds)
+        if self.mode not in ("record", "on"):
+            raise ValueError(f"mode {self.mode}")
         self.arm = cfg.get("arm")  # 1125a: "left" / "right" = a one-arm run (joints without prefix); None = both arms
         if self.arm not in (None, "left", "right"):
             raise ValueError(f"arm {self.arm}")
@@ -195,6 +202,7 @@ class DropWatch:
             self.frames.clear()
             self.frame_until = 0.0
             self.episode = getattr(self, "episode", -1) + 1
+            self.hit, self.hit_taken = None, False
 
     # ------------------------------------------------------------ the control loop's side (cheap)
     def feed(self, obs: dict, action: dict, t: float) -> None:
@@ -373,6 +381,19 @@ class DropWatch:
                 out["frame_error"] = str(exc)[:120]
         with self.lock:
             c["rec"]["stage2"] = out
+            if result == "confirmed" and self.mode == "on" and self.hit is None:
+                r = c["rec"]
+                self.hit = {"side": r["side"], "since_start_s": r["since_start_s"], "at": r["at"], "zone": r["zone"],
+                            "tip": r["tip"], "kind": kind, "why": why, "frame_file": out.get("frame_file"),
+                            "decided_at": out["decided_at"], "version": VERSION}
+
+    def take_hit(self) -> dict | None:
+        """3.28.0, mode "on": the first confirmed drop of this episode, handed out once (the control loop's side)."""
+        with self.lock:
+            if self.hit is None or self.hit_taken:
+                return None
+            self.hit_taken = True
+            return dict(self.hit)
 
     def finish(self) -> dict:
         """The episode ended: let the thread take what is left, close the checks still running, then the summary."""
@@ -392,7 +413,7 @@ class DropWatch:
     def summary(self) -> dict:
         with self.lock:
             sig = [dict(s) for s in self.signals]
-            return {"version": VERSION, "on": True, "mode": "record", "box_ids": sorted(self.box_ids),
+            return {"version": VERSION, "on": True, "mode": self.mode, "hit": self.hit, "box_ids": sorted(self.box_ids),
                     "tray_roi": self.tray_roi, **({"arm": self.arm, "slot": self.slot, "operation": self.operation,
                                                     "camera": self.camera, "shelf_roi": self.shelf_roi} if self.arm else {}), "updates": self.updates, "errors": self.errors,
                     "last_error": getattr(self, "last_error", None), "frames_checked": self.frames_checked,
