@@ -527,7 +527,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.25.1</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.26.0</span></div>
       </div>
     </div>
     <div class="status">
@@ -1375,7 +1375,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
         <tr><td>녹화 끝내기 (저장)</td><td>완료된 에피소드까지 저장하고 끝냅니다. 진행 중이던 에피소드는 버려집니다</td></tr>
       </table></div>
       <p><b>키보드</b>: 제어판 창이 앞에 있을 때 <span class="mono">→</span> 다음으로, <span class="mono">←</span> 이번 것 다시 찍기, <span class="mono">Esc</span> 녹화 끝내기. 글자 입력 칸에 커서가 있거나 다른 창(터미널 등)이 앞에 있으면 먹지 않습니다. 원위치를 일찍 마쳤으면 <span class="mono">→</span>로 바로 다음 에피소드를 시작하세요.</p>
-      <p><b>음성 안내</b>를 체크하면 이 노트북 스피커로 "에피소드 N 녹화 시작", "물체를 원위치하세요", "저장 완료"를 알려줍니다.</p>
+      <p><b>음성 안내</b>를 체크하면 이 노트북 스피커로 "에피소드 N 녹화 시작", "물체를 원위치하세요", "저장 완료"를 알려줍니다. 관제에서 미션이 들어오면 "미션 접수"라고 알려줍니다(이 페이지가 열려 있을 때만).</p>
       <p><b>Hugging Face 자동 업로드</b>를 체크하면, 녹화가 정상으로 끝난 뒤 <code>huggingface.co/datasets/&lt;HF 아이디&gt;/omx_&lt;첫 키워드&gt;_&lt;MMDD_HHMM&gt;</code>에 비공개로 올립니다. 키워드는 설명과 작업 문장을 보고 자동으로 정합니다. 예를 들어 "딸기를 집어 접시에 놓기"는 strawberry, pick_place, plate가 되고, 첫 키워드가 이름에 들어갑니다. 키워드는 태그로도 붙고, 설명·작업 문장·에피소드 수·카메라 구성·녹화 시각이 데이터셋 페이지에 표로 정리됩니다. 강제 종료했거나 에러로 끝난 녹화는 올리지 않습니다. 업로드는 공유 폴더 저장 다음에 따로 하므로, 실패해도 녹화 데이터는 남아 있습니다. 처음 한 번은 터미널에서 <code>ssh -t omx-gpu '~/venv/il/bin/hf auth login'</code>으로 로그인해야 합니다. 이때 Write 권한 토큰이 필요합니다.</p>
       <p class="tip">처음엔 에피소드 2~3개로 짧게 시험하고, 다시보기로 확인한 뒤 본 녹화를 합니다. 학습에는 보통 50개 이상이 필요합니다.</p>
     </section>
@@ -1949,6 +1949,8 @@ let streamsOn = false;
 
 // Voice prompts in this browser (the GPU laptop's speaker is not reachable from a remote session)
 let lastCue = "";
+let lastMission = null;  // 3.26.0: the control-tower mission (eval, source mqtt) already announced
+let cueSeen = false;  // 3.26.0: the first status after the page opened (even with no job) is the starting point
 let lastRefused = "";
 let audioCtx = null;
 function beep(freq, ms) {
@@ -1981,14 +1983,23 @@ function evalObject(info) {
 }
 function voiceCue(job) {
   const info = job.info || {};
+  const firstSeen = !cueSeen;  // before 3.26.0 the first job after opening the page (no job yet) was never announced
+  cueSeen = true;
   if (job.kind !== "record" && job.kind !== "eval") return;
+  // 3.26.0: a mission from the control tower is announced once, the moment its job first shows ("미션 접수"),
+  // instead of "시도 N 시작"; an evaluation started on this panel is announced as before
+  const mission = job.kind === "eval" && info.source === "mqtt";
+  const jobId = `${job.started_at || ""}|${info.repo_id || ""}`;
+  if (mission && job.running && jobId !== lastMission) {
+    lastMission = jobId;
+    if (!firstSeen) say("미션 접수");
+  }
   const key = [job.running, info.phase, info.episode || 0].join("|");  // the first status can show the phase before the episode
   if (key === lastCue) return;
-  const first = lastCue === "";
   lastCue = key;
-  if (first) return;  // do not announce the state that was already there when the page opened
+  if (firstSeen) return;  // do not announce the state that was already there when the page opened
   if (info.phase === "녹화 중") say(`에피소드 ${(info.episode || 0) + 1} 녹화 시작`);
-  else if (info.phase === "실행 중") say(`시도 ${(info.episode || 0) + 1} 시작`);
+  else if (info.phase === "실행 중") { if (!mission) say(`시도 ${(info.episode || 0) + 1} 시작`); }
   else if (info.phase === "원위치 시간" && job.kind === "eval") say(`시도 끝. 성공 여부를 누르고 ${evalObject(info)}를 원위치하세요`);
   else if (info.phase === "원위치 시간") say("녹화 끝. 물체를 원위치하세요");
   else if (info.phase === "다시 찍기") say("다시 찍습니다");

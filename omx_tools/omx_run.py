@@ -473,6 +473,17 @@ def _make_tray():
         return None
 
 
+def _fitted_tray(judge):
+    """3.26.0: the side camera tray quad the tray judge fitted on this eval's first frame (Pinky stands +-25 px
+    differently each time), None before it is fitted or when the fit scored low (default quad used). One arm only: the
+    side cameras always fit on the first frame (no tray_fit_score = not fitted yet). For two-arm 2B the quad aligned to
+    the pre-mission photo (tray_reference "first_frame(checked_vs_pre_mission)") would also count as fitted (Guide)."""
+    tray, info = getattr(judge, "tray", None), getattr(judge, "tray_info", None) or {}
+    if not tray or "tray_fit_score" not in info or info.get("tray_fit") == "low_score_default_quad":
+        return None
+    return [[float(u), float(v)] for u, v in tray["quad"]]
+
+
 def _make_drop():
     path = os.environ.get("OMX_DROP_WATCH", "").strip()
     if not path:
@@ -1088,6 +1099,14 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
         DROP.reset(time.time())
     tray = TRAY is not None and policy is not None and dataset is not None  # 3.24.0: not tied to RETURN.on either
     told = False
+    tele = None
+    if policy is not None and dataset is not None:  # 3.26.0: the 5 s camera / UDP / loop lines of an eval episode
+        try:
+            import omx_telemetry
+
+            tele = omx_telemetry.Telemetry(robot, getattr(policy, "backend", None), fps, _say)
+        except Exception as exc:  # noqa: BLE001  no lines = the eval runs as before
+            _say(f"[omx] telemetry: 켜지 못함 ({type(exc).__name__}: {exc})")
     if tray:
         TRAY.reset(time.time())
     if watch:
@@ -1172,10 +1191,17 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
         dt = time.perf_counter() - t0
         if dt > interval:
             logging.warning(f"Record loop is running slower ({1 / dt:.1f} Hz) than the target FPS ({fps} Hz).")
+        if tele is not None:
+            try:
+                tele.step(t0, raw, dt)
+            except Exception:  # noqa: BLE001  never disturb the loop
+                tele = None
         due += interval
         if time.perf_counter() > due + interval:  # fell behind (a stall): start the schedule again from now
             due = time.perf_counter()
         precise_sleep(max(due - time.perf_counter(), 0.0))
+    if tele is not None:
+        tele.finish()  # the last partial 5 s and the episode's "... total:" lines (never raises)
 
 
 def _report_loop_rate(index: int, times: list) -> None:
@@ -1382,6 +1408,8 @@ def run(cfg: RunConfig) -> None:
     TRAY = _make_tray()
     if TRAY is not None and TRAY.one_arm:
         omx_safe_start.AFTER_LAND.append(_tray_recheck)  # 3.25.0: the tray again once the arm is home
+        if DROP is not None and getattr(DROP, "arm", None):
+            DROP.tray_source = lambda: _fitted_tray(TRAY.judge)  # 3.26.0 (Guide 11/25): the tray judge's fitted quad
     if TRAY is not None:
         _say(f"[omx] 쟁반 놓음 판정 {TRAY.version} ({'놓으면 평가를 마치고 바로 알림' if TRAY.mode == 'on' else '기록만: 평가는 그대로'})")
     if DROP is not None:

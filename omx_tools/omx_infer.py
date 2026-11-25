@@ -388,6 +388,9 @@ class UdpRemoteClient(RemoteClient):
         self.server, self.infer_timeout = server, timeout
         self.client = InferenceClient(udp_peer(server), read_udp_key(key_file))
         self.timeouts = 0  # attempts without a reply in time (each one re-sent)
+        # 3.26.0: counters for the 5 s telemetry (omx_telemetry reads differences; ints only, no lock)
+        self.tele = {"req": 0, "bytes": 0, "frag": 0, "resp": 0, "timeout": 0, "rtt_n": 0}
+        self.rtts: deque = deque(maxlen=4000)
 
     def load(self) -> dict:
         out = self.client.load(self.model, self.overrides)
@@ -405,11 +408,19 @@ class UdpRemoteClient(RemoteClient):
                   "obs": items, "chunk": chunk,
                   "rtc": {"delay": rtc_delay, "left": rtc_left.tolist() if rtc_left is not None else None}}
         data = b"".join(blobs)  # the items' [offset, length] already point into the joined blobs
+        tele = self.tele
         for attempt in range(self.ATTEMPTS):
+            tele["req"] += 1
+            tele["bytes"] += len(data)
+            tele["frag"] += -(-len(data) // 1200)  # DATAGRAM_BYTES: an estimate of the datagrams sent
             try:
                 out = self.client.infer(header, data, timeout=self.infer_timeout)
+                tele["resp"] += 1
+                self.rtts.append(self.client.last["round_ms"])
+                tele["rtt_n"] += 1
                 break
             except InferenceTimeout:
+                tele["timeout"] += 1
                 self.timeouts += 1
                 if attempt == self.ATTEMPTS - 1:
                     raise RuntimeError(f"UDP 추론 응답 없음 ({self.ATTEMPTS}번, 각 {self.infer_timeout:g}초): "

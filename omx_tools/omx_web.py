@@ -327,13 +327,36 @@ DROP_WATCH_FILE = LOG_DIR / "drop_watch.json"  # omx_run's drop watch settings (
 DROP_FRAMES = LOG_DIR / "drop_frames"  # the top frame at each confirmed drop
 
 
-def drop_env(eval_info: dict, arm: str | None, cams: dict) -> dict:
+def drop_env(eval_info: dict, arm: str | None, cams: dict, body: dict | None = None) -> dict:
     """3.23.0: the box drop watch of a cooperative evaluation, record mode (never ends the run, never moves an arm).
     Its own switch, not tied to end_on_return. cfg "drop_watch": false turns it off; "drop_tray_roi" [v0, v1, u0, u1]
-    replaces the tray region of the top camera."""
-    if ROBOT_MODE != "bimanual" or arm or CFG.get("drop_watch", True) is False or "front" not in cams:
+    replaces the tray region of the top camera.
+    3.26.0: one arm too (DropWatch 1125a, record mode): a loading mission (end_on_place) checks on the top camera
+    (slot 2A / 2C), an unloading (pinky_check) on that arm's side camera (front_3 / front_4); a panel-screen one-arm
+    eval (no mission) records the gripper signal only."""
+    if ROBOT_MODE != "bimanual" or CFG.get("drop_watch", True) is False:
         return {}
+    body = body or {}
     box = eval_info.get("target_marker")
+    if box is None and str(body.get("target_marker", "")).strip().isdigit():
+        box = int(body["target_marker"])
+    if arm:
+        plan = eval_info.get("pinky_check") or {}
+        if plan.get("one_arm"):
+            op, slot, cam = "OUTBOUND", plan["slot"], {"A": "front_3", "C": "front_4"}[plan["slot"][1:]]
+        elif body.get("end_on_place"):
+            op, slot, cam = "INBOUND", command_slot(body), "front"
+        else:
+            op, slot, cam = None, None, None
+        conf = {"box_ids": [int(box)] if box is not None else None, "arm": arm, "operation": op,
+                "slot": slot, "frame_dir": str(DROP_FRAMES),
+                "repo_id": eval_info.get("repo_id")}
+        if cam is not None and cam not in cams:
+            conf["operation"] = None  # its camera is not open: stage 1 only
+        _write_json(DROP_WATCH_FILE, {k: v for k, v in conf.items() if v is not None})
+        return {"OMX_DROP_WATCH": str(DROP_WATCH_FILE)}
+    if "front" not in cams:
+        return {}
     conf = {"box_ids": [int(box)] if box is not None else None, "camera": "front", "frame_dir": str(DROP_FRAMES),
             "repo_id": eval_info.get("repo_id")}
     if CFG.get("drop_tray_roi"):
@@ -1830,6 +1853,7 @@ class Job:
             "running": self.running(),
             "kind": self.kind,
             "elapsed": round(time.time() - self.started),
+            "started_at": round(self.started, 3),  # 3.26.0: tells one job from the next (the "미션 접수" voice cue)
             "info": info,
         }
 
@@ -4362,7 +4386,7 @@ def start_eval(body: dict) -> dict:
               | {"OMX_EPISODE_END": str(EPISODE_END_FILE)} | ({"OMX_END_ON_RETURN": "1"} if end_on_return else {})
               | ({"OMX_FAST_RELEASE": "1"} if fast_release else {}) | ({} if record else {"OMX_NO_RECORD": "1"})
               | (handover_env(ho) if ho else {}) | ({"OMX_ARM_SIDE": arm} if arm else {})
-              | ({"OMX_WRIST_CHECK": "1"} if wrist_check_on() else {}) | drop_env(eval_info, arm, eval_cams)
+              | ({"OMX_WRIST_CHECK": "1"} if wrist_check_on() else {}) | drop_env(eval_info, arm, eval_cams, body)
               | tray_env(eval_info, arm, eval_cams) | one_arm_env(model_cfg, arm, body)
               | place_one_arm_env(body, arm, eval_info, episodes, eval_cams))
     EVAL_HOME_POSE.clear()
