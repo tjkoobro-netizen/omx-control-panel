@@ -4425,7 +4425,8 @@ def start_eval(body: dict) -> dict:
     JOB.start("eval", cmd, eval_info,
               need_leader=False, env_extra=thread_env(threads) | home_env(reset_home, open_gripper, repo_id) | async_env
               | ({"OMX_HOME_POSE": str(omx_home.write_run_file(home, RUN_HOME_FILE))} if home else {}) | tenv
-              | {"OMX_EPISODE_END": str(EPISODE_END_FILE)} | ({"OMX_END_ON_RETURN": "1"} if end_on_return else {})
+              | {"OMX_EPISODE_END": str(EPISODE_END_FILE), "OMX_PARALLEL_CAMS": "1"}  # 3.29.0: a single robot's cameras open at once
+              | ({"OMX_END_ON_RETURN": "1"} if end_on_return else {})
               | ({"OMX_FAST_RELEASE": "1"} if fast_release else {}) | ({} if record else {"OMX_NO_RECORD": "1"})
               | (handover_env(ho) if ho else {}) | ({"OMX_ARM_SIDE": arm} if arm else {})
               | ({"OMX_WRIST_CHECK": "1"} if wrist_check_on() else {}) | drop_env(eval_info, arm, eval_cams, body)
@@ -5419,6 +5420,21 @@ def loss_monitor_action(body: dict) -> dict:
     return omx_lossmon.status(lossmon_settings())
 
 
+def clear_stale_warm_busy() -> None:
+    """3.29.0 (Guide 11/25): /dev/shm/omx_warm_busy_<pid> of this account whose process is gone. The panel removes it
+    when a job ends; one left over (a crash, a test) would make the loss monitor count a reused pid as an evaluation."""
+    for f in Path("/dev/shm").glob("omx_warm_busy_*"):
+        try:
+            pid = int(f.name.rsplit("_", 1)[1])
+            if f.stat().st_uid != os.getuid():
+                continue
+            os.kill(pid, 0)  # alive (or another account's): keep
+        except ProcessLookupError:
+            f.unlink(missing_ok=True)
+        except (ValueError, OSError):
+            continue
+
+
 def loss_monitor_autostart() -> None:
     """3.27.0: when the panel starts, start the loss monitor if it is set to (default) and not running (a reboot
     left it off on 11/25). It runs in its own session, so a panel restart does not stop it."""
@@ -5471,6 +5487,7 @@ def main() -> None:
         start_inference_server()
         start_udp_keeper()
     threading.Thread(target=loss_monitor_autostart, daemon=True, name="lossmon-auto").start()
+    clear_stale_warm_busy()
     print(f"OMX panel {VERSION} on http://{HOST}:{PORT} (user {USER}, settings: {CFG['_source']})", flush=True)
     try:
         server.serve_forever()
