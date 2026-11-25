@@ -4832,6 +4832,16 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         elif self.path == "/api/motor_output":
             self._json(motor_output())
+        elif self.path == "/api/loss_monitor":
+            self._json(loss_monitor_status())
+        elif self.path.startswith("/api/loss_monitor/report?"):
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            try:
+                import omx_lossmon
+
+                self._json({"text": omx_lossmon.report_text(lossmon_settings(), q.get("day", [""])[0])})
+            except Exception as exc:
+                self._json({"error": str(exc)}, 400)
         elif self.path == "/api/status":
             try:
                 WARM.ensure()
@@ -5163,6 +5173,8 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(UDP_KEEPER.ensure(body))
             elif self.path == "/api/start_pose/save":
                 self._json(save_start_pose(body.get("kind", "start")))
+            elif self.path == "/api/loss_monitor":
+                self._json(loss_monitor_action(body))
             elif self.path == "/api/eval/start":
                 self._json(start_eval(body))
             elif self.path == "/api/target":
@@ -5312,6 +5324,71 @@ def start_inference_server() -> None:
 
 UDP_KEEPER = None
 
+LOSSMON_STATE = SETUP_FILE.parent / "loss_monitor.json"  # 3.27.0 (next to robot.json, like infer_link.json): the panel's "start when the panel starts" choice
+
+
+def lossmon_settings() -> dict:
+    """Control PC only (the GPU laptop panel shows nothing); the GPU laptop's ssh name is this panel's (gpu_host)."""
+    import omx_lossmon
+
+    s = omx_lossmon.settings(CFG, LOSSMON_STATE)
+    s["gpu"] = s.get("gpu") or (remote.HOST if CONTROL else None)
+    s["panel_logs"] = s.get("panel_logs") or str(LOG_DIR)
+    s["enabled"] = bool(CONTROL)
+    return s
+
+
+def loss_monitor_status() -> dict:
+    """3.27.0: Guide's mission loss monitor (omx_live_monitor.py, outside this repository): on / off, today's warnings."""
+    try:
+        import omx_lossmon
+
+        s = lossmon_settings()
+        return omx_lossmon.status(s) if s["enabled"] else {"available": False}
+    except Exception as exc:  # noqa: BLE001  the screen shows the reason
+        return {"available": False, "error": str(exc)[:200]}
+
+
+def loss_monitor_action(body: dict) -> dict:
+    import omx_lossmon
+
+    if body.get("source") == "mqtt":
+        raise RuntimeError("손실 감시는 패널 화면에서만 켜고 끕니다.")
+    s = lossmon_settings()
+    if not s["enabled"] or not omx_lossmon.available(s):
+        raise RuntimeError(f"손실 감시는 제어 PC에서만 씁니다 ({s['script']}).")
+    act = str(body.get("action") or "")
+    if act == "on":
+        omx_lossmon.start(s)
+    elif act == "off":
+        omx_lossmon.stop(s)
+    elif act == "auto":
+        LOSSMON_STATE.parent.mkdir(parents=True, exist_ok=True)
+        LOSSMON_STATE.write_text(json.dumps({"auto": bool(body.get("auto"))}) + "\n")
+    elif act == "report":
+        if JOB.running() or STANDBY.alive():
+            raise RuntimeError("평가·미션이 끝난 뒤 만드세요. 보고서는 GPU 노트북 기록을 가져옵니다(rsync).")
+        omx_lossmon.report(s)
+    else:
+        raise RuntimeError("action은 on, off, auto, report 중 하나입니다.")
+    return omx_lossmon.status(lossmon_settings())
+
+
+def loss_monitor_autostart() -> None:
+    """3.27.0: when the panel starts, start the loss monitor if it is set to (default) and not running (a reboot
+    left it off on 11/25). It runs in its own session, so a panel restart does not stop it."""
+    try:
+        import omx_lossmon
+
+        s = lossmon_settings()
+        if not s["enabled"] or not omx_lossmon.available(s) or not s["auto"]:
+            return
+        r = omx_lossmon.start(s)
+        if r["started"]:
+            print(f"[omx] 손실 감시를 켰습니다 (pid {r['pids']})", flush=True)
+    except Exception as exc:  # noqa: BLE001  never stop the panel over it
+        print(f"[omx] 손실 감시를 켜지 못했습니다: {exc}", flush=True)
+
 
 def start_udp_keeper() -> None:
     """GPU laptop: the UDP inference server, started when a control PC chooses UDP (omx_udp_keeper.py)."""
@@ -5348,6 +5425,7 @@ def main() -> None:
     else:
         start_inference_server()
         start_udp_keeper()
+    threading.Thread(target=loss_monitor_autostart, daemon=True, name="lossmon-auto").start()
     print(f"OMX panel {VERSION} on http://{HOST}:{PORT} (user {USER}, settings: {CFG['_source']})", flush=True)
     try:
         server.serve_forever()

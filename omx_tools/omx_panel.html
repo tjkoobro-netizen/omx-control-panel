@@ -527,7 +527,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.26.0</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.27.0</span></div>
       </div>
     </div>
     <div class="status">
@@ -1126,6 +1126,27 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       <p class="tip-box">처음엔 물체(상자·딸기 등)와 놓을 곳을 <b>녹화 때와 같은 위치</b>에 두고 시작하세요. 같은 위치에서 성공하는 걸 본 뒤 조금씩 옮겨봅니다. Rerun으로도 보려면 ① 탭의 "Rerun으로도 보기"를 켜두면 함께 적용됩니다.</p>
     </section>
 
+    <section class="panel" id="lossPanel" hidden>
+      <div class="panel-head">
+        <h2>손실 감시 <button type="button" class="qbtn help-open" data-help="loss-mon" title="손실 감시 설명" aria-label="손실 감시 설명">?</button></h2>
+        <div class="row" style="gap:8px;align-items:center">
+          <span class="pill" id="lossState">확인 중</span>
+          <button type="button" id="lossToggle">켜기</button>
+        </div>
+      </div>
+      <div style="display:grid;gap:6px;font-size:12.5px">
+        <div id="lossLine" class="muted"></div>
+        <div id="lossWarn" hidden style="color:var(--warn)"></div>
+        <div id="lossRun" class="muted"></div>
+        <div class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
+          <label style="display:inline-flex;gap:6px;align-items:center"><input type="checkbox" id="lossAuto">패널이 켜질 때 자동으로 켜기</label>
+          <button type="button" id="lossReport" title="GPU 노트북 기록을 가져와 오늘 회차별 요약을 만듭니다. 평가·미션 중에는 못 누릅니다">미션 뒤 보고서</button>
+          <span id="lossReportState" class="muted"></span>
+        </div>
+        <details id="lossReportBox" hidden><summary class="muted">오늘 보고서 보기</summary><pre id="lossReportText" style="white-space:pre-wrap;font-size:11.5px;margin:4px 0 0;max-height:320px;overflow:auto"></pre></details>
+      </div>
+    </section>
+
     <section class="panel">
       <div class="panel-head">
         <h2>평가 기록</h2>
@@ -1554,6 +1575,16 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </ul>
     </section>
 
+    <section id="h-loss-mon">
+      <h3>손실 감시</h3>
+      <p>관제 미션 중 카메라·추론 통신·CPU 과부하와 데이터 손실을 기록하는 감시 프로그램(<code>omx_live_monitor.py</code>, 패널에 함께 설치됨)을 이 제어 PC에서 켜고 끕니다. 감시는 읽기만 하고 로봇·패널·평가에는 손대지 않아요(코어 하나의 약 1.6%, nice 10). 기록은 <code>~/il_ws/omx_loss_tracker/live</code>에 쌓여요. 자세한 내용은 저장소 docs/LIVE_MONITOR.md. GPU 노트북 패널에는 이 칸이 없어요.</p>
+      <ul>
+        <li><b>켜짐 / 꺼짐 / 멈춤</b>: 켜져 있는데 상태 파일이 60초 넘게 갱신되지 않으면 '멈춤'이에요. 끄고 다시 켜 보세요.</li>
+        <li>감시는 패널과 따로 돌아서 패널을 다시 시작해도 끊기지 않아요. <b>패널이 켜질 때 자동으로 켜기</b>를 체크해 두면(기본) 재부팅 뒤 패널이 켜질 때 함께 켜져요.</li>
+        <li><b>미션 뒤 보고서</b>: GPU 노트북 쪽 기록을 가져와(rsync) 오늘 평가 회차별 요약을 만들어요. 평가·미션 중에는 누를 수 없어요.</li>
+        <li>끄기는 이 PC의 감시만 끄고, GPU 노트북 쪽 작은 기록은 그대로 둬요.</li>
+      </ul>
+    </section>
     <section id="h-ev-link">
       <h3>AI 추론 통신 (UDP)</h3>
       <p>이 PC(로봇 쪽)는 동작 묶음이 줄어들 때마다 최신 관절 값과 카메라 사진을 GPU 노트북(AI 추론 서버)에 보내고, 계산된 동작 묶음을 받아 실행해요. 이 주고받기는 <b>UDP 하나로만</b> 해요. 같은 공유기 안에서 GPU 노트북의 UDP 서버로 바로 보내고, 메시지마다 공유 키로 서명해요. 조각이 하나라도 빠진 메시지는 쓰지 않아요. 제때 답이 없으면 최신 관찰로 다시 보내고(최대 3번), 그래도 없으면 평가를 멈춰요. 관제(MQTT)로 시작한 평가도 같아요.</p>
@@ -3315,6 +3346,55 @@ $("evList").addEventListener("click", (ev2) => {
   }
 });
 setInterval(() => { if (!$("tab-eval").hidden) loadEvals(); }, 5000);
+
+// ---- 3.27.0 손실 감시 (Guide's omx_live_monitor on this PC; the panel starts / stops it and reads its files) ----
+const loss = { busy: false, st: null };
+function lossRender(st) {
+  loss.st = st;
+  $("lossPanel").hidden = !st || !st.available;
+  if (!st || !st.available) return;
+  const state = $("lossState");
+  state.textContent = !st.on ? "꺼짐" : st.stale ? "멈춤(갱신 없음)" : "켜짐";
+  state.className = "pill " + (!st.on ? "warn" : st.stale ? "bad" : "ok");
+  $("lossToggle").textContent = st.on ? "끄기" : "켜기";
+  $("lossAuto").checked = !!st.auto;
+  const age = st.status_age_s == null ? "-" : st.status_age_s < 90 ? `${Math.round(st.status_age_s)}초 전` : `${Math.round(st.status_age_s / 60)}분 전`;
+  $("lossLine").textContent = `오늘 경고 ${st.warn_today}건 · 마지막 갱신 ${st.status_at ? st.status_at.slice(11) : "-"} (${age})` + (st.eval_active ? " · 평가 감시 중" : "");
+  $("lossWarn").hidden = !(st.warn_now || []).length;
+  $("lossWarn").textContent = "지금 경고: " + (st.warn_now || []).join(" · ");
+  const r = st.last_run;
+  $("lossRun").textContent = r ? `마지막 회차 ${r.start || ""} (${r.dur_s ?? "-"}초): 경고 ${r.warn_n ?? 0}, CPU 코어 최대 ${r.cpu_core_max ?? "-"}%, 재전송 ${r.resent_total ?? "-"}, 버림 ${(r.pc_udp_drops || 0) + (r.pc_net_drops || 0)}` : "오늘 끝난 평가 회차 없음";
+  const rep = st.report || {};
+  const running = !!(state && state.job && state.job.running);
+  $("lossReport").disabled = !!rep.running || running;
+  $("lossReportState").textContent = rep.running ? "보고서 만드는 중..." : rep.error ? `보고서 실패: ${rep.error}` : rep.ok ? `보고서 ${rep.done_at}: ${rep.file}` : "";
+  $("lossReportBox").hidden = !rep.ok;
+}
+async function lossLoad() {
+  if (loss.busy) return;
+  try { lossRender(await (await fetch("/api/loss_monitor")).json()); } catch (e) {}
+}
+async function lossDo(body, msg) {
+  loss.busy = true;
+  try { lossRender(await api("/api/loss_monitor", body)); if (msg) toast(msg); }
+  catch (e) { toast(e.message, "err"); }
+  finally { loss.busy = false; }
+}
+$("lossToggle").addEventListener("click", () => {
+  const on = loss.st && loss.st.on;
+  lossDo({ action: on ? "off" : "on" }, on ? "손실 감시를 껐습니다" : "손실 감시를 켰습니다");
+});
+$("lossAuto").addEventListener("change", () => lossDo({ action: "auto", auto: $("lossAuto").checked }));
+$("lossReport").addEventListener("click", () => lossDo({ action: "report" }, "보고서를 만듭니다 (GPU 기록 가져오기 포함, 1분 안팎)"));
+$("lossReportBox").addEventListener("toggle", async () => {
+  if (!$("lossReportBox").open || !loss.st) return;
+  try {
+    const r = await (await fetch(`/api/loss_monitor/report?day=${encodeURIComponent(loss.st.day)}`)).json();
+    $("lossReportText").textContent = r.text || r.error || "";
+  } catch (e) {}
+});
+setInterval(() => { if (!$("tab-eval").hidden) lossLoad(); }, 5000);
+lossLoad();
 
 function renderEvalResults(liveInfo) {
   const e = ev.evals.find(x => x.repo_id === ev.view);
