@@ -94,8 +94,9 @@ def _pids(pattern):
             cmd = Path(d, "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
         except OSError:
             continue
-        if pattern(cmd):
-            res.append(int(d.rsplit("/", 1)[1]))
+        pid = int(d.rsplit("/", 1)[1])
+        if pattern(cmd, pid):
+            res.append(pid)
     return res
 
 
@@ -126,8 +127,15 @@ def _mem_avail_mb():
     return None
 
 
-def _is_eval(cmd):
-    return "omx_run.py" in cmd and "--omx-warm" not in cmd and not cmd.startswith("/bin/bash")
+# 패널이 띄우는 omx_run 경로 (Admin 시험 복사본 ~/il_ws/omx_panel_tests/... 은 평가로 세지 않음)
+EVAL_RUN = os.environ.get("OMX_EVAL_RUN", str(PANEL_LOGS.parent / "omx_tools" / "omx_run.py"))
+WARM_BUSY = "/dev/shm/omx_warm_busy_{pid}"   # 미리 띄운(warm) omx_run 이 평가를 맡으면 패널이 쓰는 파일 (3.22.2)
+
+
+def _is_eval(cmd, pid):
+    if EVAL_RUN not in cmd or cmd.startswith("/bin/bash"):
+        return False
+    return "--omx-warm" not in cmd or os.path.exists(WARM_BUSY.format(pid=pid))
 
 
 # ---------------------------------------------------------------- 따라 읽기 (스레드)
@@ -499,15 +507,20 @@ def _rows(day):
 
 
 def _gpu_rows(day):
-    f = OUT / "gpu" / f"gpu_{day}.jsonl"
-    if not f.exists():
-        return []
+    """GPU 쪽 1초 기록 중 그날 것. 파일 이름은 gpu_side 를 켠 날짜라 하루를 넘겨 쌓이므로 모든 파일을 시각으로 거른다"""
+    t0 = time.mktime(time.strptime(day, "%Y%m%d"))
+    t1 = t0 + 86400 + 3600
     out = []
-    for line in f.read_text().splitlines():
-        try:
-            out.append(json.loads(line))
-        except ValueError:
-            pass
+    for f in sorted((OUT / "gpu").glob("gpu_*.jsonl")):
+        if f.stat().st_mtime < t0 - 60 or f.name[4:12] > day:
+            continue
+        for line in f.read_text().splitlines():
+            try:
+                g = json.loads(line)
+            except ValueError:
+                continue
+            if t0 - 3600 <= g.get("t", 0) <= t1:
+                out.append(g)
     return out
 
 
@@ -530,15 +543,18 @@ def _udp_window(stats, t0, t1):
     if not stats:
         return None
     tot, p95, n = {}, [], 0
-    for started in {s_["started"] for s_ in stats}:
+    starts = sorted({s_["started"] for s_ in stats})
+    alive = [s for s in starts if s <= t0 - 2][-1:] + [s for s in starts if t0 - 2 < s <= t1]   # 구간 중 돈 서버들
+    for started in alive:
         seg = sorted((s_ for s_ in stats if s_["started"] == started), key=lambda s_: s_["ts"])
-        inw = [s_ for s_ in seg if t0 - 2 <= s_["ts"] <= t1 + 12]     # 10초마다 남기므로 끝을 넉넉히
-        if not inw:
+        upto = [s_ for s_ in seg if s_["ts"] <= t1 + 12]     # 10초마다(바뀔 때만) 남기므로 끝을 넉넉히
+        if not upto:
             continue
+        inw = [s_ for s_ in upto if s_["ts"] >= t0 - 2]
         before = [s_ for s_ in seg if s_["ts"] < t0 - 2]
         base = before[-1] if before else {}
         for k in UDP_KEYS:
-            tot[k] = tot.get(k, 0) + inw[-1].get(k, 0) - base.get(k, 0)
+            tot[k] = tot.get(k, 0) + upto[-1].get(k, 0) - base.get(k, 0)
         p95 += [s_["infer_ms_p95"] for s_ in inw if s_.get("infer_ms_p95") is not None]
         n += 1
     if not n:

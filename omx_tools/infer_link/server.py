@@ -1,4 +1,4 @@
-# Copied from the team's AI server repo (services/roport-ai-server/src/omx_udp, PR #97 a09b74e); keep the code identical there and here.
+# Copied from the team's AI server repo (services/roport-ai-server/src/omx_udp, task/omx-cooperative 749b47b); keep the code identical there and here.
 """OMX inference UDP server (GPU side): observations in, action chunks out; never drives a robot.
 
 The robot loop stays on the host PC (OMX panel): it sends the latest observation when its action
@@ -10,11 +10,14 @@ Retries always use a new request_id (LOAD is cheap to repeat: the policy keeps l
 
 import argparse
 import ipaddress
+import json
+import math
 import os
 import socket
 import stat
 import sys
 import time
+from collections import Counter, deque
 from pathlib import Path
 from typing import Protocol
 
@@ -24,6 +27,7 @@ from .wire import (
     ECHO_FIELDS,
     ERROR,
     INFER,
+    KIND_NAMES,
     LOAD,
     LOADED,
     PING,
@@ -38,6 +42,8 @@ from .wire import (
 
 DEFAULT_PORT = 5600
 RCVBUF_BYTES = 8 * 1024 * 1024
+STATS_EVERY_S = 10.0
+INFER_MS_KEPT = 4096  # bound on infer ms samples between two stats lines
 
 
 class Policy(Protocol):
@@ -60,12 +66,18 @@ class InferenceServer:
         *,
         peers: set[str],
         timeout: float = 1.0,
+        stats_every: float = 0.0,
     ):
         if not peers:
             raise ValueError("allow at least one host PC address")
         self.sock, self.policy, self.key = sock, policy, check_key(key)
         self.reassembler = Reassembler(key, peers=peers, timeout=timeout)
         self.stats = self.reassembler.stats
+        self.infer_by_peer: Counter = Counter()  # completed INFER requests per host PC
+        self.stats_every = stats_every
+        self._infer_ms: deque[float] = deque(maxlen=INFER_MS_KEPT)  # since last line
+        self._started = time.time()
+        self._last_line: tuple[float, dict] = (time.monotonic(), {})
 
     def _drain(self, first: tuple[bytes, Peer]) -> list[tuple[Message, Peer]]:
         """Feed every datagram already queued; newest complete request per session."""
@@ -98,14 +110,36 @@ class InferenceServer:
             return 0
         replies = 0
         for message, peer in self._drain(first):
-            reply_kind, header = self._answer(message)
-            if reply_kind is None:
-                continue
-            reply = Message(reply_kind, message.session, message.request_id, header)
-            for datagram in pack(reply, self.key):
-                self.sock.sendto(datagram, peer)
-            replies += 1
+            if message.kind == INFER:
+                self.infer_by_peer[peer[0]] += 1
+            kind, header = self._answer(message)
+            if kind is not None and self._reply(message, peer, kind, header):
+                replies += 1
         return replies
+
+    def _reply(self, message: Message, peer: Peer, kind: int, header: dict) -> bool:
+        """Send one reply; a reply that cannot be built or sent is logged, never fatal."""
+        try:
+            datagrams = pack(
+                Message(kind, message.session, message.request_id, header), self.key
+            )
+        except (ValueError, TypeError) as exc:  # too large, not JSON, non-finite
+            self.stats["reply_failed"] += 1
+            print(f"[omx-udp] reply {kind=} not packed: {exc!r}", file=sys.stderr)
+            error = {"code": "REPLY_FAILED", "message": type(exc).__name__}
+            kind = ERROR  # count what is really sent
+            datagrams = pack(
+                Message(kind, message.session, message.request_id, error), self.key
+            )
+        try:
+            for datagram in datagrams:
+                self.sock.sendto(datagram, peer)
+        except OSError as exc:  # ENOBUFS, ENETUNREACH, EPERM from a firewall ...
+            self.stats["send_failed"] += 1
+            print(f"[omx-udp] reply to {peer} not sent: {exc!r}", file=sys.stderr)
+            return False
+        self.stats[f"replied_{KIND_NAMES[kind]}"] += 1
+        return True
 
     def _answer(self, message: Message) -> tuple[int | None, dict]:
         try:
@@ -133,6 +167,10 @@ class InferenceServer:
                 started = time.perf_counter()
                 reply = self.policy.infer(header, message.data)
                 infer_ms = round((time.perf_counter() - started) * 1000, 1)
+                if self.stats_every > 0:  # samples only while stats lines empty them
+                    self._infer_ms.append(infer_ms)
+                if not all(_finite(reply.get(k)) for k in ("actions", "original")):
+                    raise ValueError("policy returned a non-finite action")
                 return ACTIONS, {"infer_ms": infer_ms} | reply | {
                     **{k: header.get(k) for k in ECHO_FIELDS},
                     "model_version": header.get("model_version") or header["model"],
@@ -148,9 +186,61 @@ class InferenceServer:
             print(f"[omx-udp] {message.kind=} failed: {exc!r}", file=sys.stderr)
             return ERROR, {"code": "INFER_FAILED", "message": f"{type(exc).__name__}"}
 
+    def stats_line(self, now: float | None = None) -> dict | None:
+        """Counters since start plus infer ms of this interval; None when nothing changed.
+
+        Cumulative counters (a restart resets them; "started" tells): fragments_expected =
+        fragments_received + fragments_missing + still pending. Requests lost after arriving =
+        timeout + superseded + conflict (fragments missing) + checksum + bad_mac + malformed (all
+        fragments came, message refused). Kernel drops before the socket (RcvbufErrors) are not
+        visible here; they show in /proc/net/udp.
+        """
+        now = time.monotonic() if now is None else now
+        counters = dict(sorted(self.stats.items()))
+        if counters == self._last_line[1] and not self._infer_ms:
+            return None
+        ms = sorted(self._infer_ms)
+        line = {
+            "ts": round(time.time(), 3),
+            "started": round(self._started, 3),
+            "interval_s": round(now - self._last_line[0], 1),
+            **counters,
+            "infer_by_peer": dict(sorted(self.infer_by_peer.items())),
+            "infer_ms_n": len(ms),
+        }
+        if ms:
+            line |= {
+                "infer_ms_p50": ms[(len(ms) - 1) // 2],
+                "infer_ms_p95": ms[min(len(ms) - 1, math.ceil(0.95 * len(ms)) - 1)],
+                "infer_ms_max": ms[-1],
+            }
+        self._infer_ms.clear()
+        self._last_line = (now, counters)
+        return line
+
+    def _log_stats(self):
+        now = time.monotonic()
+        if self.stats_every <= 0 or now - self._last_line[0] < self.stats_every:
+            return
+        line = self.stats_line(now)
+        if line is not None:
+            print(
+                "[omx-udp] stats " + json.dumps(line, separators=(",", ":")), flush=True
+            )
+        else:
+            self._last_line = (now, self._last_line[1])
+
     def serve_forever(self):
         while True:
             self.serve_once(1.0)
+            self._log_stats()
+
+
+def _finite(value) -> bool:
+    """True when every number in a (nested) list is finite; None counts as absent."""
+    if isinstance(value, list | tuple):
+        return all(_finite(v) for v in value)
+    return not isinstance(value, float) or math.isfinite(value)
 
 
 def read_key(path: Path) -> bytes:
@@ -180,6 +270,12 @@ def main(argv=None) -> int:
         default=os.environ.get("OMX_PANEL_TOOLS"),
         help="OMX panel omx_tools directory (LeRobot policy runner)",
     )
+    parser.add_argument(
+        "--stats-every",
+        type=float,
+        default=STATS_EVERY_S,
+        help="seconds between '[omx-udp] stats {json}' lines on stdout (0 = off)",
+    )
     args = parser.parse_args(argv)
     try:
         key = read_key(args.key_file)
@@ -196,7 +292,13 @@ def main(argv=None) -> int:
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, RCVBUF_BYTES)
     sock.bind((host, args.port))
-    server = InferenceServer(sock, PanelPolicy(args.panel_tools), key, peers=peers)
+    server = InferenceServer(
+        sock,
+        PanelPolicy(args.panel_tools),
+        key,
+        peers=peers,
+        stats_every=args.stats_every,
+    )
     print(f"[omx-udp] serving {host}:{args.port} for {sorted(peers)}", flush=True)
     try:
         server.serve_forever()

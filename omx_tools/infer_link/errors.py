@@ -1,4 +1,4 @@
-# Copied from the team's AI server repo (services/roport-ai-server/src/omx_udp, PR #97 a09b74e); keep the code identical there and here.
+# Copied from the team's AI server repo (services/roport-ai-server/src/omx_udp, task/omx-cooperative 749b47b); keep the code identical there and here.
 """Refusals shared by the server and the policies.
 
 Kept apart from server.py: `python -m omx_udp.server` runs that file as __main__ while a policy

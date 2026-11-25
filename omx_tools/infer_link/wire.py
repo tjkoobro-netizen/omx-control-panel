@@ -1,4 +1,4 @@
-# Copied from the team's AI server repo (services/roport-ai-server/src/omx_udp, PR #97 a09b74e; same code as services/roport-omx/src/roport_omx/infer_link/wire.py); keep the code identical there and here.
+# Copied from the team's AI server repo (services/roport-ai-server/src/omx_udp, task/omx-cooperative 749b47b; same code as services/roport-omx/src/roport_omx/infer_link/wire.py); keep the code identical there and here.
 """OMX inference UDP wire v1 (stdlib only): message framing, HMAC and reassembly.
 
 A message (one observation request or one action reply) is split into datagrams of at most
@@ -32,6 +32,15 @@ CHUNK_BYTES = DATAGRAM_BYTES - _HEADER.size
 
 PING, PONG, LOAD, LOADED, INFER, ACTIONS, ERROR = range(1, 8)
 KINDS = {PING, PONG, LOAD, LOADED, INFER, ACTIONS, ERROR}
+KIND_NAMES = {
+    PING: "ping",
+    PONG: "pong",
+    LOAD: "load",
+    LOADED: "loaded",
+    INFER: "infer",
+    ACTIONS: "actions",
+    ERROR: "error",
+}
 REPLIES = {PING: PONG, LOAD: LOADED, INFER: ACTIONS}
 
 # INFER header identifiers from the team's AI UDP draft (Confluence MFS 10125435): the reply echoes
@@ -57,8 +66,13 @@ class Message:
     data: bytes = b""
 
 
+def _no_constant(name: str):
+    raise ValueError(f"non-finite number {name} in header")
+
+
 def encode_body(header: dict, data: bytes = b"") -> bytes:
-    raw = json.dumps(header, separators=(",", ":")).encode()
+    """NaN/Infinity are refused (ValueError): a non-finite action must never reach a motor."""
+    raw = json.dumps(header, separators=(",", ":"), allow_nan=False).encode()
     return struct.pack("!I", len(raw)) + raw + data
 
 
@@ -68,7 +82,7 @@ def decode_body(body: bytes) -> tuple[dict, bytes]:
     (n,) = struct.unpack_from("!I", body)
     if 4 + n > len(body):
         raise ValueError("header length out of range")
-    header = json.loads(body[4 : 4 + n])
+    header = json.loads(body[4 : 4 + n], parse_constant=_no_constant)
     if not isinstance(header, dict):
         raise TypeError("header must be a JSON object")
     return header, body[4 + n :]
@@ -130,13 +144,19 @@ def _parse(packet: bytes):
 
 @dataclass
 class _Pending:
+    request_id: int
     fields: tuple
     deadline: float
     chunks: dict[int, bytes] = field(default_factory=dict)
 
 
 class Reassembler:
-    """Single consumer. One incomplete message per (peer, session); stale ids are dropped."""
+    """Single consumer. One incomplete message per (peer, session); stale ids are dropped.
+
+    The newest id of a stream advances only after a message passes CRC and HMAC, so a forged or
+    corrupted datagram can at most hold up a stream until its incomplete message expires
+    (timeout), never block it for good. At most max_streams verified streams are remembered.
+    """
 
     def __init__(
         self,
@@ -145,12 +165,19 @@ class Reassembler:
         peers: set[str] | None = None,
         timeout: float = 1.0,
         max_pending: int = 8,
+        max_streams: int = 256,
     ):
-        if not math.isfinite(timeout) or timeout <= 0 or max_pending < 1:
+        if (
+            not math.isfinite(timeout)
+            or timeout <= 0
+            or max_pending < 1
+            or max_streams < 1
+        ):
             raise ValueError("positive finite reassembly limits required")
         self.key = check_key(key)
         self.peers = None if peers is None else set(peers)
         self.timeout, self.max_pending = timeout, max_pending
+        self.max_streams = max_streams
         self.stats: Counter = Counter()
         self._pending: dict[tuple, _Pending] = {}
         self._latest: dict[tuple, int] = {}
@@ -159,8 +186,7 @@ class Reassembler:
         now = time.monotonic() if now is None else now
         for stream, pending in list(self._pending.items()):
             if now >= pending.deadline:
-                del self._pending[stream]
-                self.stats["timeout"] += 1
+                self._drop(stream, "timeout")
 
     def feed(self, packet: bytes, peer: Peer) -> Message | None:
         now = time.monotonic()
@@ -176,28 +202,31 @@ class Reassembler:
             self.stats["malformed"] += 1
             return None
         stream = (peer, session)
-        latest = self._latest.get(stream, -1)
         pending = self._pending.get(stream)
-        if request_id < latest or (request_id == latest and pending is None):
+        if request_id <= self._latest.get(stream, -1) or (
+            pending is not None and request_id < pending.request_id
+        ):
             self.stats["late"] += 1
             return None
-        if request_id > latest:
-            if pending is not None:
-                self.stats["superseded"] += 1
-            elif len(self._pending) >= self.max_pending:
+        if pending is not None and request_id > pending.request_id:
+            self._drop(stream, "superseded")
+            pending = None
+        if pending is None:
+            if len(self._pending) >= self.max_pending:
                 self.stats["capacity"] += 1
                 return None
-            self._latest[stream] = request_id
-            pending = _Pending((kind, count, size, crc, mac), now + self.timeout)
+            fields = (kind, count, size, crc, mac)
+            pending = _Pending(request_id, fields, now + self.timeout)
             self._pending[stream] = pending
+            self.stats["fragments_expected"] += count
         if pending.fields != (kind, count, size, crc, mac):
-            del self._pending[stream]
-            self.stats["conflict"] += 1
+            self._drop(stream, "conflict")
             return None
         if index in pending.chunks:
             self.stats["duplicate"] += 1
             return None
         pending.chunks[index] = chunk
+        self.stats["fragments_received"] += 1
         if len(pending.chunks) != count:
             return None
         del self._pending[stream]
@@ -210,10 +239,24 @@ class Reassembler:
         ):
             self.stats["bad_mac"] += 1
             return None
+        # re-insert so the least recently verified stream is dropped first by the cap
+        self._latest.pop(stream, None)
+        self._latest[stream] = request_id
+        while len(self._latest) > self.max_streams:
+            del self._latest[next(iter(self._latest))]
         try:
             header, data = decode_body(body)
         except (ValueError, TypeError):
             self.stats["malformed"] += 1
             return None
         self.stats["completed"] += 1
+        self.stats[f"completed_{KIND_NAMES[kind]}"] += 1
         return Message(kind, session, request_id, header, data)
+
+    def _drop(self, stream: tuple, reason: str):
+        """Forget an incomplete message; count it and the fragments that never arrived."""
+        pending = self._pending.pop(stream)
+        count = pending.fields[1]
+        self.stats[reason] += 1
+        self.stats["fragments_missing"] += count - len(pending.chunks)
+        self.stats[f"{reason}_{KIND_NAMES[pending.fields[0]]}"] += 1
