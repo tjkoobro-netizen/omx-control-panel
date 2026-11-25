@@ -667,6 +667,36 @@ def _save_home_file(home: dict, robot=None) -> None:
         _say(f"처음 자세 파일을 쓰지 못했습니다 ({exc})")
 
 
+CAMERA_OPEN_S = 30.0  # 3.29.0, as omx_bimanual (3.22.1): after the arm is ready a camera still opening is stuck
+
+
+def _open_cameras(cams: dict) -> tuple[list, dict]:
+    """Start opening every camera at once (each waits its own warmup for good frames); (threads, errors)."""
+    errors: dict = {}
+
+    def open_camera(name: str, cam) -> None:
+        try:
+            cam.connect()
+        except Exception as exc:  # noqa: BLE001  raised by the caller
+            errors[name] = exc
+
+    threads = [threading.Thread(target=open_camera, args=(n, c), daemon=True, name=f"cam-{n}") for n, c in cams.items()]
+    for t in threads:
+        t.start()
+    return threads, errors
+
+
+def _close_cameras(cams: dict, threads: list) -> None:
+    for t in threads:
+        t.join(1.0)
+    for cam in cams.values():  # the ones that did open (none is used now)
+        try:
+            if cam.is_connected:
+                cam.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def install() -> None:
     """Patch OmxFollower.connect/send_action. Safe to call once per process."""
     from lerobot.robots.omx_follower import omx_follower
@@ -719,6 +749,45 @@ def install() -> None:
         lcls.get_action = get_action
 
     def connect(self, *args, **kwargs):
+        # 3.29.0: a single robot's evaluation (a one-arm mission, OMX_PARALLEL_CAMS=1 from the panel) opens its cameras
+        # all at once while the arm connects and goes home, as the cooperative pair does since 3.22.1 (one after the
+        # other it was 3 s warmup x 5 cameras = about 16 s, 11/25 22:45). The cameras, their settings and the arm's
+        # order (connect, then the safe start home move) are as before; only when the cameras are opened changes.
+        # Read here, not at import: the warm process gets the run's environment later.
+        own = self.cameras  # the same dict object goes back (anything holding it sees the cameras)
+        cams = dict(own) if os.environ.get("OMX_PARALLEL_CAMS") == "1" and own else {}
+        if not cams:
+            return _connect_arm(self, *args, **kwargs)
+        self.cameras = {}  # LeRobot's connect opens none of them now
+        threads, errors = _open_cameras(cams)
+        try:
+            _connect_arm(self, *args, **kwargs)
+            deadline = time.monotonic() + CAMERA_OPEN_S
+            for t in threads:
+                t.join(max(0.0, deadline - time.monotonic()))
+            stuck = [t.name[4:] for t in threads if t.is_alive()]
+            if stuck:
+                raise TimeoutError(f"camera open timed out after {CAMERA_OPEN_S:.0f}s: {', '.join(stuck)}")
+            if errors:
+                raise next(iter(errors.values()))
+        except Exception:
+            _close_cameras(cams, threads)
+            self.cameras = own
+            # the arm may be connected (a camera failed): land it now; the run's own safe stop only runs for a
+            # connected robot (as omx_bimanual)
+            if self.bus.is_connected:
+                try:
+                    self.cameras = {}
+                    self.disconnect()
+                except Exception as exc:  # noqa: BLE001
+                    sys.stdout.write(f"[omx] safe stop: 팔 정지 중 오류 ({exc})\n")
+                    sys.stdout.flush()
+                finally:
+                    self.cameras = own
+            raise
+        self.cameras = own
+
+    def _connect_arm(self, *args, **kwargs):
         original_connect(self, *args, **kwargs)
         set_pwm(self, s["pwm_ratio"])
         if _go_standard_home(self):
