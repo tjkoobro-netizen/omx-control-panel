@@ -5334,6 +5334,7 @@ def lossmon_settings() -> dict:
     s = omx_lossmon.settings(CFG, LOSSMON_STATE)
     s["gpu"] = s.get("gpu") or (remote.HOST if CONTROL else None)
     s["panel_logs"] = s.get("panel_logs") or str(LOG_DIR)
+    s["eval_run"] = s.get("eval_run") or str(TOOLS_DIR / "omx_run.py")
     s["enabled"] = bool(CONTROL)
     return s
 

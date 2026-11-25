@@ -1,7 +1,10 @@
-# Copied from the team's robot repo (services/roport-omx/src/roport_omx/infer_link, PR #97 a09b74e, wire RPI1); keep the code identical there and here.
+# Copied from the team's robot repo (services/roport-omx/src/roport_omx/infer_link, task/omx-cooperative 749b47b, wire RPI1); keep the code identical there and here.
 """UDP inference client for the host PC's OMX panel (wire RPI1); stdlib only.
 
-One request at a time. Every call uses a new request_id, and only the reply to that id is
+One request at a time: an InferenceClient is not thread-safe. Its one socket receives every reply,
+so a second thread calling at the same time takes (and drops as stale) the first one's reply and
+the first call ends in InferenceTimeout; callers that may overlap must serialize their calls or
+use one client per thread. Every call uses a new request_id, and only the reply to that id is
 accepted: a late reply to an older observation is dropped. infer() never retries by itself;
 on InferenceTimeout the caller sends its newest observation instead and keeps the arms safe
 while no actions arrive. load() may be retried because the server keeps loaded models.
@@ -38,12 +41,20 @@ class InferenceError(RuntimeError):
         self.code = code
 
 
+def resolve_server(server) -> Peer:
+    """(host, port) -> (IPv4 address, port): replies arrive from a numeric address, so a host name
+    or a JSON ["host", port] list must be resolved once or every reply would be dropped."""
+    host, port = server
+    infos = socket.getaddrinfo(host, int(port), socket.AF_INET, socket.SOCK_DGRAM)
+    return infos[0][4][0], int(port)
+
+
 class InferenceClient:
     def __init__(self, server: Peer, key: bytes, *, bind_host: str = ""):
-        self.server, self.key = server, check_key(key)
+        self.server, self.key = resolve_server(server), check_key(key)
         self.session = uuid4()
         self._next_id = 1
-        self.reassembler = Reassembler(key, peers={server[0]})
+        self.reassembler = Reassembler(key, peers={self.server[0]})
         self.stats = self.reassembler.stats
         self.last: dict = {}
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

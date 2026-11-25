@@ -26,7 +26,8 @@ from pathlib import Path
 
 SCRIPT = "omx_live_monitor.py"
 HERE = Path(__file__).resolve().parent
-DEFAULT = {"live_dir": "~/il_ws/omx_loss_tracker/live", "gpu": None, "auto": True, "script": None, "panel_logs": None}
+DEFAULT = {"live_dir": "~/il_ws/omx_loss_tracker/live", "gpu": None, "auto": True, "script": None, "panel_logs": None,
+           "eval_run": None}
 STALE_S = 60.0  # status.json is rewritten every 1 s (eval) or 30 s (idle): older than this = stopped
 ONE_SHOT = ("--collect", "--gpu-stop", "--report", "--watch")  # the monitor's other commands (not the running one)
 REPORT: dict = {"running": False}
@@ -100,6 +101,8 @@ def _env(s: dict) -> dict:
     env = dict(os.environ, OMX_LOSS_DIR=s["live_dir"], PYTHONUNBUFFERED="1")
     if s.get("panel_logs"):
         env["OMX_PANEL_LOGS"] = str(s["panel_logs"])
+    if s.get("eval_run"):  # 3.27.1: the omx_run this panel starts (the monitor counts only those as evaluations)
+        env["OMX_EVAL_RUN"] = str(s["eval_run"])
     return env
 
 

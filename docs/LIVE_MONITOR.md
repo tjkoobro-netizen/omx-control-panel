@@ -31,7 +31,7 @@ python3 $T/omx_live_monitor.py --gpu-stop --gpu omx-gpu
 ## 기록 폴더
 - 기록은 프로그램 위치와 상관없이 `~/il_ws/omx_loss_tracker/live/`에 쌓인다. 환경변수 `OMX_LOSS_DIR`로 바꿀 수 있다.
 - 패널 기록 폴더 기본값은 `~/il_ws/omx_control_panel_v3/logs`이고, `OMX_PANEL_LOGS`로 바꿀 수 있다.
-- 패널이 켤 때는 `OMX_LOSS_DIR`(설정 `"loss_monitor"`의 `live_dir`)과 `OMX_PANEL_LOGS`(패널 기록 폴더)를 넘긴다. 같은 기록 폴더에 쓰는 감시가 이미 돌고 있으면 또 켜지 않는다.
+- 패널이 켤 때는 `OMX_LOSS_DIR`(설정 `"loss_monitor"`의 `live_dir`), `OMX_PANEL_LOGS`(패널 기록 폴더), `OMX_EVAL_RUN`(그 패널의 `omx_tools/omx_run.py`, 이것만 평가로 셈. 미리 띄운 평가 프로그램은 `/dev/shm/omx_warm_busy_{pid}`가 있을 때만)을 넘긴다. 같은 기록 폴더에 쓰는 감시가 이미 돌고 있으면 또 켜지 않는다.
 - 패널을 다시 설치해 도구 폴더가 바뀌어도 기록은 지워지지 않는다.
 
 ## 기록되는 것 (live/)
