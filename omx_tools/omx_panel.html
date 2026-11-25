@@ -527,7 +527,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.29.1</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.30.0</span></div>
       </div>
     </div>
     <div class="status">
@@ -1098,7 +1098,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       <div class="fields" id="evAsyncFields" hidden>
         <label class="f"><span>한 번에 쓸 동작 수 <button type="button" class="qbtn help-open" data-help="ev-async" title="actions_per_chunk 설명" aria-label="actions_per_chunk 설명">?</button></span><input type="number" id="evChunk" min="1" max="100" value="50"></label>
         <label class="f"><span>다음 계산 시작 시점 <button type="button" class="qbtn help-open" data-help="ev-async" title="chunk_size_threshold 설명" aria-label="chunk_size_threshold 설명">?</button></span><input type="number" id="evThreshold" min="0" max="1" step="0.1" value="0.5"></label>
-        <label class="f"><span>겹치는 구간 합치기 <button type="button" class="qbtn help-open" data-help="ev-async" title="aggregate_fn 설명" aria-label="aggregate_fn 설명">?</button></span><select id="evAgg"><option value="weighted_average">가중 평균 (추천)</option><option value="average">평균</option><option value="latest_only">새 것만</option></select></label>
+        <label class="f"><span>겹치는 구간 합치기 <button type="button" class="qbtn help-open" data-help="ev-async" title="aggregate_fn 설명" aria-label="aggregate_fn 설명">?</button></span><select id="evAgg"><option value="weighted_average">가중 평균 (추천)</option><option value="average">평균</option><option value="latest_only">새 것만</option><option value="crossfade">서서히 넘기기</option></select></label>
       </div>
       <div class="opt" id="evRtcRow" hidden><input type="checkbox" id="evRtc"><label for="evRtc"><b>RTC (실시간 청킹)</b> SmolVLA 전용 · 동작 묶음이 바뀔 때 끊기지 않게 이어 붙임 <button type="button" class="qbtn help-open" data-help="ev-rtc" title="RTC 설명" aria-label="RTC 설명">?</button></label></div>
       <div class="fields" id="evRtcFields" hidden>
@@ -1614,7 +1614,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       <ul>
         <li><b>한 번에 쓸 동작 수</b> (actions_per_chunk): 한 묶음에서 실제로 쓸 동작 개수예요. 30개 = 1초. 너무 길면 오래된 판단으로 움직이고, 너무 짧으면 계산이 자주 돌아요. 기본: ACT·SmolVLA 50, Diffusion 15. Diffusion의 최대는 모델마다 달라요(horizon − n_obs_steps + 1: 예전 모델 15, LeRobot 0.6.1에서 새로 학습한 모델 63). <b>15개 미만으로 줄이면 묶음이 자주 바뀌어(0.5초에 한 번 이상) 이음새가 많아지고 오히려 더 버벅일 수 있어요.</b></li>
         <li><b>다음 계산 시작 시점</b> (chunk_size_threshold, 0~1): 남은 동작이 이 비율 아래로 줄면 다음 묶음 계산을 시작해요. 0.5면 절반쯤 썼을 때 시작해요. 계산이 오래 걸리는 모델일수록 크게(일찍) 하세요.</li>
-        <li><b>겹치는 구간 합치기</b> (aggregate_fn): 새 묶음과 아직 남은 옛 묶음이 겹치는 부분을 어떻게 합칠지예요. 가중 평균(옛 30% + 새 70%)이 부드럽고 무난해요. "새 것만"은 반응이 빠르지만 바뀌는 순간 튈 수 있어요.</li>
+        <li><b>겹치는 구간 합치기</b> (aggregate_fn): 새 묶음과 아직 남은 옛 묶음이 겹치는 부분을 어떻게 합칠지예요. 가중 평균(옛 30% + 새 70%)이 부드럽고 무난해요. "새 것만"은 반응이 빠르지만 바뀌는 순간 튈 수 있어요. 가중 평균도 새 묶음이 오는 순간(70%)과 겹침이 끝나는 순간(30%) 두 번 나눠 튀어요. "서서히 넘기기"(crossfade)는 겹치는 구간 동안 새 묶음 비중을 0에서 1로 고르게 올려서 이 두 번의 튐을 없애요. 겹침 밖의 동작은 모델이 낸 그대로예요.</li>
       </ul>
       <p>평가 중 로그에 <code>[omx] async:</code> 줄로 계산 시간과 "큐가 비어 기다린 횟수"가 10초마다 나와요. 기다린 횟수가 늘면 계산이 동작보다 느린 거예요. 다음 계산 시작 시점을 키우거나 Diffusion이면 추론 단계 수를 줄이세요.</p>
       <p class="tip">ACT의 "부드럽게 실행"(시간 앙상블)은 매 스텝 계산하는 다른 방식이라 비동기 실행과 함께 쓰지 않아요. 안전 시작, 처음 자세 복귀, 즉시 중단, 비상 정지, 평가 기록은 비동기 실행에서도 똑같이 동작해요.</p>

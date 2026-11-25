@@ -2926,8 +2926,8 @@ def policy_eval_options(model_path: str, body: dict) -> tuple[list[str], dict, d
         chunk = min(chunk or limit, limit)
         threshold = float(body.get("chunk_size_threshold", 0.5))
         agg = body.get("aggregate_fn") or "weighted_average"
-        if not 0 <= threshold <= 1 or agg not in ("weighted_average", "average", "latest_only"):
-            raise RuntimeError("chunk_size_threshold는 0~1, 합치는 방법은 weighted_average·average·latest_only 중 하나입니다.")
+        if not 0 <= threshold <= 1 or agg not in ("weighted_average", "average", "latest_only", "crossfade"):
+            raise RuntimeError("chunk_size_threshold는 0~1, 합치는 방법은 weighted_average·average·latest_only·crossfade 중 하나입니다.")
         rtc = bool(body.get("rtc")) and ptype in ("smolvla", "pi0", "pi05")
         env = {"OMX_ASYNC": "1", "OMX_ASYNC_CHUNK": str(chunk), "OMX_ASYNC_THRESHOLD": str(threshold),
                "OMX_ASYNC_AGG": agg, "OMX_FPS": "30", "OMX_RTC": "1" if rtc else "0",

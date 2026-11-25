@@ -16,6 +16,10 @@ Every control step t (AsyncRunner.step):
 A finished chunk covers steps t0, t0+1, ...; steps that already passed while it was computed are
 dropped, steps still queued are combined with aggregate_fn (weighted_average: 0.3 old + 0.7 new,
 as in LeRobot async), the rest is appended.
+crossfade (3.30.0): over the m queued steps the two chunks share, the new chunk's weight rises linearly
+1/(m+1), 2/(m+1), ..., m/(m+1), then the new chunk alone. The fixed 0.3/0.7 mix moves 70 % of the
+difference between the plans at the arrival and the last 30 % when the overlap ends (a jump at both
+ends); the ramp moves at most 1/(m+1) of it per step. Outside the overlap every action is the policy's own.
 
 RTC (Real-Time Chunking, flow-matching policies: SmolVLA, pi0, pi0.5): the new chunk is generated
 already knowing the actions that will run during the inference (prev_chunk_left_over and the
@@ -28,7 +32,7 @@ omx_infer.RemoteClient (the GPU laptop, control PC) or omx_infer.PolicyRunner (t
 
 Settings come from environment variables set by the panel:
   OMX_ASYNC=1, OMX_ASYNC_CHUNK (actions_per_chunk), OMX_ASYNC_THRESHOLD (0..1),
-  OMX_ASYNC_AGG (weighted_average | average | latest_only), OMX_FPS,
+  OMX_ASYNC_AGG (weighted_average | average | latest_only | crossfade), OMX_FPS,
   OMX_RTC=1, OMX_RTC_HORIZON (execution_horizon), OMX_RTC_WEIGHT (max_guidance_weight)
 Progress lines "[omx] async: ..." go to the log every 10 s.
 """
@@ -45,6 +49,7 @@ AGGREGATE = {
     "weighted_average": lambda old, new: 0.3 * old + 0.7 * new,
     "average": lambda old, new: 0.5 * old + 0.5 * new,
     "latest_only": lambda old, new: new,
+    "crossfade": None,  # 3.30.0: a ramp over the whole overlap (_merge), not a fixed mix per step
 }
 
 
@@ -131,12 +136,19 @@ class AsyncRunner:
         with self.lock:
             now = self.done + 1  # the next step to execute
             old = {q[0]: q for q in self.queue if q[0] >= now}
+            fade = self.agg is None and not self.rtc  # crossfade: one ramp over the steps both chunks cover
+            shared = sum(1 for i in range(len(processed)) if t0 + i >= now and t0 + i in old) if fade else 0
+            n = 0
             new = []
             for i in range(len(processed)):
                 ts = t0 + i
                 if ts < now:
                     continue  # already executed while this chunk was being computed
-                if ts in old and not self.rtc:
+                if ts in old and fade:
+                    n += 1
+                    w = n / (shared + 1)
+                    new.append([ts, (1 - w) * old.pop(ts)[1] + w * processed[i], original[i]])
+                elif ts in old and not self.rtc:
                     new.append([ts, self.agg(old.pop(ts)[1], processed[i]), original[i]])
                 else:
                     old.pop(ts, None)
