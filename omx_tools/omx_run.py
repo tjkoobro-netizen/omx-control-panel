@@ -424,10 +424,41 @@ class TrayWatch:
         omx_safe_start.TRAY_GUARD.update(near=near, lift_dz=lift_dz, escape_s=5.0, report=report)
 
 
+RECHECK_S = 1.5        # 3.30.1: how long the tray is read again with the arm home (was 8 frames, about 1.4 s)
+RECHECK_PHOTOS = 30    # 3.30.1: recheck photos kept in the logs folder (3 per recheck: about 10 rechecks; oldest removed)
+
+
+def _save_recheck_photos(frames_bgr: dict) -> dict:
+    """3.30.1: the frames the recheck judged on, next to the panel's tray_judge.json (the logs folder)."""
+    out = {}
+    try:
+        import cv2
+
+        judge_file = os.environ.get("OMX_TRAY_JUDGE", "").strip()
+        logs = Path(judge_file).parent if judge_file else None
+        if logs is None or not logs.is_dir():
+            return out
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        for cam, img in frames_bgr.items():
+            if img is None:
+                continue
+            p = logs / f"tray_recheck_{stamp}_{cam}.jpg"
+            if cv2.imwrite(str(p), img, [cv2.IMWRITE_JPEG_QUALITY, 85]):
+                out[cam] = p.name
+        old = sorted(logs.glob("tray_recheck_*.jpg"))
+        for p in old[: max(len(old) - RECHECK_PHOTOS, 0)]:
+            p.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001  a photo never stops the report
+        pass
+    return out
+
+
 def _tray_recheck(arm_robot) -> None:
     """3.25.0 (omx_safe_start.AFTER_LAND, one-arm unloading): the arm is home, the Pinky still waits for the report:
-    the tray and the slot are read again from the cameras still open (about 1.2 s at 6 Hz) and reported as
-    "[omx] tray_recheck {json}". The judge compares the tray with this eval's own first frame (empty tray)."""
+    the tray and the slot are read again from the cameras still open (RECHECK_S at about 6 Hz) and reported as
+    "[omx] tray_recheck {json}". The judge compares the tray with this eval's own first frame (empty tray).
+    3.30.1: the box marker seen inside the tray but not confirmed still -> on_pinky null (unread, a person checks),
+    never false (a drop); marker_seen / marker_uv / frames in the report, the judged frames saved in the logs folder."""
     tw = TRAY
     if tw is None or not tw.one_arm:
         return
@@ -438,25 +469,41 @@ def _tray_recheck(arm_robot) -> None:
 
         present = {f"{m}": float(v) for m, v in arm_robot.bus.sync_read("Present_Position").items()}
         grips = {tw.arm: (present.get("gripper", 0.0), present.get("gripper", 0.0))} if tw.arm else {}
-        r, used = None, {}
-        for _ in range(8):
+        r, used, n, seen, last = None, {}, 0, [], {}
+        t_end = time.time() + RECHECK_S
+        while n < 3 or time.time() < t_end:
             frames = {}
             for c in tw.cams:
                 cam = cams.get(c)
                 img = cam.read_latest() if cam is not None else None
                 frames[c] = None if img is None else (cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img)
+                if img is not None:
+                    last[c] = img
                 ts = _frame_ts(ABORT.get("robot") or arm_robot, c, img) if img is not None else None
                 if ts:
                     used[c] = ts
             with tw.lock:
                 r = tw.judge.update(frames.get(tw.tray_cam), frames.get("front_2"), present, grips, time.time())
+            n += 1
+            if r.get("marker_uv") is not None:
+                seen.append(r["marker_uv"])
             time.sleep(1 / 6)
         info = getattr(tw.judge, "tray_info", {}) or {}
         ref = info.get("tray_reference")
         out.update({k: r.get(k) for k in ("on_pinky", "slot_empty", "tray_marker", "tray_changed", "error")},
+                   marker_seen=bool(seen), marker_uv=seen[-1] if seen else None, marker_frames=len(seen), frames=n,
                    tray_reference=ref, tray_reference_state="eval_first_frame" if ref and "error" not in info else "not_checked",
-                   observed_ts=min(used.values()) if used else None, observed_clock="capture" if used else None,
-                   at=_iso(time.time()))
+                   observed_ts=min(used.values()) if used else None, observed_clock="capture" if used else None)
+        if seen and not out.get("on_pinky"):
+            # the box marker was inside the tray but its stillness was not confirmed: unread (a person checks), not a drop
+            out.update(on_pinky=None, on_pinky_reason="marker_seen_not_still")
+        shots = {c: (cv2.cvtColor(img, cv2.COLOR_RGB2BGR) if img.ndim == 3 else img)
+                 for c, img in last.items() if c in (tw.tray_cam, "front_2")}
+        ref_img = (getattr(tw.judge, "tray", None) or {}).get("ref")
+        if ref_img is not None:  # the eval's first tray frame the judge compares with (empty tray): the before/after pair
+            shots[f"{tw.tray_cam}_first"] = ref_img
+        out["photos"] = _save_recheck_photos(shots)
+        out["at"] = _iso(time.time())
     except Exception as exc:  # noqa: BLE001  no reading: the panel reports it unread (a person checks)
         out["error"] = f"{type(exc).__name__}: {exc}"[:200]
     _say("[omx] tray_recheck " + json.dumps(out, ensure_ascii=False, default=_jsonable))

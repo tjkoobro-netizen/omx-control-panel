@@ -23,7 +23,7 @@ import time
 
 import numpy as np
 
-VERSION = "1124c"   # 1124c: 한팔 2A(front_3)·2C(front_4) 측면 카메라 쟁반 + 팔별 손끝 구역, 2B 는 1124b 와 같음 / 1124b: 1124a 초안 + hold_s 인자·ok_now, 첫 프레임 쟁반 테두리 찾기 대체 경로. 11/24 두 팔 출고 72회 재생: 잘못 뜬 판정 0
+VERSION = "1126a"   # 1126a (패널 3.30.1): 마커 멈춤 판정이 프레임 간격과 상관없게(아래 MARK_MIN_N·MARK_GAP_S) / 1124c: 한팔 2A(front_3)·2C(front_4) 측면 카메라 쟁반 + 팔별 손끝 구역, 2B 는 1124b 와 같음 / 1124b: 1124a 초안 + hold_s 인자·ok_now, 첫 프레임 쟁반 테두리 찾기 대체 경로. 11/24 두 팔 출고 72회 재생: 잘못 뜬 판정 0
 HERE = pathlib.Path(__file__).resolve().parent
 ALIGN_DIR = HERE.parent if (HERE.parent / "shelf_ref.json").exists() else pathlib.Path("~/il_ws/src/omx_sim_align").expanduser()
 
@@ -61,6 +61,12 @@ START_EMPTY_MAX = 0.15        # 첫 프레임이 작업 직전 기준과 이만�
 MARK_IN_SCALE = 1.08          # 상자 마커 중심이 쟁반 사각형(이 배율) 안
 MARK_STILL_S = 0.5
 MARK_STILL_PX = 3.0
+# 1126a: 멈춤 = 지금 위치에서 MARK_STILL_PX 안인 검출이 MARK_MIN_N 번 이상, 빈틈 MARK_GAP_S 이하로 이어져 처음~지금이
+# MARK_STILL_S − 0.1 이상. 1124c 는 '최근 0.5초 안 기록의 폭 ≥ 0.4초'라 0.4~0.5초 전 기록이 꼭 있어야 했고, 판독 간격이
+# 0.17~0.19초(다시 확인 루프 약 0.173초)나 0.3초 이상이면 상자가 쟁반 위에 가만히 있어도 멈춤이 되지 않았다(11/26 2A 오판)
+MARK_MIN_N = 3
+MARK_GAP_S = 0.5             # 판독 간격 0.45초(부하가 클 때)까지 이어진 것으로 봄
+MARK_KEEP_S = 1.0             # 보관하는 마커 기록 길이
 BOX_TOP_IDS = tuple(range(15, 23))
 
 # ---- 전방 카메라 칸 (unload_check.slot_empty 와 같은 값)
@@ -348,13 +354,17 @@ class Judge:
         m = self._box_marker(g)
         if m is not None:
             self.mark_hist.append((t, m[0]))
-        self.mark_hist = [(tt, uv) for tt, uv in self.mark_hist if t - tt <= MARK_STILL_S + 0.4]
+        self.mark_hist = [(tt, uv) for tt, uv in self.mark_hist if t - tt <= MARK_KEEP_S + 1e-6]
         still = False
         if m is not None:
-            recent = [uv for tt, uv in self.mark_hist if t - tt <= MARK_STILL_S + 1e-6]
-            span = (t - min(tt for tt, _ in self.mark_hist if t - tt <= MARK_STILL_S + 1e-6)) if recent else 0
-            dev = max(max(abs(a[0] - m[0][0]), abs(a[1] - m[0][1])) for a in recent)
-            still = span >= MARK_STILL_S - 0.1 and dev <= MARK_STILL_PX
+            run = []   # 지금부터 거슬러 올라가며: 지금 위치에서 MARK_STILL_PX 안, 빈틈 MARK_GAP_S 이하로 이어진 검출
+            for tt, uv in reversed(self.mark_hist):
+                if run and run[-1][0] - tt > MARK_GAP_S + 1e-6:
+                    break
+                if max(abs(uv[0] - m[0][0]), abs(uv[1] - m[0][1])) > MARK_STILL_PX:
+                    break
+                run.append((tt, uv))
+            still = len(run) >= MARK_MIN_N and t - run[-1][0] >= MARK_STILL_S - 0.1 - 1e-6
         self.last["tray"] = (t, {"tray_changed": round(ch, 3), "tray_light_k": round(k, 2), "tray_marker": bool(still),
                                  "marker_seen": m is not None, "marker_uv": m[0] if m else None, "marker_id": m[1] if m else None})
 
