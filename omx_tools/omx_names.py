@@ -213,6 +213,8 @@ def run_settings_code(opts: dict) -> str:
     parts = [f"async{int(round(float(opts.get('chunk_size_threshold', 0.5)) * 10)):02d}" if opts.get("async_mode") else "sync"]
     if opts.get("rtc"):
         parts.append("rtc")
+    elif opts.get("async_mode") and opts.get("aggregate_fn") == "crossfade":
+        parts.append("xf")  # 3.30.0: the eval list and the comparison tell crossfade runs apart
     if opts.get("smooth"):
         parts.append("smooth")
     if opts.get("diffusion_steps"):

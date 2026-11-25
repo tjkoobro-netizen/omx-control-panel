@@ -2926,8 +2926,8 @@ def policy_eval_options(model_path: str, body: dict) -> tuple[list[str], dict, d
         chunk = min(chunk or limit, limit)
         threshold = float(body.get("chunk_size_threshold", 0.5))
         agg = body.get("aggregate_fn") or "weighted_average"
-        if not 0 <= threshold <= 1 or agg not in ("weighted_average", "average", "latest_only"):
-            raise RuntimeError("chunk_size_threshold는 0~1, 합치는 방법은 weighted_average·average·latest_only 중 하나입니다.")
+        if not 0 <= threshold <= 1 or agg not in ("weighted_average", "average", "latest_only", "crossfade"):
+            raise RuntimeError("chunk_size_threshold는 0~1, 합치는 방법은 weighted_average·average·latest_only·crossfade 중 하나입니다.")
         rtc = bool(body.get("rtc")) and ptype in ("smolvla", "pi0", "pi05")
         env = {"OMX_ASYNC": "1", "OMX_ASYNC_CHUNK": str(chunk), "OMX_ASYNC_THRESHOLD": str(threshold),
                "OMX_ASYNC_AGG": agg, "OMX_FPS": "30", "OMX_RTC": "1" if rtc else "0",
@@ -4789,6 +4789,17 @@ def run_check() -> dict:
     return result
 
 
+LOCAL_NAMES = {"127.0.0.1", "localhost", "::1"}  # 3.29.1: the names a request to this panel may use (it listens on 127.0.0.1)
+
+
+def _hostname(netloc: str) -> str:
+    """'localhost:8865' -> 'localhost', '[::1]:8865' -> '::1', 'evil.example' -> 'evil.example' (lower case)."""
+    netloc = (netloc or "").strip().lower()
+    if netloc.startswith("["):
+        return netloc[1:netloc.find("]")] if "]" in netloc else netloc
+    return netloc.rsplit(":", 1)[0] if netloc.count(":") == 1 else netloc
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args) -> None:
         pass
@@ -4813,7 +4824,26 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _local_request(self, write: bool) -> bool:
+        """3.29.1 (team PR #182 review, CSRF): any web page open in this PC's browser could send this panel a request
+        that moves the arms (armed, evaluation start, home move). Refused (403) unless
+        - the Host header names this PC itself (127.0.0.1 / localhost / ::1, any port: SSH tunnels and the GPU laptop's
+          panel opened from here use other ports; a DNS-rebinding name is refused),
+        - for a write, the browser's Origin, when it sends one, is this PC too (the panel pages of this PC, any port:
+          the GPU laptop's page says "bye" to the control PC's panel), and the browser does not call it cross-site.
+        Programs (the control tower Host, the On-site panel, the tunnel to the GPU laptop) send no Origin: as before."""
+        if _hostname(self.headers.get("Host", "")) not in LOCAL_NAMES:
+            return False
+        if not write:
+            return True
+        origin = self.headers.get("Origin")
+        if origin is not None and _hostname(urllib.parse.urlsplit(origin).netloc) not in LOCAL_NAMES:
+            return False  # also "null" (a sandboxed page or a file)
+        return self.headers.get("Sec-Fetch-Site", "same-origin") != "cross-site"
+
     def do_GET(self) -> None:
+        if not self._local_request(write=False):
+            return self._json({"error": "forbidden: open the panel at http://127.0.0.1 or http://localhost"}, 403)
         CLIENT["seen"] = time.time()
         if CONTROL:
             if self.path == "/api/train/runs":  # also the Host's model check: answered from the copy when the tunnel is down
@@ -5149,6 +5179,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length)
+        if not self._local_request(write=True):
+            return self._json({"error": "forbidden: requests only from this PC's panel page"}, 403)
         CLIENT["seen"] = time.time()
         if self.path == "/api/bye":  # the panel window was closed (or is reloading)
             CLIENT["bye"] = time.time()
