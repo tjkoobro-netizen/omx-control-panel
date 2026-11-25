@@ -9,12 +9,20 @@ and it rejects new tasks with NOT_ARMED by itself. The Host stops with the panel
 
 Settings: ~/.config/roport/omx-host.json (absent → the panel never starts a Host)
   {"repo": "~/kernel-robot-repo-1/services/roport-omx",
-   "link_config": "~/roport-baseline/run/trial-omx-link.hardware.json",   # site/control/binding
+   "protocol": "v2",                                                      # v2 (default) or v1
+   "control": "control-01",                                               # v2: control id (default)
+   "link_config": "~/roport-baseline/run/trial-omx-link.hardware.json",   # v1 only: site/control/binding
    "broker_env": "~/roport-baseline/run/broker.env",                      # export ROPORT_MQTT_*=...
    "routes": "~/.config/roport/shelf-01-routes.json",
    "box_marker": 16,
-   "journal": "~/.local/state/roport/shelf-01-hardware.json",
+   "journal": "~/.local/state/roport/shelf-01-hardware.json",             # v1 journal
+   "journal_v2": "~/.local/state/roport/shelf-01-hardware-v2.json",       # v2 (default: <journal>-v2.json)
    "client_id": "roport-shelf-01-host"}
+
+3.21.2: the field contract with the control tower is roport-control-v2 (RO:PORT #135), and the Host
+starts v2 by default. Each protocol keeps its own journal (the Host refuses the other's), so v2 uses
+journal_v2. v1 (the earlier OmxTrial test link) only with "protocol": "v1". A Host that does not
+know --protocol (before #135) is v1 only: v2 is refused, v1 starts as before.
 """
 
 from __future__ import annotations
@@ -40,31 +48,73 @@ def _path(value) -> Path:
     return Path(str(value)).expanduser()
 
 
+PROTOCOLS = ("v2", "v1")
+
+
+def journal_path(raw: dict) -> Path:
+    """The journal of the configured protocol: v2 has its own (a v1 journal is refused by the Host)."""
+    journal = _path(raw["journal"])
+    if (raw.get("protocol") or "v2") != "v2":
+        return journal
+    if raw.get("journal_v2"):
+        return _path(raw["journal_v2"])
+    return journal.with_name(journal.stem + "-v2" + journal.suffix)
+
+
+def host_knows_protocol(repo: Path) -> bool:
+    """The Host takes --protocol (RO:PORT #135); an older Host speaks v1 only."""
+    try:
+        return '"--protocol"' in (repo / SCRIPT).read_text()
+    except OSError:
+        return False
+
+
 def load_config() -> dict:
-    """Host settings with site/control/binding taken from the trial link file. Raises on a bad file."""
+    """Host settings; v1 takes site/control/binding from the trial link file. Raises on a bad file."""
     raw = json.loads(CONFIG.read_text())
-    need = ("repo", "link_config", "broker_env", "routes", "box_marker", "journal")
+    protocol = raw.get("protocol") or "v2"
+    if protocol not in PROTOCOLS:
+        raise ValueError(f"{CONFIG}: protocol은 v2 또는 v1입니다 (받은 값 {protocol!r})")
+    need = ("repo", "broker_env", "routes", "box_marker", "journal") + (("link_config",) if protocol == "v1" else ())
     missing = [k for k in need if raw.get(k) in (None, "")]
     if missing:
         raise ValueError(f"{CONFIG}: {', '.join(missing)} 항목이 없습니다")
+    repo = _path(raw["repo"])
+    if not (repo / SCRIPT).is_file():
+        raise ValueError(f"{repo / SCRIPT} 이 없습니다")
+    knows = host_knows_protocol(repo)
+    cfg = {
+        "repo": repo,
+        "protocol": protocol,
+        "protocol_flag": knows,
+        "broker_env": _path(raw["broker_env"]),
+        "routes": _path(raw["routes"]),
+        "box_marker": int(raw["box_marker"]),
+        "journal": journal_path(raw),
+        "client_id": str(raw.get("client_id") or "roport-shelf-01-host"),
+    }
+    if protocol == "v2":
+        if not knows:
+            raise ValueError(f"{repo / SCRIPT}: 이 Host는 v2(--protocol)를 모릅니다. Host를 갱신하거나 \"protocol\": \"v1\"로 두세요")
+        cfg["control"] = str(raw.get("control") or "control-01")
+        return cfg
     link = json.loads(_path(raw["link_config"]).read_text())
     omx = link.get("omx") or {}
     if omx.get("execution_mode") != "hardware":
         raise ValueError(f"{raw['link_config']}: execution_mode가 hardware가 아닙니다 (mock 설정으로 실물 Host를 띄우지 않음)")
-    repo = _path(raw["repo"])
-    if not (repo / SCRIPT).is_file():
-        raise ValueError(f"{repo / SCRIPT} 이 없습니다")
-    return {
-        "repo": repo,
-        "site": link["site_id"],
-        "control": link["control_id"],
-        "binding": omx["binding_id"],
-        "broker_env": _path(raw["broker_env"]),
-        "routes": _path(raw["routes"]),
-        "box_marker": int(raw["box_marker"]),
-        "journal": _path(raw["journal"]),
-        "client_id": str(raw.get("client_id") or "roport-shelf-01-host"),
-    }
+    return cfg | {"site": link["site_id"], "control": link["control_id"], "binding": omx["binding_id"]}
+
+
+def host_command(cfg: dict, uv: str) -> list[str]:
+    """cooperative_host.py arguments for the configured protocol."""
+    cmd = [uv, "run", "python", SCRIPT]
+    if cfg["protocol_flag"]:
+        cmd += ["--protocol", cfg["protocol"]]
+    cmd += ["--executor", "panel", "--routes", str(cfg["routes"]), "--box-marker", str(cfg["box_marker"]),
+            "--control", cfg["control"]]
+    if cfg["protocol"] == "v1":
+        cmd += ["--site", cfg["site"], "--binding", cfg["binding"]]
+    return cmd + ["--client-id", cfg["client_id"], "--journal", str(cfg["journal"])]
 
 
 def broker_env(path: Path) -> dict:
@@ -119,13 +169,10 @@ class Host:
                 cfg = load_config()
                 env = dict(os.environ, **broker_env(cfg["broker_env"]), PYTHONUNBUFFERED="1")
                 uv = shutil.which("uv") or str(Path.home() / ".local/bin/uv")
-                cmd = [uv, "run", "python", SCRIPT, "--executor", "panel",
-                       "--routes", str(cfg["routes"]), "--box-marker", str(cfg["box_marker"]),
-                       "--site", cfg["site"], "--control", cfg["control"], "--binding", cfg["binding"],
-                       "--client-id", cfg["client_id"], "--journal", str(cfg["journal"])]
+                cmd = host_command(cfg, uv)
                 cfg["journal"].parent.mkdir(parents=True, exist_ok=True)
                 log = open(self.log_file, "a")
-                log.write(f"\n===== {dt.datetime.now():%Y-%m-%d %H:%M:%S} armed → Host 시작\n")
+                log.write(f"\n===== {dt.datetime.now():%Y-%m-%d %H:%M:%S} armed → Host 시작 ({cfg['protocol']})\n")
                 log.flush()
                 # Own session: Ctrl+C in the panel's terminal must not stop it mid-report; stop() does.
                 self.proc = subprocess.Popen(cmd, cwd=cfg["repo"], env=env, stdout=subprocess.PIPE,
@@ -191,7 +238,7 @@ def hold_files() -> dict | None:
     """The three file paths from the journal in the Host settings; None without settings."""
     try:
         raw = json.loads(CONFIG.read_text())
-        journal = _path(raw["journal"])
+        journal = journal_path(raw)  # the running protocol's journal: its Host writes these files
     except (OSError, ValueError, KeyError, TypeError):
         return None
     base = journal.parent / journal.stem

@@ -14,6 +14,8 @@ import time
 from collections import deque
 
 _TIMES: dict = {}  # camera object -> deque of frame times
+_COUNT: dict = {}  # camera object -> frames delivered since install (3.26.0, the 5 s telemetry)
+_ERRS: dict = {}  # camera object -> exceptions of the hardware read since install
 _LOCK = threading.Lock()
 
 
@@ -26,9 +28,15 @@ def install() -> None:
     original = OpenCVCamera._read_from_hardware
 
     def _read_from_hardware(self, *args, **kwargs):
-        frame = original(self, *args, **kwargs)
+        try:
+            frame = original(self, *args, **kwargs)
+        except Exception:
+            with _LOCK:
+                _ERRS[id(self)] = _ERRS.get(id(self), 0) + 1
+            raise
         now = time.perf_counter()
         with _LOCK:
+            _COUNT[id(self)] = _COUNT.get(id(self), 0) + 1
             q = _TIMES.get(id(self))
             if q is None:
                 q = _TIMES[id(self)] = deque(maxlen=120)
@@ -51,6 +59,18 @@ def fps(cam, window: float = 1.5) -> float | None:
     if len(recent) < 2:
         return 0.0
     return round((len(recent) - 1) / (recent[-1] - recent[0]), 1)
+
+
+def frames(cam) -> int:
+    """Frames this camera's read thread has delivered since install() (counted, not windowed)."""
+    with _LOCK:
+        return _COUNT.get(id(cam), 0)
+
+
+def errors(cam) -> int:
+    """Exceptions of this camera's hardware read since install()."""
+    with _LOCK:
+        return _ERRS.get(id(cam), 0)
 
 
 def brightness(frame) -> float | None:

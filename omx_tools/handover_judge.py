@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 
 HERE = pathlib.Path(__file__).resolve().parent
-VERSION = "1117e"   # 1117d + 기울기 확인 / 1117e: 시작 1 s 안에 마커가 보이기만 해도 blocked, 손이 한 번은 선반 쪽으로 들어와야 함(HANDS_IN_Y)   # 1117a 손끝=몸체 원점(폐기) / 1117b 손가락 앞끝 / 1117c + 안정 뒤 움직이면 취소·판정 순간 보임 (sim 0/131 오판)
+VERSION = "1124a"   # 1124a: 칸 2A(왼팔)·2C(오른팔) + 한 팔 관절(접두어 없는 이름) 지원, 2B 는 1117e 와 같음(2708 프레임 동일) / 1117e: 1117d + 기울기 확인 / 1117e: 시작 1 s 안에 마커가 보이기만 해도 blocked, 손이 한 번은 선반 쪽으로 들어와야 함(HANDS_IN_Y)   # 1117a 손끝=몸체 원점(폐기) / 1117b 손가락 앞끝 / 1117c + 안정 뒤 움직이면 취소·판정 순간 보임 (sim 0/131 오판)
 BOX_IDS = (16, 17, 20)
 SIDE_PX = (38.0, 47.0)
 STABLE_S, STABLE_PX, SEEN_S = 0.5, 3.0, 0.3
@@ -33,6 +33,15 @@ MARKER_M = 0.048          # 상자 윗면 큰 마커 한 변 (real_runner mark_b
 TILT_CHECK = True
 TILT_EDGE = (0.88, 1.12)  # 네 변 길이 / 4.8cm 허용 범위
 TILT_RATIO = 1.08         # 가장 긴 변 / 가장 짧은 변, 두 대각선 비 상한
+# 11/24 TK: 한팔 작업(2A 왼팔 · 2C 오른팔). 위 카메라는 좌우가 뒤집혀 2A 가 화면 오른쪽 아래, 2C 가 왼쪽 아래.
+# 영역 = 칸(unload_check SLOT_X/SLOT_Y, 선반 2층 윗면 + 상자 5cm)을 handover_fk topcam 으로 투영한 사각형에서 안쪽으로 (2B 와 같은 방식, 2B 투영 u154~498·v320~458 ↔ top_roi u175~465·v335~455)
+SLOT_TOP_ROI = {"2A": [350, 455, 515, 630], "2C": [355, 455, 10, 140]}   # [v0, v1, u0, u1]
+SLOT_FRONT_Y = {"2A": 0.25, "2C": 0.25}    # 2A·2C 는 앞 연장판이 없다 (2B 0.215 는 handover_fk.json shelf.front_y_2b)
+SLOT_SIDE_PX = {"2A": (34.0, 44.0), "2C": (36.0, 46.0)}   # 1118 한팔 시연 끝 화면 실측: 2A 36.4~39.5px, 2C 39.3~41.6px (2B 는 SIDE_PX)
+SLOT_ARM = {"2A": "left", "2B": None, "2C": "right"}
+# 화면 모서리(2A·2C)는 렌즈 왜곡으로 평평한 상자도 변 비가 커진다 — 1118 한팔 시연 끝 화면 실측: 변 0.836~1.056, 변 비 ≤1.19, 대각선 비 ≤1.12
+SLOT_TILT = {"2A": ((0.82, 1.12), 1.22), "2C": ((0.82, 1.12), 1.22)}
+BOX_TOP_IDS = tuple(range(15, 23))          # 상자 윗면 큰 마커 (unload_check 와 같음)
 
 
 def _quat_mat(q):
@@ -136,10 +145,22 @@ class TopCam:
 
 
 class Judge:
-    def __init__(self, fk_json=None, box_ids=BOX_IDS):
+    def __init__(self, fk_json=None, box_ids=BOX_IDS, slot="2B", arm="auto"):
+        """slot: '2B'(기본, 두 팔) · '2A'(왼팔) · '2C'(오른팔). arm: 'auto' = 칸에 맞는 팔(2B 는 두 팔), 'left'·'right'·None(두 팔).
+        한 팔 평가는 그 팔 관절 6개만 줘도 된다(다른 팔은 0 으로 채움, 손끝은 그 팔만 본다)"""
         tab = json.loads(pathlib.Path(fk_json or HERE / "handover_fk.json").read_text())
         self.fk, self.cam = FK(tab), TopCam(tab["topcam"])
-        self.shelf = tab["shelf"]
+        self.names = tab["names"]
+        self.slot = slot
+        if slot != "2B" and slot not in SLOT_TOP_ROI:
+            raise ValueError(f"slot {slot} 미지원 (2A·2B·2C)")
+        self.shelf = dict(tab["shelf"])
+        if slot != "2B":
+            self.shelf.update(top_roi=SLOT_TOP_ROI[slot], front_y_2b=SLOT_FRONT_Y[slot])
+        self.side_px = SLOT_SIDE_PX.get(slot, SIDE_PX)
+        self.tilt_edge, self.tilt_ratio = SLOT_TILT.get(slot, (TILT_EDGE, TILT_RATIO))
+        self.arm = SLOT_ARM.get(slot) if arm == "auto" else arm
+        self.sides = ("left", "right") if self.arm is None else (self.arm,)
         self.box_ids = set(box_ids)
         self.det = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50), cv2.aruco.DetectorParameters())
         self.reset(0.0)
@@ -161,14 +182,14 @@ class Judge:
             q = q.reshape(4, 2) + [u0, r0]
             side = float(np.mean([np.linalg.norm(q[i] - q[(i + 1) % 4]) for i in range(4)]))
             c = q.mean(0)
-            if SIDE_PX[0] <= side <= SIDE_PX[1] and c[1] >= v0:
+            if self.side_px[0] <= side <= self.side_px[1] and c[1] >= v0:
                 z = self.shelf["top"] + 0.05
                 W = np.array([self.cam.world(u, v, z)[:2] for u, v in q])
                 ed = [float(np.linalg.norm(W[i] - W[(i + 1) % 4])) for i in range(4)]
                 dg = [float(np.linalg.norm(W[0] - W[2])), float(np.linalg.norm(W[1] - W[3]))]
                 shape = {"edge_rel": [round(e / MARKER_M, 3) for e in ed], "side_ratio": round(max(ed) / max(min(ed), 1e-6), 3), "diag_ratio": round(max(dg) / max(min(dg), 1e-6), 3)}
-                flat = (TILT_EDGE[0] <= min(shape["edge_rel"]) and max(shape["edge_rel"]) <= TILT_EDGE[1]
-                        and shape["side_ratio"] <= TILT_RATIO and shape["diag_ratio"] <= TILT_RATIO)
+                flat = (self.tilt_edge[0] <= min(shape["edge_rel"]) and max(shape["edge_rel"]) <= self.tilt_edge[1]
+                        and shape["side_ratio"] <= self.tilt_ratio and shape["diag_ratio"] <= self.tilt_ratio)
                 best = {"id": int(k), "uv": [round(float(c[0]), 1), round(float(c[1]), 1)], "side_px": round(side, 1), "corners": q.tolist(), "shape": shape, "flat": bool(flat)}
                 if TILT_CHECK and not flat:   # 기운 상자: 마커를 안 본 것으로 (안정·판정 안 함)
                     best = dict(best, rejected="tilted")
@@ -212,8 +233,14 @@ class Judge:
                     self.box.update(y=round(float(w[1]), 4), x=round(float(w[0]), 4), yaw_deg=round(math.degrees(yaw), 1), front_y=round(float(w[1]) - half, 4))
             else:
                 self.stable_since, self.prev_c = None, None
-            q = self.fk.qpos(joints)
-            ty = [float(self.fk.finger_front_y(joints, s, q)) for s in ("left", "right")]   # 손가락 앞끝 y
+            jd = {n: 0.0 for n in self.names}   # 한 팔 평가: 다른 팔 관절이 없으면 0 (그 팔 손끝은 안 본다)
+            for k, v in joints.items():   # 한 팔 평가(omx_follower 하나)는 'shoulder_pan.pos' 처럼 팔 접두어가 없다 → 이 판정기의 팔로
+                k = str(k).removesuffix(".pos")
+                if self.arm is not None and not k.startswith(("left_", "right_")):
+                    k = f"{self.arm}_{k}"
+                jd[k] = float(v)
+            q = self.fk.qpos(jd)
+            ty = [float(self.fk.finger_front_y(jd, s, q)) for s in self.sides]   # 손가락 앞끝 y
             if max(ty) > HANDS_IN_Y:
                 self.hands_in = True
             out.update(marker=mk and {k_: v_ for k_, v_ in mk.items() if k_ != "corners"}, tip_y=[round(v, 4) for v in ty], stable=self.stable_ok, blocked=self.blocked)

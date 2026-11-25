@@ -74,6 +74,16 @@ FAST_RAMP_S = 0.5
 # arms over where they are: no landing at all, the torque stays on (the motors hold their last goal), ports closed only.
 # Set by omx_run.py just before its safe stop; never together with 비상 정지 (FREEZE wins).
 HOLD_EXIT = threading.Event()
+# 3.24.0 (TK 11/24): after an unloading that ended on "placed on the tray" the Pinky may already be leaving while the
+# arms go home. A fingertip that comes back into the tray zone (+3 cm) stops the home move and the hand is lifted
+# straight up; out of the zone again -> the move goes on; still in after escape_s -> 비상 정지 hold (torque on, last
+# goal, [홈 위치로 이동]). Set by omx_run.py only then: {"near": fn(side, joints) -> bool, "lift_dz": fn(side, joints) ->
+# m to rise, "escape_s": 5.0, "report": fn(dict)}. "held" is set once it held: after the person's [홈 위치로 이동] the
+# arm goes home without the watch (a person has looked).
+TRAY_GUARD: dict = {}
+# 3.25.0: called with the arm after it has landed at home (torque off), before its port and cameras close: the one-arm
+# unloading reads the tray again there (omx_run._tray_recheck)
+AFTER_LAND: list = []
 HOLD_LANDED = threading.Event()  # an arm was landed after all (비상 정지 came first): the handover must not happen
 PWM_MAX = 885  # X-series Goal_PWM full scale
 
@@ -261,13 +271,13 @@ def _lifter():
         return _LIFTER["obj"]
 
 
-def lift_plan(robot, present: dict, s: dict) -> tuple[str, list]:
+def lift_plan(robot, present: dict, s: dict, dz: float | None = None) -> tuple[str, list]:
     """Before going home from a stop (3.17.3, TK 11/18): raise the fingertips lift_dz straight up, the hand's tilt kept
     (omx_lift.plan; under a shelf plate it first pulls the hand out, then lifts 2 cm). Returns (mode, waypoints of the
     five arm joints). Mode "none" (no plan, unknown arm side, off, planner missing): go home directly (synchronized).
     Guide sim, recorded evals stopped mid-task: inbound 900 points 84 -> 9 collisions, unload 299 points 3 -> 2."""
     side = getattr(robot, "_omx_side", None)
-    dz = float(s.get("lift_dz") or 0.0)
+    dz = float(s.get("lift_dz") or 0.0) if dz is None else float(dz)
     if side not in ("left", "right") or dz <= 0:
         return "none", []
     lifter = _lifter()
@@ -297,6 +307,75 @@ def lift_plan(robot, present: dict, s: dict) -> tuple[str, list]:
         pts.append(p)
         prev = p
     return mode, pts
+
+
+def _tray_watching() -> bool:
+    return bool(TRAY_GUARD.get("near")) and not TRAY_GUARD.get("held")
+
+
+def _tray_near(robot, joints: dict) -> bool:
+    try:
+        return bool(TRAY_GUARD["near"](getattr(robot, "_omx_side", None), {m: float(joints[m]) for m in ARM if m in joints}))
+    except Exception:  # noqa: BLE001  a watch that cannot tell is not a reason to stop
+        return False
+
+
+def _tray_escape(robot, present: dict, s: dict) -> str:
+    """The fingertip came back into the tray zone while going home (see TRAY_GUARD): lift the hand straight up until it
+    is out ("clear"), or hold where it is once escape_s has passed ("hold": FREEZE, torque on). present is updated."""
+    g, side = TRAY_GUARD, getattr(robot, "_omx_side", None)
+    report = g.get("report") or (lambda d: None)
+    limit = float(g.get("escape_s", 5.0))
+    t0 = time.monotonic()
+    arm_now = {m: float(present[m]) for m in ARM}
+    g["entries"] = g.get("entries", 0) + 1
+    report({"event": "enter", "side": side, "n": g["entries"], "joints": arm_now})
+    if g["entries"] > int(g.get("max_escapes", 3)):  # out and back in again and again: a person looks
+        g["held"] = True
+        report({"event": "hold", "side": side, "after_s": 0.0, "why": "repeated", "n": g["entries"], "joints": arm_now})
+        _say(f"손끝이 쟁반 구역에 {g['entries']}번째 들어와 토크를 켠 채 제자리에서 멈춥니다. 확인 뒤 [홈 위치로 이동]을 누르세요", "freeze")
+        FREEZE.set()
+        return "hold"
+    _say(f"{'왼팔' if side == 'left' else '오른팔'} 손끝이 쟁반 구역에 다시 들어와 홈 쪽 이동을 멈추고 손을 위로 듭니다", "stop")
+    try:
+        dz = float(g["lift_dz"](side, arm_now)) if g.get("lift_dz") else 0.05
+    except Exception:  # noqa: BLE001
+        dz = 0.05
+    _mode, pts = lift_plan(robot, dict(present), s, dz=max(0.02, dz))
+    for p in pts:
+        start, dur, done = {m: present[m] for m in ARM}, _sync_duration({m: present[m] for m in ARM}, p, s["stop_speed"]), 0.0
+        t = time.monotonic()
+        while done < 1.0:
+            if FREEZE.is_set():
+                return "stopped"
+            if time.monotonic() - t0 >= limit:
+                break
+            time.sleep(1 / 30)
+            now = time.monotonic()
+            dt, t = min(now - t, 0.2), now
+            done = 1.0 if dur <= 0 else min(1.0, done + dt / dur)
+            cmd = _sync_cmd(start, p, done)
+            robot.bus.sync_write("Goal_Position", cmd)
+            present.update(cmd)
+            if not _tray_near(robot, present):
+                report({"event": "clear", "side": side, "after_s": round(time.monotonic() - t0, 2), "joints": {m: present[m] for m in ARM}})
+                _say("쟁반 구역에서 벗어나 홈 복귀를 이어 갑니다", "stop")
+                return "clear"
+        if time.monotonic() - t0 >= limit:
+            break
+    while time.monotonic() - t0 < limit:  # no lift left (or none possible): keep the pose, look again
+        if FREEZE.is_set():
+            return "stopped"
+        if not _tray_near(robot, present):
+            report({"event": "clear", "side": side, "after_s": round(time.monotonic() - t0, 2), "joints": {m: present[m] for m in ARM}})
+            return "clear"
+        time.sleep(0.05)
+    g["held"] = True
+    report({"event": "hold", "side": side, "after_s": round(time.monotonic() - t0, 2), "joints": {m: present[m] for m in ARM},
+            "lift_points": len(pts)})
+    _say(f"{limit:.0f}초 안에 쟁반 구역을 벗어나지 못해 토크를 켠 채 제자리에서 멈춥니다. 확인 뒤 [홈 위치로 이동]을 누르세요", "freeze")
+    FREEZE.set()
+    return "hold"
 
 
 def set_pwm(robot, ratio: float) -> None:
@@ -352,7 +431,13 @@ def go_home(robot, what: str = "stop", events: dict | None = None) -> bool:
             now = time.monotonic()
             dt, t = min(now - t, 0.2), now
             done = 1.0 if dur <= 0 else min(1.0, done + dt / dur)
-            robot.bus.sync_write("Goal_Position", _sync_cmd(start, goal, done))
+            cmd = _sync_cmd(start, goal, done)
+            robot.bus.sync_write("Goal_Position", cmd)
+            if what == "stop" and _tray_watching() and _tray_near(robot, {**present, **cmd}):
+                present.update(cmd)
+                if _tray_escape(robot, present, s) != "clear":
+                    return False  # held (비상 정지) or stopped
+                return move(goal, speed, settle)  # out of the zone again: on to the same goal from where the lift ended
             if done >= 1.0:
                 present.update(goal)
                 if settle:
@@ -773,6 +858,11 @@ def install() -> None:
                 fast_land(self) if FAST_LAND.is_set() and not FREEZE.is_set() else soft_land(self)
         except Exception as exc:  # never block the normal shutdown
             _say(f"건너뜀 ({exc})", "stop")
+        for fn in list(AFTER_LAND):
+            try:
+                fn(self)
+            except Exception as exc:  # noqa: BLE001  never block the shutdown
+                _say(f"착지 뒤 확인 건너뜀 ({exc})", "stop")
         return original_disconnect(self, *args, **kwargs)
 
     cls.connect, cls.send_action, cls.disconnect = connect, send_action, disconnect

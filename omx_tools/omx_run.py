@@ -152,6 +152,12 @@ class ReturnWatch:
 RETURN = ReturnWatch()
 
 
+def reinit_from_env() -> None:
+    """Objects of this module that read the environment when created at import: made again from the current one
+    (warm_wait, 3.22.3). Anything new of that kind belongs here too (sbw/te.py compares a warm start with a cold one)."""
+    RETURN.__init__()
+
+
 class PlaceWatch:
     """OMX_PLACE_JUDGE=<json> (3.18.0, control-tower eval with end_on_place): Guide's handover judge (handover_judge.py)
     on the raw top-camera frame (before the target circle is drawn) and the joints, in its own thread at rate_hz so the
@@ -169,7 +175,10 @@ class PlaceWatch:
         self.camera = cfg.get("camera", "front")
         self.period = 1.0 / float(cfg.get("rate_hz", 6))
         self.version = getattr(handover_judge, "VERSION", "?")
-        self.judge = handover_judge.Judge(cfg.get("fk_json"), box_ids=tuple(int(b) for b in cfg["box_ids"]))
+        # 3.25.0: one-arm loading names its slot (2A / 2C) and arm; it runs without end_on_return (independent)
+        extra = {k: cfg[k] for k in ("slot", "arm") if cfg.get(k)}
+        self.judge = handover_judge.Judge(cfg.get("fk_json"), box_ids=tuple(int(b) for b in cfg["box_ids"]), **extra)
+        self.independent = bool(cfg.get("independent"))
         self.lock, self.new = threading.Lock(), threading.Event()
         self.frame = self.joints = self.t = self.frame_ts = None
         self.taken_at = 0.0
@@ -263,6 +272,229 @@ def _make_place() -> PlaceWatch | None:
 
 
 PLACE: PlaceWatch | None = None
+DROP = None  # omx_dropwatch.DropWatch (OMX_DROP_WATCH, 3.23.0): records a dropped box, never acts
+TRAY = None  # TrayWatch (OMX_TRAY_JUDGE, 3.24.0): the unloading's "box on the Pinky tray, hands out" judge
+
+
+class TrayWatch:
+    """OMX_TRAY_JUDGE=<json> (3.24.0, TK 11/24): Guide's tray judge (tray_judge.py) during an unloading eval, on the raw
+    front (tray) and front_2 (shelf slot) frames, the joints and the gripper commands, in its own thread at rate_hz.
+    A frame older than max_age_s (capture time) is not given to it. mode "record": it only records when it would have
+    judged (the eval goes on as before). mode "on": the episode ends (end_reason "tray_placed"), the panel tells the
+    Host at once, and the safe stop watches the fingertips against the tray zone on the way home (omx_safe_start.
+    TRAY_GUARD). Not tied to end_on_return. Config: box, slot, tray_ref_file, hold_s, mode, rate_hz, max_age_s."""
+
+    def __init__(self, path: str):
+        import tray_judge
+
+        cfg = json.loads(Path(path).read_text())
+        self.mode = cfg.get("mode", "record")
+        self.period = 1.0 / float(cfg.get("rate_hz", 6))
+        self.max_age = float(cfg.get("max_age_s", 3.0))
+        self.box, self.slot = cfg.get("box"), cfg.get("slot", "2B")
+        self.version = getattr(tray_judge, "VERSION", "?")
+        self.tj = tray_judge
+        self.judge = tray_judge.Judge(cfg.get("fk_json"), box_id=self.box, slot=self.slot,
+                                      tray_ref_file=cfg.get("tray_ref_file"), hold_s=float(cfg.get("hold_s", 1.0)))
+        # 3.25.0: the camera that sees this slot's tray (front for 2B, front_3 for 2A, front_4 for 2C) and, for one arm,
+        # that arm (its gripper is "gripper.pos" without a side)
+        self.tray_cam = getattr(self.judge, "tray_cam", "front")
+        self.cams = (self.tray_cam, "front_2")
+        self.one_arm = bool(cfg.get("one_arm"))
+        self.arm = cfg.get("arm") or os.environ.get("OMX_ARM_SIDE")
+        self.lock, self.new = threading.Lock(), threading.Event()
+        self.data = None
+        self.taken_at = 0.0
+        self.hit: dict | None = None
+        self.last: dict | None = None
+        self.updates = self.errors = self.stale = 0
+        threading.Thread(target=self._run, daemon=True, name="traywatch").start()
+
+    def reset(self, t0: float) -> None:
+        with self.lock:
+            self.judge.reset(t0)
+            self.hit, self.last, self.data = None, None, None
+            self.updates = self.errors = self.stale = 0
+
+    def feed(self, obs: dict, action: dict, t: float, ts: dict) -> None:
+        """Every control step of the episode; copies frames only when the thread is due. ts: camera -> capture time."""
+        if t - self.taken_at < self.period or self.new.is_set():
+            return
+        import numpy as np
+
+        frames = {c: (np.array(obs[c], copy=True) if obs.get(c) is not None else None) for c in self.cams}
+        joints = {k[:-4]: float(v) for k, v in obs.items() if k.endswith(".pos")}
+        grips = {sd: (float(action[f"{sd}_gripper.pos"]), float(obs[f"{sd}_gripper.pos"]))
+                 for sd in ("left", "right") if f"{sd}_gripper.pos" in action and f"{sd}_gripper.pos" in obs}
+        if not grips and self.arm and "gripper.pos" in action and "gripper.pos" in obs:
+            grips = {self.arm: (float(action["gripper.pos"]), float(obs["gripper.pos"]))}
+        with self.lock:
+            self.data = (frames, joints, grips, t, dict(ts))
+        self.taken_at = t
+        self.new.set()
+
+    def _run(self) -> None:
+        import cv2
+
+        while True:
+            self.new.wait()
+            with self.lock:
+                frames, joints, grips, t, ts = self.data
+            gray, used = {}, {}
+            for c, img in frames.items():
+                cap = ts.get(c)
+                if img is None or cap is None or t - cap > self.max_age:
+                    gray[c] = None
+                    self.stale += img is not None
+                    continue
+                gray[c] = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img  # camera frames are RGB
+                used[c] = cap
+            try:
+                r = self.judge.update(gray[self.tray_cam], gray["front_2"], joints, grips, t)
+            except Exception as exc:  # noqa: BLE001  (the judge returns errors as a key; a last guard)
+                r = {"placed": False, "error": f"{type(exc).__name__}: {exc}"[:160]}
+            with self.lock:
+                self.updates += 1
+                self.errors += bool(r.get("error"))
+                self.last = {k: v for k, v in r.items() if k not in ("tray_info", "slot_info")}
+                if r.get("placed") and self.hit is None:
+                    h = dict(getattr(self.judge, "hit", None) or r)
+                    obs_ts = min(used.values()) if used else None
+                    # 3.24.1: was the tray compared with this mission's own empty-tray photo (tray_check right
+                    # before the eval)? The judge says so when its first top frame was checked against it; the
+                    # Host trusts the tray reading only then (same rule as the pinky_check after an unloading)
+                    ref = (h.get("tray_info") or {}).get("tray_reference")
+                    checked = ref == "first_frame(checked_vs_pre_mission)"
+                    one_arm_ref = self.one_arm and bool(ref) and "error" not in (h.get("tray_info") or {})
+                    self.hit = {"operation": "OUTBOUND", "on_pinky": h.get("on_pinky"), "slot_empty": h.get("slot_empty"),
+                                "slot": self.slot, "box": self.box, "tips_clear": h.get("tips_clear"),
+                                "grippers_released": h.get("grippers_released"), "tray_marker": h.get("tray_marker"),
+                                "tray_changed": h.get("tray_changed"), "tray_reference": ref,
+                                "tray_reference_state": "ok" if checked else ("eval_first_frame" if one_arm_ref else "not_checked"),
+                                "pre_mission_match": checked, "camera": self.tray_cam, "one_arm": self.one_arm,
+                                "start_vs_mission_ref": (h.get("tray_info") or {}).get("start_vs_mission_ref"),
+                                "observed_ts": obs_ts, "observed_clock": "capture",
+                                "observed_cameras": {c: {"ts": v, "at": _iso(v)} for c, v in used.items()},
+                                "source": "eval_judge", "judge_version": self.version, "mode": self.mode,
+                                "judged_ts": t, "judged_at": _iso(t), "evidence": {k: h.get(k) for k in (
+                                    "marker_uv", "slot_changed", "slot_read", "grip_gap", "tips_near", "since_s")}}
+            self.new.clear()
+
+    def placed(self) -> dict | None:
+        with self.lock:
+            return self.hit
+
+    def summary(self) -> dict:
+        with self.lock:
+            return {"version": self.version, "mode": self.mode, "updates": self.updates, "errors": self.errors,
+                    "stale_frames": self.stale, "hit": self.hit, "last": self.last}
+
+    def arm_guard(self) -> None:
+        """mode "on", after the placement: the fingertips against the tray zone on the way home (omx_safe_start)."""
+        tj, fk = self.tj, self.judge.fk
+        names = list(getattr(self.judge, "names", []))
+
+        def full(side, arm):
+            jd = {n: 0.0 for n in names}
+            jd.update({f"{side}_{m}": v for m, v in arm.items()})
+            return jd
+
+        zone = getattr(self.judge, "zone", None)
+        zones = getattr(tj, "TRAY_ZONES", {}) or {}
+        zmax = zones[zone][3] if zone in zones else tj.TRAY_ZONE_ZMAX
+
+        def near(side, arm):
+            if side not in ("left", "right"):
+                return False
+            try:
+                return tj.tips_near_tray(full(side, arm), side, fk, tj.TIP_MARGIN_M, zone=zone)
+            except TypeError:  # a judge before 1124c (no zone argument)
+                return tj.tips_near_tray(full(side, arm), side, fk, tj.TIP_MARGIN_M)
+
+        def lift_dz(side, arm):
+            z = float(fk.tip(full(side, arm), side)[2])
+            return zmax + tj.TIP_MARGIN_M + 0.02 - z
+
+        def report(d):
+            d = dict(d, at=_iso(time.time()))
+            sys.stdout.write("[omx] tray_reentry " + json.dumps(d, ensure_ascii=False, default=_jsonable) + "\n")
+            sys.stdout.flush()
+
+        omx_safe_start.TRAY_GUARD.clear()
+        omx_safe_start.TRAY_GUARD.update(near=near, lift_dz=lift_dz, escape_s=5.0, report=report)
+
+
+def _tray_recheck(arm_robot) -> None:
+    """3.25.0 (omx_safe_start.AFTER_LAND, one-arm unloading): the arm is home, the Pinky still waits for the report:
+    the tray and the slot are read again from the cameras still open (about 1.2 s at 6 Hz) and reported as
+    "[omx] tray_recheck {json}". The judge compares the tray with this eval's own first frame (empty tray)."""
+    tw = TRAY
+    if tw is None or not tw.one_arm:
+        return
+    cams = getattr(ABORT.get("robot"), "cameras", None) or getattr(arm_robot, "cameras", {}) or {}
+    out = {"camera": tw.tray_cam, "slot": tw.slot, "box": tw.box, "placed_at": (tw.placed() or {}).get("judged_at")}
+    try:
+        import cv2
+
+        present = {f"{m}": float(v) for m, v in arm_robot.bus.sync_read("Present_Position").items()}
+        grips = {tw.arm: (present.get("gripper", 0.0), present.get("gripper", 0.0))} if tw.arm else {}
+        r, used = None, {}
+        for _ in range(8):
+            frames = {}
+            for c in tw.cams:
+                cam = cams.get(c)
+                img = cam.read_latest() if cam is not None else None
+                frames[c] = None if img is None else (cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img)
+                ts = _frame_ts(ABORT.get("robot") or arm_robot, c, img) if img is not None else None
+                if ts:
+                    used[c] = ts
+            with tw.lock:
+                r = tw.judge.update(frames.get(tw.tray_cam), frames.get("front_2"), present, grips, time.time())
+            time.sleep(1 / 6)
+        info = getattr(tw.judge, "tray_info", {}) or {}
+        ref = info.get("tray_reference")
+        out.update({k: r.get(k) for k in ("on_pinky", "slot_empty", "tray_marker", "tray_changed", "error")},
+                   tray_reference=ref, tray_reference_state="eval_first_frame" if ref and "error" not in info else "not_checked",
+                   observed_ts=min(used.values()) if used else None, observed_clock="capture" if used else None,
+                   at=_iso(time.time()))
+    except Exception as exc:  # noqa: BLE001  no reading: the panel reports it unread (a person checks)
+        out["error"] = f"{type(exc).__name__}: {exc}"[:200]
+    _say("[omx] tray_recheck " + json.dumps(out, ensure_ascii=False, default=_jsonable))
+
+
+def _make_tray():
+    path = os.environ.get("OMX_TRAY_JUDGE", "").strip()
+    if not path:
+        return None
+    try:
+        return TrayWatch(path)
+    except Exception as exc:  # noqa: BLE001  no judge = the unloading runs as before (pinky_check after the eval)
+        _say(f"[omx] 쟁반 놓음 판정을 켜지 못했습니다 ({type(exc).__name__}: {exc}). 평소처럼 평가합니다")
+        return None
+
+
+def _fitted_tray(judge):
+    """3.26.0: the side camera tray quad the tray judge fitted on this eval's first frame (Pinky stands +-25 px
+    differently each time), None before it is fitted or when the fit scored low (default quad used). One arm only: the
+    side cameras always fit on the first frame (no tray_fit_score = not fitted yet). For two-arm 2B the quad aligned to
+    the pre-mission photo (tray_reference "first_frame(checked_vs_pre_mission)") would also count as fitted (Guide)."""
+    tray, info = getattr(judge, "tray", None), getattr(judge, "tray_info", None) or {}
+    if not tray or "tray_fit_score" not in info or info.get("tray_fit") == "low_score_default_quad":
+        return None
+    return [[float(u), float(v)] for u, v in tray["quad"]]
+
+
+def _make_drop():
+    path = os.environ.get("OMX_DROP_WATCH", "").strip()
+    if not path:
+        return None
+    try:
+        import omx_dropwatch
+
+        return omx_dropwatch.DropWatch(path)
+    except Exception as exc:  # noqa: BLE001  no watcher = the eval runs as before
+        _say(f"[omx] 떨어뜨림 감지를 켜지 못했습니다 ({type(exc).__name__}: {exc}). 평소처럼 평가합니다")
+        return None
 
 
 def _handover_ready() -> bool:
@@ -549,6 +781,24 @@ class Policy:
         if self.runner is None and os.environ.get("OMX_REMOTE_URL"):
             raise RuntimeError("[omx] 원격 추론에는 비동기 엔진(OMX_ASYNC=1)이 필요합니다")
 
+    def _for_policy(self, frame: dict) -> dict:
+        """3.25.0: a one-arm run has more cameras open than its model learned (the judges read the others): the model
+        is given only its own (OMX_POLICY_CAMERAS, panel names), plus its constant inputs (OMX_CONST_INPUTS, e.g. the
+        shelf level of observation.environment_state). The remote server adds the constants itself (overrides)."""
+        keep = getattr(self, "_keep", None)
+        if keep is None:
+            names = json.loads(os.environ.get("OMX_POLICY_CAMERAS") or "null")
+            self._keep = keep = {f"observation.images.{n}" for n in names} if names else set()
+            import numpy as np
+
+            self._consts = {k: np.asarray(v, dtype=np.float32)
+                            for k, v in json.loads(os.environ.get("OMX_CONST_INPUTS") or "{}").items()}
+        if not keep and not self._consts:
+            return frame
+        out = {k: v for k, v in frame.items() if not keep or not k.startswith("observation.images.") or k in keep}
+        out.update(self._consts)
+        return out
+
     def new_episode(self, task: str, robot_type: str) -> None:
         self.task, self.robot_type = task, robot_type
         if self.runner is not None:
@@ -558,6 +808,7 @@ class Policy:
             self.backend.reset()
 
     def action(self, obs_frame: dict):
+        obs_frame = self._for_policy(obs_frame)
         if self.runner is not None:
             return self.runner.step(obs_frame)
         return self.backend.select(obs_frame, self.task, self.robot_type)
@@ -837,6 +1088,27 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
     interval = 1 / fps
     start = due = time.perf_counter()  # frames on a fixed schedule (start + k / fps): no drift over an episode
     watch = policy is not None and dataset is not None and RETURN.on
+    # 3.25.0: the one-arm placement judge runs without end_on_return (PlaceWatch.independent)
+    place_watch = PLACE is not None and policy is not None and dataset is not None and (RETURN.on or PLACE.independent)
+    if place_watch and not watch:
+        EPISODE_END.clear()
+        EPISODE_END.update(returned=False, elapsed_s=None, end_reason="timeout")
+        PLACE.reset(time.time())
+    drop = DROP is not None and policy is not None and dataset is not None  # 3.23.0: not tied to RETURN.on
+    if drop:
+        DROP.reset(time.time())
+    tray = TRAY is not None and policy is not None and dataset is not None  # 3.24.0: not tied to RETURN.on either
+    told = False
+    tele = None
+    if policy is not None and dataset is not None:  # 3.26.0: the 5 s camera / UDP / loop lines of an eval episode
+        try:
+            import omx_telemetry
+
+            tele = omx_telemetry.Telemetry(robot, getattr(policy, "backend", None), fps, _say)
+        except Exception as exc:  # noqa: BLE001  no lines = the eval runs as before
+            _say(f"[omx] telemetry: 켜지 못함 ({type(exc).__name__}: {exc})")
+    if tray:
+        TRAY.reset(time.time())
     if watch:
         RETURN.reset()
         EPISODE_END.clear()
@@ -851,6 +1123,7 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
                 EPISODE_END["end_reason"] = "stopped"
             break
         obs = robot.get_observation()
+        raw = obs  # before the target circle is drawn (the drop watch reads the raw top frame)
         if dataset is not None:
             LAST_STATE.update({k: v for k, v in obs.items() if k.endswith(".pos")})
             STATE_TS["t"] = time.time()
@@ -858,7 +1131,7 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
             EPISODE_END.update(returned=True, elapsed_s=round(t0 - start, 1), end_reason="returned")
             _say(f"[omx] 작업 끝 감지: 처음 자세로 복귀, 그리퍼 놓음 ({t0 - start:.1f}초) - 이 시도를 마칩니다")
             break
-        if watch and PLACE is not None:  # the raw frame, before the target circle is drawn
+        if place_watch:  # the raw frame, before the target circle is drawn
             PLACE.feed(obs, time.time(), _frame_ts(robot, PLACE.camera, obs.get(PLACE.camera)))
             hit = PLACE.placed()
             if hit is not None and not PLACE.shadow:
@@ -880,6 +1153,30 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
             if filt is not None:
                 act = filt(act)
             action = make_robot_action(act, dataset.features)
+            if drop:
+                try:
+                    DROP.feed(raw, action, time.time())
+                except Exception:  # noqa: BLE001  record only: never disturb the loop
+                    pass
+            if tray:
+                try:
+                    TRAY.feed(raw, action, time.time(), {c: _frame_ts(robot, c, raw.get(c)) for c in TRAY.cams})
+                except Exception:  # noqa: BLE001
+                    pass
+                hit = TRAY.placed()
+                if hit is not None and not told:
+                    told = True
+                    tag = "tray_placed" if TRAY.mode == "on" else "tray_judge"
+                    _say(f"[omx] {tag} " + json.dumps(hit, ensure_ascii=False, default=_jsonable))
+                    if TRAY.mode == "on":
+                        EPISODE_END.update(end_reason="tray_placed", elapsed_s=round(t0 - start, 1), judged_at=hit["judged_at"],
+                                           tray=hit)
+                        EVENTS["stop_recording"] = True  # no reset move, no next attempt: the arms go home (watched)
+                        TRAY.arm_guard()
+                        _say(f"[omx] 쟁반 놓음 감지: 상자 {hit.get('box')} 쟁반 위, 칸 빔, 손끝 빠짐 ({t0 - start:.1f}초) - "
+                             "평가를 마치고 홈으로 돌아갑니다 (손끝이 쟁반 구역에 다시 들어오면 멈춤)")
+                        break
+                    _say(f"[omx] 쟁반 놓음 판정(기록만): {t0 - start:.1f}초에 판정됐을 것 - 평가는 그대로 이어 갑니다")
         elif teleop is not None:
             action = teleop.get_action()
         else:
@@ -894,10 +1191,17 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
         dt = time.perf_counter() - t0
         if dt > interval:
             logging.warning(f"Record loop is running slower ({1 / dt:.1f} Hz) than the target FPS ({fps} Hz).")
+        if tele is not None:
+            try:
+                tele.step(t0, raw, dt)
+            except Exception:  # noqa: BLE001  never disturb the loop
+                tele = None
         due += interval
         if time.perf_counter() > due + interval:  # fell behind (a stall): start the schedule again from now
             due = time.perf_counter()
         precise_sleep(max(due - time.perf_counter(), 0.0))
+    if tele is not None:
+        tele.finish()  # the last partial 5 s and the episode's "... total:" lines (never raises)
 
 
 def _report_loop_rate(index: int, times: list) -> None:
@@ -989,6 +1293,14 @@ def run_episodes(cfg: RunConfig, robot, teleop, policy: Policy | None, dataset, 
                 EPISODE_END["loop_ms"] = {"p50": round(1000 * per[len(per) // 2], 1), "p99": round(1000 * per[int(0.99 * (len(per) - 1))], 1)}
             if PLACE is not None:
                 EPISODE_END["judge_watch"] = PLACE.summary()
+            if TRAY is not None:
+                EPISODE_END["tray_judge"] = TRAY.summary()
+            if DROP is not None:
+                EPISODE_END["drop_watch"] = DROP.finish()
+                for s in EPISODE_END["drop_watch"]["signals"]:
+                    if not s.get("ignored"):
+                        _say(f"[omx] 떨어뜨림 감지(기록만): {s['side']} 팔 {s['since_start_s']}초, "
+                             f"{(s.get('stage2') or {}).get('result')} - {(s.get('stage2') or {}).get('why')}")
             _write_episode_end(d.repo_id, index)
         if not EVENTS["stop_recording"] and (recorded < d.num_episodes - 1 or EVENTS["rerecord_episode"]):
             logging.info("Reset the environment")
@@ -1042,6 +1354,36 @@ def run_teleop(cfg: RunConfig, robot, teleop) -> None:
             teleop.disconnect()
 
 
+def wrist_check(robot) -> None:
+    """3.22.0 (OMX_WRIST_CHECK, evaluation): which wrist camera is on which arm, from a small gripper move
+    (omx_wristcheck). Exchanged: this run swaps them (the panel corrects robot.json). Unclear: no policy start."""
+    if not os.environ.get("OMX_WRIST_CHECK"):
+        return
+    import omx_wristcheck
+
+    def stop() -> bool:
+        return ABORT["on"] or EVENTS["stop_recording"] or omx_safe_start.FREEZE.is_set()
+
+    try:
+        res = omx_wristcheck.check(robot, stop)
+    except InterruptedError:
+        return  # 중지 / 즉시 중단 / 비상 정지 during the move: handled as at any other moment before the start
+    except Exception as exc:  # a camera that gives no frame: no guess either
+        res = {"ok": False, "swapped": False, "why": f"확인 중 오류 ({type(exc).__name__}: {exc})"[:200]}
+    if res is None:
+        return
+    _say(omx_wristcheck.line(res))
+    if res["ok"] and res["swapped"]:
+        ROBOT_CAMS.update(robot.cameras)  # the live views follow the exchange
+        _say(f"[omx] 손목 카메라 확인: 저장된 배정과 반대입니다. 이번 실행에서 wrist_left와 wrist_right를 바꿔 시작합니다 "
+             f"(로봇 구성도 고침, {res['ms']}ms)")
+    elif res["ok"]:
+        _say(f"[omx] 손목 카메라 확인: 그리퍼를 움직여 본 카메라가 저장된 배정과 같습니다 ({res['ms']}ms)")
+    else:
+        _say(f"[omx] 손목 카메라 확인 실패: {res['why']}. 정책을 시작하지 않습니다")
+        raise SystemExit(2)
+
+
 def run(cfg: RunConfig) -> None:
     omx_safe_start.install()
     problems = omx_safe_start.preflight(omx_safe_start.run_arms(cfg.robot, cfg.teleop))
@@ -1061,6 +1403,17 @@ def run(cfg: RunConfig) -> None:
     global MOTOR_OUT, TARGET, PLACE
     TARGET = _make_target()
     PLACE = _make_place()
+    global DROP, TRAY
+    DROP = _make_drop()
+    TRAY = _make_tray()
+    if TRAY is not None and TRAY.one_arm:
+        omx_safe_start.AFTER_LAND.append(_tray_recheck)  # 3.25.0: the tray again once the arm is home
+        if DROP is not None and getattr(DROP, "arm", None):
+            DROP.tray_source = lambda: _fitted_tray(TRAY.judge)  # 3.26.0 (Guide 11/25): the tray judge's fitted quad
+    if TRAY is not None:
+        _say(f"[omx] 쟁반 놓음 판정 {TRAY.version} ({'놓으면 평가를 마치고 바로 알림' if TRAY.mode == 'on' else '기록만: 평가는 그대로'})")
+    if DROP is not None:
+        _say(f"[omx] 떨어뜨림 감지 {getattr(sys.modules.get('omx_dropwatch'), 'VERSION', '?')} (기록만: 평가와 팔 동작은 그대로)")
     if PLACE is not None:
         _say(f"[omx] 놓음 판정 {PLACE.version} ({'기록만' if PLACE.shadow else '놓으면 평가를 마치고 정렬에 넘김'})")
     if TARGET is not None:
@@ -1088,6 +1441,8 @@ def run(cfg: RunConfig) -> None:
         if teleop is not None:
             teleop.connect()
         robot.connect()
+        if teleop is None and policy is not None:
+            wrist_check(robot)
         run_episodes(cfg, robot, teleop, policy, dataset, viewer)
         clean = True
     finally:
@@ -1097,6 +1452,8 @@ def run(cfg: RunConfig) -> None:
         if hold_exit:  # the alignment runner is waiting: leave the torque on, close the ports only (3.18.0)
             omx_safe_start.HOLD_EXIT.set()
             _say("[omx] 넘겨받기: 정렬 실행기가 기다리고 있어 토크를 켠 채 포트만 닫습니다")
+        elif EPISODE_END.get("end_reason") == "placed" and PLACE is not None and PLACE.independent:
+            _say("[omx] 한팔 놓음: 평가를 마치고 팔을 평소처럼 홈으로 내려놓습니다")
         elif EPISODE_END.get("end_reason") == "placed":
             _say("[omx] 넘겨받기 안 함: 정렬 실행기가 준비되지 않았거나 멈춤이 있어 평소처럼 내려놓습니다")
         if (not hold_exit and os.environ.get("OMX_FAST_RELEASE") == "1" and clean and EPISODE_END.get("returned")
@@ -1150,5 +1507,40 @@ def main() -> None:
     os._exit(0)
 
 
-if __name__ == "__main__":
+WARM_FLAG = "--omx-warm"
+WARM_BUSY = "/dev/shm/omx_warm_busy_{pid}"  # this warm process took a run: it holds the robot now (other accounts see it)
+
+
+def warm_wait() -> None:
+    """3.22.2 (--omx-warm): the panel keeps one process ready for the next evaluation, the imports done (about
+    2-3 s of a start). It holds no robot, camera or model. One line on stdin {"argv": [...], "env": {...}} starts
+    the run as if launched with them; stdin then carries the usual controls. stdin closed (the panel ended): exit."""
+    t = time.perf_counter()
+    for name in ("torch", "cv2", "lerobot.datasets.lerobot_dataset", "lerobot.policies.factory", "omx_async",
+                 "omx_infer", "omx_wristcheck", "omx_camstats"):
+        try:
+            __import__(name)
+        except Exception as exc:  # the run imports it again and reports it there
+            _say(f"[omx] warm: {name} 미리 불러오기 실패 ({exc})")
+    ready = time.perf_counter()
+    line = sys.stdin.readline()
+    if not line.strip():
+        os._exit(0)
+    req = json.loads(line)
+    Path(WARM_BUSY.format(pid=os.getpid())).write_text(str(time.time()))
+    os.environ.clear()
+    os.environ.update(req["env"])
+    # 3.22.3: what this module built from the environment when it was imported (before the run's environment was
+    # known) is built again. RETURN read OMX_END_ON_RETURN at import: in 3.22.2 a warm evaluation ran with it off,
+    # and with it the placement judge (handover) and the end on return (11/24 00:28, found by the Guide session)
+    reinit_from_env()
+    sys.argv = [sys.argv[0], *req["argv"]]
+    _say(f"[omx] warm: 미리 띄운 평가 프로그램으로 시작합니다 (불러오기 {ready - t:.1f}초는 미리 끝남)")
     main()
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] == [WARM_FLAG]:
+        warm_wait()
+    else:
+        main()

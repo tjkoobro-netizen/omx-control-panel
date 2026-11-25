@@ -1,5 +1,128 @@
 # OMX 제어판 버전 기록
 
+## 3.27.0 (2026-11-25) - 손실 감시 켜기·끄기 스위치
+
+- Guide의 관제 미션 손실·과부하 감시를 패널에 넣음: `omx_tools/omx_live_monitor.py`, 설명 `docs/LIVE_MONITOR.md`(이제 저장소 쪽이 원본). 읽기만 하고 로봇·패널·평가에는 손대지 않음(제어 PC 코어 하나의 약 1.6%, nice 10). 기록은 도구 폴더 밖 `~/il_ws/omx_loss_tracker/live`(`OMX_LOSS_DIR`)에 쌓여 다시 설치해도 남음
+- 평가 탭 "손실 감시"(제어 PC만): 켜기·끄기, 상태(켜짐·꺼짐·멈춤 = 켜져 있는데 상태 파일이 60초 넘게 안 바뀜), 오늘 경고 수, 마지막 갱신 시각, 지금 경고, 마지막 평가 회차 요약. GPU 노트북 패널에는 안 보임
+  - 켜기는 `setsid`로 패널과 따로 띄움(패널을 다시 시작해도 감시는 계속). GPU 노트북 ssh 이름은 패널의 `gpu_host`. 같은 기록 폴더에 쓰는 감시가 이미 돌면(손으로 켠 것 포함) 또 켜지 않음. 끄기는 그 감시 프로세스만 인자를 확인한 뒤 PID로 끔. GPU 노트북 쪽 작은 기록은 그대로 둠
+  - "패널이 켜질 때 자동으로 켜기"(기본 켜짐): 패널이 켜질 때 감시가 꺼져 있으면 켬(11/25 재부팅 뒤 꺼진 채로 남았던 일). 선택은 `~/.config/omx/v3/loss_monitor.json`에 저장. 설정 `"loss_monitor"` {`live_dir`, `gpu`, `auto`}
+  - "미션 뒤 보고서": GPU 노트북 기록을 가져오고(`--collect`, rsync) 오늘 회차별 요약(`--report`, `live/report_YYYYMMDD.md`)을 만들어 화면에서 봄. 평가·미션 중에는 막음
+  - `/api/loss_monitor`(GET 상태, POST action on·off·auto·report), `/api/loss_monitor/report?day=YYYYMMDD`. 관제(MQTT) 명령으로는 못 바꿈
+
+## 3.26.0 (2026-11-25) - 한팔 떨어뜨림 감지(기록), 5초 감시 줄, 관제 미션 "미션 접수" 음성
+
+- 상자 떨어뜨림 감지(`omx_dropwatch.py` 1124b → 1125a, 기록만)를 한팔 평가에서도 켬. 한팔 관측은 관절 이름에 팔 접두어가 없어(`gripper.pos`) 이전에는 아무것도 기록하지 않았음. 이제 그 팔 이름으로 읽음(놓음 판정 1124a와 같은 방식)
+  - 1단계 정상 놓음 구역(한팔, Guide 11/25: 한팔 녹화 157회의 신호 4번이 모두 이 안, 중간 0): 쟁반 = `tray_judge.tips_near_tray`(그 팔 바깥 쟁반 구역), 선반 = 손끝 y > 0.15, z > 0.28, 그 팔 쪽 |x| > 0.10
+  - 2단계 카메라 확인: 관제 한팔 입고(`end_on_place`)는 위 카메라 front, 칸 영역 = `handover_judge.SLOT_TOP_ROI`(2A·2C). 출고(`pinky_check`)는 그 팔 쪽 측면 카메라(2A front_3, 2C front_4), 쟁반 영역 = 같은 평가의 쟁반 놓음 판정이 첫 프레임에서 맞춘 쟁반 사각형 ×1.12(Guide 11/25: Pinky 서는 자리가 회차마다 ±25px 다름). 맞춘 사각형이 없거나 점수가 낮으면 기본 사각형(`SIDE_TRAY_QUAD`) ×1.3 안은 기각, ×1.3 밖·×1.6 안에서 멈추면 확정 대신 "uncertain". 입고는 위 화면에 바깥 쟁반이 없어(Pinky는 로봇 바깥 양옆) 칸 밖에서 멈추면 확정. 패널 화면에서 시작한 한팔 평가(입고·출고를 모름)는 1단계만 기록. 실제 떨어뜨림 데이터가 없어 2단계는 시험하지 못함
+  - 양팔 2B 동작은 1124b와 같음(같은 입력에 같은 결과 확인)
+- 평가 에피소드 동안 5초마다 감시 줄 3개(Guide의 `omx_live_monitor`가 읽음). 에피소드 끝에 같은 형식으로 전체 요약(`… total:`)
+  - `[omx] cams: front 30.0fps age 35/60ms dup 2 err 0 | front_2 …`: 카메라 읽기 스레드 fps, 루프가 쓴 프레임의 촬영 뒤 나이 p50/p95, 앞 단계와 같은 프레임, 읽기 예외 수
+  - `[omx] udp: req 52 bytes 8.7MB frag 7300 resp 50 timeout 2 stale 1 rtt 114/180ms`: UDP 추론 시도·보낸 영상 크기·조각 추정(1200바이트)·응답·응답 없음·늦은 응답(infer_link `stale_reply`, 읽기만)·왕복 p50/p95. UDP 추론일 때만
+  - `[omx] loop5s: p5 28.9Hz min 24.1Hz over 3`: 제어 루프 속도 하위 5%, 최저, 한 단계 작업이 1/fps를 넘은 수
+  - 루프에서는 숫자만 쌓고 5초에 한 번 문자열을 만듦
+- 음성 안내: 관제 미션(평가, `source` mqtt)이 처음 보이는 순간 "미션 접수"라고 말하고, 그 작업에서는 "시도 N 시작"을 말하지 않음. 패널에서 직접 시작한 평가는 그대로. 음성은 이 PC에서 패널 페이지가 열려 있고 '음성 안내'가 체크돼 있을 때만 나옴
+  - 함께 고침: 페이지를 연 뒤 첫 작업(그 전까지 작업이 없던 경우)의 음성 안내가 나오지 않던 문제
+  - `/api/status`의 job에 `started_at`(작업 구분용)
+
+## 3.25.1 (2026-11-24) - 다른 PC에서 학습한 모델의 홈 자세 데이터
+
+- 모델의 홈 자세(평가 시작 때 가는 자세)는 학습 데이터 첫 프레임의 중앙값. 다른 PC에서 학습해 학습 데이터 경로가 이 PC에 없으면, 설정 `"home_datasets"`에서 그 모델(실행 폴더 이름)의 대체 데이터를 찾아 그 데이터 전체 에피소드로 계산함(`{"right_inbound_trimstart_40k": "tkoo/1118_real_load_rightarm_2c_cam4_40ep"}`). 없으면 지금처럼 시작 전에 거절하되 무엇을 지정할지 알려 줌
+- 계기: 오른팔 한팔 모델 #36·#37(trimstart)이 다른 PC 경로로 학습돼 홈 자세를 못 만들어 평가가 시작되지 않음. Guide 11/24: 두 모델은 GPU 노트북의 1118 오른팔 2C 녹화(입고·출고 각 40ep)에서 골라 시작 정지만 자른 것(정규화 min/max 일치, 첫 프레임 중앙값과 움직이기 직전 차이 0.4 이하). 계산 결과가 Guide 값과 같음: #36 [-0.2, -65.2, 55.1, 54.5, 0.3, 51.6], #37 [0.3, -65.2, 54.9, 55.1, 3.5, 50.4]
+
+## 3.25.0 (2026-11-24) - 관제 한팔 미션(2A 왼팔·2C 오른팔), 한팔 평가 카메라 5대·모델 카메라 이름·층 입력
+
+- 관제 한팔 미션(관제 `arm_action_command` → Host → 패널, TK 11/24): 칸 A = OMX 1(왼팔), C = OMX 2(오른팔), 2층(2A·2C). 칸과 팔이 맞지 않거나, 2B·1층이거나, 선반 정렬·넘겨받기를 같이 보내면 시작 전에 거절. 입고는 `end_on_place`, 출고는 `pinky_check` 하나만
+  - 입고: Guide 놓음 판정(`handover_judge.py` 1124a, 2A·2C, 한팔 관절 이름)이 위 카메라 front로 상자가 칸에 놓이고 손이 빠진 순간 평가를 끝냄(복귀하면 끝내기와 상관없이). 팔은 평소처럼 홈으로. 정렬 실행기는 없음(2B 전용). 근거 `last_result.placement` = {`operation` "INBOUND", `on_shelf`, `slot`, `box`, `source` "eval_judge", `one_arm`, `arm`, `observed_ts`(촬영), `judged_at`}. 판정이 안 잡히면 `on_shelf` null(사람 확인)
+  - 출고: Guide 쟁반 판정(`tray_judge.py` 1124c)이 그 팔 쪽 측면 카메라(2A front_3, 2C front_4)와 front_2로 판정해 평가를 끝냄(설정 `"tray_judge_one_arm"`, 기본 on). 홈 복귀 중 손끝이 그 팔 쪽 쟁반 구역에 다시 들어오면 3.24.0처럼 들어 올리고 5초면 멈춤. 팔을 내려놓은 뒤 같은 카메라로 쟁반·칸을 다시 읽어(`[omx] tray_recheck {json}`) `last_result.pinky`에 남김 = 평가 뒤 상차 확인(Pinky는 완료 보고까지 기다림). 쟁반 기준은 이번 평가 첫 측면 프레임(`tray_reference_state` "eval_first_frame"). 위 카메라용 작업 직전 쟁반 사진(tray_check)과 정렬 실행기 상차 확인은 하지 않음(측면 쟁반을 못 봄)
+  - `/api/arms?model=…&arm=left|right`: 한팔 모델의 홈 자세를 그 팔에 비교. 한팔 평가 결과(`last_result.arms`)도 그 팔 이름으로
+- 판정기: `handover_judge.py` 1117e → 1124a, `tray_judge.py` 1124b → 1124c(Guide 확정). 둘 다 2B 동작은 이전 판과 같음(Guide 재생 확인)
+- 협동 구성의 한팔 평가(3.21.0)가 글로벌 카메라 4대(front, front_2, front_3, front_4)와 그 팔의 손목 카메라를 모두 엶(TK 11/24: 모델과 판정에 쓰는 카메라는 모두 켬). 모델에는 학습한 카메라만 넘김(`OMX_POLICY_CAMERAS`). GPU 노트북으로 보내는 영상도 그것뿐
+- 모델이 패널과 다른 카메라 이름으로 학습했으면 이름을 맞춤(정책 rename 처리): `shelf` = front_2, `pinky_side` = 그 팔 쪽 측면(오른팔 front_4, 왼팔 front_3), `wrist` = 그 팔 손목, `top` = front. 맞는 카메라가 없으면 시작 전에 거절(이름을 알려 줌)
+- 로봇에서 읽지 않는 모델 입력 `observation.environment_state`(선반 층 one-hot [2])를 채움: 명령 칸 1층 [1, 0], 2층 [0, 1], 칸이 없으면 [0, 1](학습 때 값). GPU 노트북 추론 서버(overrides `constant_inputs`)와 이 PC 추론 모두
+- 확인: 실제 모델로 GPU 노트북에서 패널 카메라 이름의 화면을 넣어 #36·#37(오른팔 trimstart, 이름 대응·층 입력)과 #27·#28(왼팔, 카메라 4대만) 모두 행동 100단계 정상. 층 입력을 빼면 KeyError로 멈추는 것과 층 값에 따라 출력이 달라지는 것도 확인. 양팔 2B 모델 2개는 같은 입력에 지금 판과 출력이 완전히 같음
+- 이 제어 PC에서 도는 한팔 평가(GPU 노트북 원격 추론)는 요청에 비동기 설정이 없으면 `actions_per_chunk` 100, `chunk_size_threshold` 0.2, 겹치는 구간 `weighted_average`(이전 0.3 + 새 0.7)를 씀(TK 11/24). 설정 `"one_arm_async"`로 바꿈. 관제 한팔 경로도 같은 값으로 둘 예정
+- 양팔 평가는 그대로(카메라 선택, 모델 입력, 비동기 설정 모두)
+
+## 3.24.1 (2026-11-24) - 쟁반 놓음 판정 결과에 이번 미션 쟁반 사진 확인 여부
+
+- 출고 쟁반 놓음 판정(`tray_placed`, `last_result.placement`, `last_result.pinky`)에 `tray_reference`, `tray_reference_state`("ok" | "not_checked"), `pre_mission_match`, `start_vs_mission_ref`를 넣음. 판정기가 첫 위 카메라 프레임을 이번 미션 직전 쟁반 사진(tray_check)과 비교해 비었음을 확인했을 때만 "ok"·true. 관제 Host는 평가 뒤 상차 확인과 같은 규칙으로 이 값이 있을 때만 쟁반 판독을 믿음
+- 계기: Host가 판정 순간 첫 완료 보고(Pinky 출발)를 보내도록 맞추며(TK 11/24)
+
+## 3.24.0 (2026-11-24) - 출고 평가 중 쟁반 놓음 판정, 홈 복귀 중 쟁반 구역 재진입 감시
+
+- 관제 출고(`pinky_check`) 평가에서 Guide의 쟁반 놓음 판정(`tray_judge.py` 1124b, omx_tools에 함께 설치)을 평가 루프 옆 별도 스레드로 약 6Hz 돌림. 입력은 front(쟁반)·front_2(칸) 원본 프레임, 관절, 두 팔 그리퍼 명령·실제값. 촬영 시각이 3초 넘게 지난 프레임은 넘기지 않음. 복귀하면 끝내기(`end_on_return`)와 상관없이 따로 켜짐
+- 판정(Guide 조건): 상자가 쟁반 위(마커 0.5초 멈춤 또는 직전 빈 쟁반 대비 변화 ≥ 0.25) + front_2 칸 빔 + 양손 끝이 쟁반 구역에서 3cm 넘게 떨어짐 + 두 그리퍼 쥔 상태 아님 + 손이 한 번은 쟁반에 들어왔었음, 이것이 `hold_s`(TK 11/24: 1.0초) 동안 이어짐
+- Guide 재생 검증(11/24, 두 팔 출고 평가 35회 + 1112 시연 37회, 원본 영상 6Hz): 잘못 뜬 판정 0회, 실제로 놓은 46회 모두 판정. 쟁반 안에서 쥠이 풀린 순간부터 판정까지 유지 1.0초일 때 시연 중앙값 3.0초(p90 4.2초), 평가 3.7초(p90 5.0초). 지연은 대부분 정책이 놓은 뒤 손을 쟁반 위에 두는 시간
+- 설정 `"tray_judge": {"mode": "record" | "on" | "off", "hold_s": 1.0}`. 기본 `record`
+  - `record`: 판정됐을 순간과 근거만 기록(작업 기록 `[omx] tray_judge {json}`, `job.info.tray_judge_record`, `last_result.tray_judge`). 평가·상차 확인·완료 보고는 지금과 같음. 현장 기록을 본 뒤 `on`으로 바꿈
+  - `on`: 판정 순간 평가를 끝내고(`end_reason "tray_placed"`) 작업 기록 `[omx] tray_placed {json}` → `job.info.tray_placed`를 바로 채움(관제 Host가 첫 완료 보고 → 관제가 Pinky 출발). 끝난 뒤 `last_result.placement`도 같은 객체: {`operation` "OUTBOUND", `on_pinky`, `slot_empty`, `slot`, `box`, `tips_clear`, `grippers_released`, `tray_marker`, `tray_changed`, `observed_ts`, `observed_clock` "capture", `observed_cameras`, `source` "eval_judge", `judge_version`, `mode`, `judged_at`}
+  - `on`으로 판정된 출고는 평가 뒤 상차 확인(pinky_read)을 하지 않음. 그때는 Pinky가 떠나 쟁반이 화면에 없어 오판함(TK 11/24). `last_result.pinky` = {`ran` false, `skipped` "tray_placed", `source` "eval_judge", 판정 순간의 `on_pinky`·`slot_empty`·`tray_marker`·`tray_changed`·`observed_ts`, `pre_mission`}
+  - 판정이 안 잡히면 지금과 같음(끝까지 평가 → 상차 확인)
+- 홈 복귀 중 쟁반 구역 재진입 감시(`on`으로 판정된 뒤의 안전 정지에서만, TK 11/24): 손끝(FK)이 쟁반 구역(+3cm)에 다시 들어오면 홈 쪽 이동을 멈추고 손을 위로 듦(수직 들기 계산 재사용). 벗어나면 홈 복귀를 이어 감. 5초 안에 못 벗어나거나 4번째로 들어오면 토크를 켠 채 제자리에서 멈춤(비상 정지와 같은 대기, [홈 위치로 이동] 뒤에는 감시 없이 돌아감). 작업 기록 `[omx] tray_reentry {json}`(enter·clear·hold)
+  - 멈추면 바로 `last_result.stage "hold"`, `final` false, `hold` = {`reason` "tray_reentry", `side`, `at`, `after_s`}. 그동안 관제의 `/api/home/return`(`"source": "mqtt"`)은 400 `"refused": "hold"`, `"hold": "tray"`. 사람이 [홈 위치로 이동]을 누르면 평가가 끝나고 `final` true(`hold.released_at` 남김)
+- 협동 구성, front·front_2를 여는 출고 평가에서만. `tray_judge.py`가 설치돼 있지 않으면 꺼짐
+- 계기: 11/24 02:13 출고 77초 중 정책 끝 뒤 홈 18초·상차 확인 6초를 기다린 뒤에야 Pinky 출발, TK 요청(Host 세션 전달)
+
+## 3.23.0 (2026-11-24) - 평가 중 상자 떨어뜨림 감지(기록 모드)
+
+- 협동 구성 평가에서 상자를 떨어뜨렸는지 기록함(`omx_dropwatch.py`, 판정 `1124b`). 평가를 끝내지 않고 팔 동작에도 관여하지 않음. 끝내기·토크 유지 정지는 현장 회차를 본 뒤 TK 결정으로 따로 켬
+- 1단계(그리퍼, 30Hz 매 단계): 0.3초 넘게 쥐고 있던 팔(명령−실제 < −4)이 0.5초 안에 max(3, 쥐던 차이의 60%) 이상 닫히고 그동안 그리퍼 명령 변화가 1 미만. 한 팔만이어도 후보. 손끝(넘겨받기 FK)이 선반 구역(y>0.09, z>0.28)이나 쟁반 구역(y<0.06, z<0.28)이면 정상 놓기로 보고 기록만. 구역은 2B 배치 기준. Guide 오프라인 분석(detect2.py)과 같은 결과를 확인: 같은 데이터에서 신호 100건 모두 시각·팔·구역 일치, 평가 중 확인 대상 3건 모두 실제 떨어뜨림
+- 2단계(위 카메라 front, 아직 현장 시험 안 한 규칙, Guide 11/24 값): 신호 뒤 1.5초 동안 10Hz로 원본 프레임 전체에서 명령 상자 마커를 찾음. 한 번도 안 보임 → 확정(unseen), 떨어지는 동안 보였다가 창 끝까지 0.8초 넘게 안 보임 → 확정(lost), 쟁반 [95,215,240,420]·2B [335,455,175,465] 밖에서 0.5초 동안 3px 안에 멈춤 → 확정(rest), 그 안에서 보임 → 기각, 끝까지 움직이기만 함 → 미정. 손목 카메라는 쓰지 않음. Guide가 실제 위 카메라 영상 7회로 재생(11/24): 실제 떨어뜨림 4회 모두 확정(lost 규칙 없이는 2회), 떨어뜨림이 아닌 3회는 기각·미정, 잘못된 확정 0회. 확정 순간의 front 프레임을 `logs/drop_frames/`에 저장
+- 복귀하면 끝내기(`end_on_return`)와 상관없이 따로 켜짐(지금 놓음 판정은 그것이 켜져 있을 때만 돎)
+- 평가 루프는 숫자만 넘기고(평균 0.01ms), 확인하는 1.5초 동안만 10Hz로 프레임을 복사함. 판단은 별도 스레드. 복사본 시험에서 30Hz 유지(p99 33.5ms)
+- 결과: `last_result.drop_watch` = {`version`, `on`, `mode` "record", `box_ids`, `tray_roi`, `updates`, `errors`, `frames_checked`, `confirmed`(확정 수), `signals`: [{`at`, `since_start_s`, `side`, `g0`, `drop`, `lat_s`, `grip_state`, `grip_cmd`, `tip`, `zone`, `ignored`, `stage2`: {`result` confirmed·rejected·undecided, `kind` unseen·lost·rest, `why`, `frames`: 창 안 각 프레임의 마커(id·중심 uv·한 변 px, 다른 상자 포함), `frame_file`}}]}. 작업 기록에 신호마다 한 줄
+- 설정: `"drop_watch": false`로 끔(기본 켜짐), `"drop_tray_roi": [v0, v1, u0, u1]`로 쟁반 영역을 바꿈. 단일 로봇·협동 구성의 한 팔 모델·front 없는 평가는 꺼짐
+- 계기: TK 요청(Host 세션 전달), Guide 11/24 분석(553 에피소드)
+
+## 3.22.3 (2026-11-24) - 미리 띄운 평가에서 놓음 판정·복귀 종료가 꺼지던 문제
+
+- 3.22.2의 미리 띄운 평가 프로그램은 평가 환경을 받기 전에 `omx_run.py`를 불러옴. 그때 만들어지는 복귀 감시(`RETURN`)가 `OMX_END_ON_RETURN`을 꺼진 값으로 읽은 채 남아, 미리 띄운 것으로 시작한 평가에서는 놓음 판정(넘겨받기)에 프레임이 가지 않고(`judge_watch` updates 0, `episode_end`의 `end_reason` 비어 있음) 복귀하면 끝내기도 동작하지 않았음
+- 평가 환경을 넘겨받은 뒤 그런 객체를 다시 만듦(`reinit_from_env`). 불러올 때 환경을 읽는 곳을 모두 실행으로 확인했고(OMX_ 환경 43개를 넣고 뺀 모듈 상태 비교) `RETURN` 하나뿐이었음
+- 재발 방지 시험: 미리 띄운 시작과 새로 띄운 시작의 모든 omx 모듈 값이 같은지 비교(3.22.2에서는 `RETURN` 하나가 달라 실패, 3.22.3 통과)
+- 계기: 11/24 00:28 관제 입고에서 넘겨받기가 일어나지 않음, Guide 세션이 원인 확인
+
+## 3.22.2 (2026-11-24) - 평가 프로그램 미리 띄우기
+
+- 제어판이 다음 평가용 `omx_run.py`를 하나 미리 띄워 둠(`--omx-warm`). 파이썬·torch·LeRobot·제어판 모듈을 불러온 채 기다림. 로봇·카메라·모델은 잡지 않음. 평가를 시작하면 그 프로세스에 인자와 환경을 넘겨 바로 시작. 실측(복사본, 시작 전 모터 점검에서 거절되는 시작으로 잼): 첫 출력까지 1.9초 → 0.2초. 평가에서는 정책·데이터셋 모듈도 미리 불러와 있어 그 이상 줄어들 수 있음
+- 띄우는 때: 이 PC에 이 구성의 팔 보드가 꽂혀 있고, 작업·정렬 대기 실행기가 모두 없이 5초가 지난 뒤(상태 조회 때 확인). 실행 중에는 띄우지 않음(불러오기가 CPU를 씀). 쉬는 동안 메모리 약 0.8GB, CPU 거의 0
+- 쓰지 않는 때(지금처럼 새로 띄움): 녹화·텔레옵, 미리 띄운 프로세스가 죽었을 때, 불러올 때 읽는 환경(`OMP_`·`MKL_`·`OPENBLAS_`·`HF_`·`CUDA_`·`TORCH_` 등, 예: 평가 스레드 수를 바꿈)이 다를 때. 이 경우 미리 띄운 것은 끝냄
+- 관제 Host 쪽 의미:
+  - `/api/status`의 `job`은 그대로. 미리 띄운 프로세스는 작업이 아니라서 쉬는 동안 `job.running`은 false. 평가가 그것을 쓰면 그때부터 지금과 같은 평가 작업(`job.running` true)
+  - 단계 이름 그대로("모델 불러오는 중" → "안전 시작" → "실행 중"). "모델 불러오는 중"이 짧아짐
+  - 새 항목 `/api/status.warm` = {`on`, `ready`, `pid`, `age_s`, `error`}. 평가가 미리 띄운 것을 썼으면 작업 정보에 `warm: true`, 작업 기록 첫 줄 `$ (미리 띄운 평가 프로그램 PID N에 위 인자를 넘김)`, 이어서 `[omx] warm: 미리 띄운 평가 프로그램으로 시작합니다`
+- 다른 계정의 "로봇 사용 중" 확인: 아직 평가를 맡지 않은 미리 띄운 프로세스는 로봇을 쓰는 것으로 보지 않음. 맡으면 `/dev/shm/omx_warm_busy_<pid>` 표시를 남겨 그때부터 사용 중으로 보임
+- 제어판이 끝나면(다시 시작 포함) 미리 띄운 프로세스도 스스로 끝남(입력이 닫힘). 끄기: 설정 `"warm_eval": false`
+- 계기: TK 요청(Host 세션 전달), 3.22.1과 함께 시작 시간 단축 1·2번
+
+## 3.22.1 (2026-11-24) - 협동 평가·녹화 시작 단축: 카메라 동시 열기
+
+- 협동 구성(`bi_omx_follower`): 카메라를 팔 연결·홈 이동과 동시에, 모두 한꺼번에 엶. 지금까지는 양팔이 준비된 뒤 한 대씩 열어 대당 약 3.3초(warmup 3초), 4대 약 13초가 더 걸렸음. 11/23 tkoo-pc 실측: 4대 동시 3.4초, 모두 MJPG 30fps, 오류 없음. 이제 팔 쪽 약 5초 뒤에 가려짐. 팔 동작(한 팔씩 연결·홈)은 그대로
+- 팔이 준비된 뒤 30초가 지나도 열리지 않는 카메라는 `camera open timed out` 오류로 끝냄(`err_code_7`). 지금까지는 멈춘 카메라에서 끝없이 기다릴 수 있었음. 카메라나 팔 하나가 실패하면 열린 카메라를 닫고 연결된 팔을 내려놓음(지금과 같음)
+- 시작 직전 카메라 확인(`camera_gate`, 정면 카메라가 서로 바뀌었는지): 4대를 한꺼번에 읽음. 2.7초 → 0.6초(실측). 관제 시작 응답 약 3초의 대부분이었음
+- 한 대 모델(단일 로봇, 협동 구성의 한 팔 모델)은 LeRobot 기본 연결 그대로(순서대로 엶)
+- 계기: TK 요청(Host 세션 전달), Host 측정 명령→모델 제어 약 27~29초
+
+## 3.22.0 (2026-11-23) - 협동 평가 시작 전 손목 카메라 좌우를 그리퍼 움직임으로 확인
+
+- 손목 카메라 2대가 같은 모델·같은 시리얼이라 지금까지는 "팔 보드와 같은 USB 허브"로만 좌우를 정했음. 허브 배선이 바뀌면 좌우가 바뀐 채 평가될 수 있었음
+- 협동 구성 평가: 양팔이 홈에 도착하고 카메라가 열린 뒤, 정책 시작 전에 왼팔·오른팔 그리퍼를 차례로 10단위 열었다가 되돌림(안전 시작의 제한 출력 그대로, 이미 거의 다 열려 있으면 10단위 닫았다 되돌림). 그동안 두 손목 영상에서 바뀐 부분(축소 흑백, 25단계 넘게 바뀐 화소 비율)을 재어, 움직인 팔의 카메라를 정함(`omx_wristcheck.py`). 약 3초
+  - 두 팔이 서로 다른 카메라를 가리키고 저장값과 같음 → 그대로 시작
+  - 저장값과 반대 → 그 실행 안에서 `wrist_left`·`wrist_right`를 바꿔 시작하고, 제어판이 robot.json의 두 손목 경로를 바로 바꿈. 근거가 직접 움직임이라 사람 확인(`cameras_unconfirmed`) 없이 진행(TK 11/23 결정)
+  - 애매함(바뀐 부분이 2% 미만, 다른 카메라 변화의 3배 미만, 두 팔이 같은 카메라, 카메라 영상 없음) → 추측하지 않고 정책을 시작하지 않음. 팔은 홈에서 안전 정지. 새 오류 `err_code_13` "손목 카메라 좌우 확인 실패"
+- 협동 구성의 한 팔 모델 평가(3.21.0): 그 팔의 손목 카메라만 열리므로 "그 팔 그리퍼를 움직이면 그 카메라가 바뀐다"만 확인
+- 결과: 작업 기록 `[omx] wrist_check {json}`과 `last_result.wrist_check` (`ok`, `swapped`, `why`, `was`, `left`, `right`, 팔별 `change`, `ms`, `setup` "fixed"·"kept: …"). 관제 Host가 보고 사유로 씀
+- 끄기: 설정 `"wrist_check": false`. 단일 로봇 구성·녹화·텔레옵은 그대로
+- 계기: 11/23 23:20 v2 입고(양팔 2B)에서 왼팔이 거의 움직이지 않은 일, TK 요청(Host 세션 전달)
+
+## 3.21.2 (2026-11-22) - 관제 Host 자동 시작: 현장 규약 v2 기본
+
+- armed를 켤 때 띄우는 관제 Host(`omx_host.py`)가 `~/.config/roport/omx-host.json`의 `"protocol"`을 따름: `"v2"`(기본, 현장 규약 roport-control-v2, Fleet 관제) 또는 `"v1"`(이전 OmxTrial 시험 연동). RO:PORT #135에서 Host 기본값이 v2가 됨
+- v2: `--protocol v2 --control <"control", 기본 control-01>`. journal은 v1과 따로 씀(Host가 다른 프로토콜의 journal을 거절): `"journal_v2"`, 없으면 `<journal 이름>-v2.json`. `link_config`(site·binding)는 쓰지 않음. [HOLD 해제] 파일도 그 journal 옆 것을 봄
+- v1: 지금처럼 `link_config`의 site·control·binding과 `journal`. Host가 `--protocol`을 알면 `--protocol v1`을 붙이고, 모르는 이전 Host(v1만 앎)에는 붙이지 않음
+- v2인데 Host가 `--protocol`을 모르면 시작하지 않고 화면에 이유를 보임(팔 동작 없음). `"protocol"`이 v1·v2가 아니면 시작 거부
+- 참고: v2 Host는 도킹 센서 확인이 없으면 이송 명령을 모두 거절함(RO:PORT #135, 모의 시험만)
+- 계기: 11/22 #135 리뷰(관제 담당: 선반 현장 연동 v2 통일), TK 요청
+
 ## 3.21.1 (2026-11-21) - 넘겨받기: 평가 오류 뒤 결과 닫기, 제자리 정지 뒤 관제 홈 복귀 거절
 
 - 넘겨받기 모드에서 평가가 오류로 끝나고(예: 추론 통신 끊김) 정렬 실행기가 `not_placed`로 끝나면, 결과(`last_result`)를 `stage "done"`, `final true`로 닫음. 평가 오류(`exit_ok`, `err`)는 그대로. 지금까지는 `stage "align"`, `final false`로 남아 Host가 최종 결과를 기다리며 새 명령을 거절했음(`HOST_BUSY`)

@@ -16,6 +16,8 @@ Importing this module registers the two types with LeRobot's config parser.
 
 from __future__ import annotations
 
+import threading
+import time
 from dataclasses import dataclass, field
 from functools import cached_property
 
@@ -27,6 +29,8 @@ from lerobot.robots.robot import Robot
 from lerobot.teleoperators.config import TeleoperatorConfig
 from lerobot.teleoperators.omx_leader import OmxLeader, OmxLeaderConfig
 from lerobot.teleoperators.teleoperator import Teleoperator
+
+CAMERA_OPEN_S = 30.0  # after the arms are ready: a camera still opening by then is stuck (3.22.1)
 
 SIDES = ("left", "right")
 
@@ -88,12 +92,41 @@ class BiOmxFollower(Robot):
         return all(a.is_connected for a in self.arms) and all(c.is_connected for c in self.cameras.values())
 
     def connect(self, calibrate: bool = True) -> None:
+        # 3.22.1: the cameras open all at once, while the arms connect and go home. Each waits 3 s for its first good
+        # frames (warmup); one after another that was about 13 s after the arms were ready (11/23 tkoo-pc: 4 cameras
+        # at once 3.4 s, all MJPG 30 fps, no error), now it is hidden behind the arms' own ~5 s.
+        errors: dict = {}
+
+        def open_camera(name: str, cam) -> None:
+            try:
+                cam.connect()
+            except Exception as exc:
+                errors[name] = exc
+
+        threads = [threading.Thread(target=open_camera, args=(n, c), daemon=True, name=f"cam-{n}")
+                   for n, c in self.cameras.items()]
+        for t in threads:
+            t.start()
         try:
             for arm in self.arms:  # each arm: safe start / standard home move (omx_safe_start)
                 arm.connect(calibrate)
-            for cam in self.cameras.values():
-                cam.connect()
+            deadline = time.monotonic() + CAMERA_OPEN_S
+            for t in threads:
+                t.join(max(0.0, deadline - time.monotonic()))
+            stuck = [t.name[4:] for t in threads if t.is_alive()]
+            if stuck:
+                raise TimeoutError(f"camera open timed out after {CAMERA_OPEN_S:.0f}s: {', '.join(stuck)}")
+            if errors:
+                raise next(iter(errors.values()))
         except Exception:
+            for t in threads:
+                t.join(1.0)
+            for cam in self.cameras.values():  # the ones that did open (none is used now)
+                try:
+                    if cam.is_connected:
+                        cam.disconnect()
+                except Exception:
+                    pass
             # one arm failed (a motor not answering): land the arm already connected now. The run's own
             # safe stop only runs for a connected robot, and at interpreter exit it no longer works.
             for arm in self.arms:
