@@ -1,4 +1,4 @@
-# Copied from the team's AI server repo (services/roport-ai-server/src/omx_udp, task/omx-cooperative 749b47b; same code as services/roport-omx/src/roport_omx/infer_link/wire.py); keep the code identical there and here.
+# Copied from the team's AI server repo (services/roport-ai-server/src/omx_udp, task/omx-cooperative c2baaa0; same code as services/roport-omx/src/roport_omx/infer_link/wire.py); keep the code identical there and here.
 """OMX inference UDP wire v1 (stdlib only): message framing, HMAC and reassembly.
 
 A message (one observation request or one action reply) is split into datagrams of at most
@@ -199,7 +199,7 @@ class Reassembler:
                 packet
             )
         except (ValueError, struct.error):
-            self.stats["malformed"] += 1
+            self.stats["malformed_datagram"] += 1  # one datagram, not a whole request
             return None
         stream = (peer, session)
         pending = self._pending.get(stream)
@@ -247,7 +247,9 @@ class Reassembler:
         try:
             header, data = decode_body(body)
         except (ValueError, TypeError):
-            self.stats["malformed"] += 1
+            self.stats["malformed_body"] += (
+                1  # a whole request, verified but unreadable
+            )
             return None
         self.stats["completed"] += 1
         self.stats[f"completed_{KIND_NAMES[kind]}"] += 1

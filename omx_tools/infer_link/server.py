@@ -1,4 +1,4 @@
-# Copied from the team's AI server repo (services/roport-ai-server/src/omx_udp, task/omx-cooperative 749b47b); keep the code identical there and here.
+# Copied from the team's AI server repo (services/roport-ai-server/src/omx_udp, task/omx-cooperative c2baaa0); keep the code identical there and here.
 """OMX inference UDP server (GPU side): observations in, action chunks out; never drives a robot.
 
 The robot loop stays on the host PC (OMX panel): it sends the latest observation when its action
@@ -191,9 +191,10 @@ class InferenceServer:
 
         Cumulative counters (a restart resets them; "started" tells): fragments_expected =
         fragments_received + fragments_missing + still pending. Requests lost after arriving =
-        timeout + superseded + conflict (fragments missing) + checksum + bad_mac + malformed (all
-        fragments came, message refused). Kernel drops before the socket (RcvbufErrors) are not
-        visible here; they show in /proc/net/udp.
+        timeout + superseded + conflict (fragments missing) + checksum + bad_mac + malformed_body
+        (all fragments came, message refused). malformed_datagram counts single datagrams
+        refused before reassembly (bad size, version or fragment fields), not requests. Kernel
+        drops before the socket (RcvbufErrors) are not visible here; they show in /proc/net/udp.
         """
         now = time.monotonic() if now is None else now
         counters = dict(sorted(self.stats.items()))

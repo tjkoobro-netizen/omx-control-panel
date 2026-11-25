@@ -1,4 +1,4 @@
-# Copied from the team's AI server repo (services/roport-ai-server/src/omx_udp, task/omx-cooperative 749b47b); keep the code identical there and here.
+# Copied from the team's AI server repo (services/roport-ai-server/src/omx_udp, task/omx-cooperative c2baaa0); keep the code identical there and here.
 """Policy backed by the OMX panel's LeRobot runner on the GPU PC (omx_tools/omx_infer.py).
 
 The panel already owns model loading, pre/post-processing and the observation format; this adapter

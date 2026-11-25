@@ -327,15 +327,44 @@ DROP_WATCH_FILE = LOG_DIR / "drop_watch.json"  # omx_run's drop watch settings (
 DROP_FRAMES = LOG_DIR / "drop_frames"  # the top frame at each confirmed drop
 
 
+def drop_watch_mode() -> str:
+    """3.28.0: "record" (default) or "on" (cfg "drop_watch_mode"); anything else is refused before the run starts."""
+    mode = str(CFG.get("drop_watch_mode") or "record")
+    if mode not in ("record", "on"):
+        raise RuntimeError(f'설정 "drop_watch_mode"는 record 또는 on입니다 (지금 {mode}).')
+    return mode
+
+
+DROP_HOLD_PREFIX = "[omx] drop_hold "  # omx_run.py (3.28.0): a confirmed drop held the arms in place
+
+
+def drop_hold_line(job, line: str) -> None:
+    """3.28.0: the result says "hold" at once (the run waits, torque on, for [홈 위치로 이동]); the Host reads
+    job.info.drop_hold and reports failed with a HOLD."""
+    try:
+        d = json.loads(line[len(DROP_HOLD_PREFIX):])
+    except ValueError:
+        d = {}
+    hold = {"reason": "box_dropped", "side": d.get("side"), "at": d.get("at"), "since_start_s": d.get("since_start_s"),
+            "kind": d.get("kind"), "why": d.get("why"), "frame_file": d.get("frame_file"), "version": d.get("version")}
+    job.info["drop_hold"] = hold
+    LAST_RESULT.clear()
+    LAST_RESULT.update(kind="eval", source=job.info.get("source", "panel"), repo_id=job.info.get("repo_id"),
+                       stage="hold", final=False, hold=hold, placement=None, exit_ok=None, err=None)
+
+
 def drop_env(eval_info: dict, arm: str | None, cams: dict, body: dict | None = None) -> dict:
     """3.23.0: the box drop watch of a cooperative evaluation, record mode (never ends the run, never moves an arm).
     Its own switch, not tied to end_on_return. cfg "drop_watch": false turns it off; "drop_tray_roi" [v0, v1, u0, u1]
     replaces the tray region of the top camera.
     3.26.0: one arm too (DropWatch 1125a, record mode): a loading mission (end_on_place) checks on the top camera
     (slot 2A / 2C), an unloading (pinky_check) on that arm's side camera (front_3 / front_4); a panel-screen one-arm
-    eval (no mission) records the gripper signal only."""
+    eval (no mission) records the gripper signal only.
+    3.28.0: cfg "drop_watch_mode" "record" (default) | "on": on = a confirmed drop stops the evaluation and holds the arms
+    in place with the torque on (비상 정지 path, job.info.drop_hold; the control tower gets a failed report + HOLD)."""
     if ROBOT_MODE != "bimanual" or CFG.get("drop_watch", True) is False:
         return {}
+    mode = drop_watch_mode()
     body = body or {}
     box = eval_info.get("target_marker")
     if box is None and str(body.get("target_marker", "")).strip().isdigit():
@@ -348,20 +377,22 @@ def drop_env(eval_info: dict, arm: str | None, cams: dict, body: dict | None = N
             op, slot, cam = "INBOUND", command_slot(body), "front"
         else:
             op, slot, cam = None, None, None
-        conf = {"box_ids": [int(box)] if box is not None else None, "arm": arm, "operation": op,
+        conf = {"box_ids": [int(box)] if box is not None else None, "arm": arm, "operation": op, "mode": mode,
                 "slot": slot, "frame_dir": str(DROP_FRAMES),
                 "repo_id": eval_info.get("repo_id")}
         if cam is not None and cam not in cams:
             conf["operation"] = None  # its camera is not open: stage 1 only
         _write_json(DROP_WATCH_FILE, {k: v for k, v in conf.items() if v is not None})
+        eval_info["drop_watch"] = {"mode": mode}
         return {"OMX_DROP_WATCH": str(DROP_WATCH_FILE)}
     if "front" not in cams:
         return {}
     conf = {"box_ids": [int(box)] if box is not None else None, "camera": "front", "frame_dir": str(DROP_FRAMES),
-            "repo_id": eval_info.get("repo_id")}
+            "repo_id": eval_info.get("repo_id"), "mode": mode}
     if CFG.get("drop_tray_roi"):
         conf["tray_roi"] = CFG["drop_tray_roi"]
     _write_json(DROP_WATCH_FILE, {k: v for k, v in conf.items() if v is not None})
+    eval_info["drop_watch"] = {"mode": mode}
     return {"OMX_DROP_WATCH": str(DROP_WATCH_FILE)}
 
 
@@ -1535,6 +1566,8 @@ class Job:
                 LAST_RESULT["placement"] = one_arm_placement(self.info, _episode_end_now(self))
             if self.info.get("tray_hold"):
                 LAST_RESULT["hold"] = dict(self.info["tray_hold"], released_at=now_iso())
+            if self.info.get("drop_hold"):  # 3.28.0
+                LAST_RESULT["hold"] = dict(self.info["drop_hold"], released_at=now_iso())
             if self.info.get("handover"):
                 handover_after_eval(self, proc)  # 3.18.0: placed -> the waiting runner; otherwise the usual alignment
             elif self.info.get("shelf_align"):
@@ -1628,11 +1661,20 @@ class Job:
             self.info["aborting"] = True
         elif "[omx] freeze:" in line:
             self.info["freeze_ack"] = True
-            self.info["phase"] = "비상 정지 · 제자리에서 멈춤 (토크 유지)"
+            if self.kind == "eval" and not self.info.get("frozen"):  # 3.28.0: the run held by itself (a confirmed drop)
+                self.info["frozen"] = time.time()  # -> the button is [홈 위치로 이동] and home_return sends "home"
+            self.info["phase"] = ("떨어뜨림 확정 · 제자리에서 멈춤 (토크 유지)" if self.info.get("drop_hold")  # 3.28.0
+                                  else "비상 정지 · 제자리에서 멈춤 (토크 유지)")
         elif "[omx] safe freeze:" in line:
             self.info["safe_start"] = line.split("safe freeze:", 1)[1].strip()
+            if "기다립니다" in line and self.kind == "eval" and not self.info.get("frozen"):
+                # 3.28.0: a hold the run made by itself (tray zone re-entry 3.24.0, a drop) waits for the same "home":
+                # before this the panel did not know it, so [홈 위치로 이동] refused ("로봇 프로그램이 아직 실행 중")
+                self.info["frozen"] = time.time()
             if "기다립니다" in line:
                 self.info["phase"] = "비상 정지 · 제자리에서 기다림 ([홈 위치로 이동])"
+        elif self.kind == "eval" and line.startswith(DROP_HOLD_PREFIX):
+            drop_hold_line(self, line)
         elif self.kind == "eval" and line.startswith("[omx] tray_"):
             for kind, prefix in TRAY_PREFIX.items():
                 if line.startswith(prefix):
@@ -5232,12 +5274,14 @@ class Handler(BaseHTTPRequestHandler):
                 if body.get("source") == "mqtt" and not ARMED["on"]:
                     raise RuntimeError(f"armed 꺼짐: 관제 홈 복귀 거절 ({ARMED.get('off_reason') or '꺼짐'})")
                 tray_hold = JOB.running() and JOB.kind == "eval" and JOB.info.get("tray_hold")
-                if body.get("source") == "mqtt" and (ALIGN.get("hold") or HANDOVER.get("hold") or tray_hold):
+                drop_hold = JOB.running() and JOB.kind == "eval" and JOB.info.get("drop_hold")  # 3.28.0
+                if body.get("source") == "mqtt" and (ALIGN.get("hold") or HANDOVER.get("hold") or tray_hold or drop_hold):
                     # 3.21.1: the arms were left in place with the torque on (no safe way back): a person checks first
                     # 3.24.0: also a hand held over the tray zone after an unloading
                     raise Refused("팔이 토크가 켜진 채 제자리에서 기다리는 중이라 관제 홈 복귀를 거절합니다. "
                                   "현장에서 상자와 팔을 확인한 뒤 화면의 [홈 위치로 이동]을 누르세요", refused="hold",
-                                  hold="align" if ALIGN.get("hold") else "handover" if HANDOVER.get("hold") else "tray")
+                                  hold="align" if ALIGN.get("hold") else "handover" if HANDOVER.get("hold")
+                                  else "drop" if drop_hold else "tray")
                 self._json(home_return())
             elif self.path == "/api/kill":
                 set_armed(False, {"home": "즉시 중단", "freeze": "비상 정지"}.get(body.get("mode"), "강제 종료"))

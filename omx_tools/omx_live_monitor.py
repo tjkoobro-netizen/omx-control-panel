@@ -233,8 +233,8 @@ class EvalLog(threading.Thread):
 
 GPU_DIR = "~/omx_live_monitor"
 UDP_SERVER_LOG = "~/il_ws/omx_control_panel_v3/logs/udp_server.log"
-UDP_KEYS = ("completed_infer", "fragments_expected", "fragments_received", "fragments_missing", "timeout_infer", "superseded_infer",
-            "late", "checksum", "bad_mac", "conflict", "duplicate", "malformed", "untrusted_peer", "capacity", "skipped_backlog",
+UDP_KEYS = ("completed_infer", "fragments_expected", "fragments_received", "fragments_missing", "timeout", "superseded", "timeout_infer", "superseded_infer",
+            "late", "checksum", "bad_mac", "conflict", "duplicate", "malformed", "malformed_datagram", "malformed_body", "untrusted_peer", "capacity", "skipped_backlog",
             "refused", "failed", "reply_failed", "send_failed", "replied_actions")   # GPU 노트북 쪽 기록 폴더 (--gpu-local)
 
 
@@ -560,6 +560,8 @@ def _udp_window(stats, t0, t1):
     if not n:
         return None
     tot = {k: v for k, v in tot.items() if v}
+    # 도착 뒤 잃은 요청 (PR #176·#177 서버 설명): 조각 모자람 + 검사·본문 실패. malformed_datagram 은 조각 단위라 넣지 않는다
+    tot["requests_lost"] = sum(tot.get(k, 0) for k in ("timeout", "superseded", "conflict", "checksum", "bad_mac", "malformed_body"))
     tot["infer_ms_p95_max"] = max(p95) if p95 else None
     return tot
 
@@ -620,7 +622,10 @@ def report(day):
     rf = OUT / f"{day}_runs.jsonl"
     for line in (rf.read_text().splitlines() if rf.exists() else []):
         r = json.loads(line)
-        runs.append(_run_summary(rows, grows, r["t0"], r["t1"]) or r)
+        s_ = _run_summary(rows, grows, r["t0"], r["t1"])
+        if s_ is None:   # 제어 PC 줄이 없어도 서버 줄은 --collect 뒤에 다시 셀 수 있다
+            s_ = dict(r, udp_server=_udp_window(_udp_stats(), r["t0"], r["t1"]))
+        runs.append(s_)
     L = [f"# 관제 미션 손실·과부하 요약 {day}", "", f"평가 {len(runs)}회. 기준: 카메라 {CAM_FPS_WARN:g} fps 미만 경고, CPU 코어 {CPU_WARN:g}% 이상 경고.", ""]
     for r in runs:
         L.append(f"## {r['start']} ({r['dur_s']}초) {r.get('eval_log') or ''}")
@@ -632,7 +637,8 @@ def report(day):
         if us:
             L.append(f"- AI 서버(재조립): 완성 추론 {us.get('completed_infer', 0)} · 조각 {us.get('fragments_received', 0)}/{us.get('fragments_expected', 0)} 받음, 끝내 안 옴 {us.get('fragments_missing', 0)}"
                      f" · 조각 모자라 시간 초과 {us.get('timeout_infer', 0)} · 새 요청에 밀림 {us.get('superseded_infer', 0)} · 늦은 조각 {us.get('late', 0)}"
-                     f" · CRC/MAC 실패 {us.get('checksum', 0)}/{us.get('bad_mac', 0)} · 계산 건너뜀 {us.get('skipped_backlog', 0)} · 추론 실패 {us.get('failed', 0)}"
+                     f" · CRC/MAC 실패 {us.get('checksum', 0)}/{us.get('bad_mac', 0)} · 본문 못 읽음 {us.get('malformed_body', 0)} · 잘못된 조각(조각 수) {us.get('malformed_datagram', 0) + us.get('malformed', 0)}"
+                     f" · 도착 뒤 잃은 요청 합계 {us.get('requests_lost', 0)} · 계산 건너뜀 {us.get('skipped_backlog', 0)} · 추론 실패 {us.get('failed', 0)}"
                      f" · 응답 보냄 {us.get('replied_actions', 0)} · 추론 p95 최대 {us.get('infer_ms_p95_max')}ms")
         elif r.get("udp_server") is None:
             L.append("- AI 서버(재조립): 기록 없음 (서버 카운터 배포 전이거나 --collect 전)")

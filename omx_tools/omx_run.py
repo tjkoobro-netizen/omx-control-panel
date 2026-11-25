@@ -1158,6 +1158,17 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
                     DROP.feed(raw, action, time.time())
                 except Exception:  # noqa: BLE001  record only: never disturb the loop
                     pass
+                hit = DROP.take_hit() if DROP.mode == "on" else None
+                if hit is not None:
+                    # 3.28.0: a confirmed drop (mode on): no more policy actions; hold in place with the torque on, the
+                    # 비상 정지 path (the attempt kept as aborted, the dataset saved); a person checks the box and the
+                    # arms, then [홈 위치로 이동] lands them. The control tower gets a failed report with a HOLD.
+                    EPISODE_END.update(end_reason="dropped", elapsed_s=round(t0 - start, 1), drop=hit)
+                    _say("[omx] drop_hold " + json.dumps(hit, ensure_ascii=False, default=_jsonable))
+                    _say(f"[omx] 떨어뜨림 확정: {hit['side']} 팔 {hit['since_start_s']}초 ({hit.get('why')}) - "
+                         "평가를 멈추고 제자리에서 토크를 유지합니다. 상자와 팔을 확인한 뒤 [홈 위치로 이동]을 누르세요")
+                    _on_freeze(None, None)
+                    break
             if tray:
                 try:
                     TRAY.feed(raw, action, time.time(), {c: _frame_ts(robot, c, raw.get(c)) for c in TRAY.cams})
@@ -1299,7 +1310,8 @@ def run_episodes(cfg: RunConfig, robot, teleop, policy: Policy | None, dataset, 
                 EPISODE_END["drop_watch"] = DROP.finish()
                 for s in EPISODE_END["drop_watch"]["signals"]:
                     if not s.get("ignored"):
-                        _say(f"[omx] 떨어뜨림 감지(기록만): {s['side']} 팔 {s['since_start_s']}초, "
+                        tag = "기록만" if EPISODE_END["drop_watch"].get("mode") != "on" else "멈춤 모드"
+                        _say(f"[omx] 떨어뜨림 감지({tag}): {s['side']} 팔 {s['since_start_s']}초, "
                              f"{(s.get('stage2') or {}).get('result')} - {(s.get('stage2') or {}).get('why')}")
             _write_episode_end(d.repo_id, index)
         if not EVENTS["stop_recording"] and (recorded < d.num_episodes - 1 or EVENTS["rerecord_episode"]):
@@ -1413,7 +1425,8 @@ def run(cfg: RunConfig) -> None:
     if TRAY is not None:
         _say(f"[omx] 쟁반 놓음 판정 {TRAY.version} ({'놓으면 평가를 마치고 바로 알림' if TRAY.mode == 'on' else '기록만: 평가는 그대로'})")
     if DROP is not None:
-        _say(f"[omx] 떨어뜨림 감지 {getattr(sys.modules.get('omx_dropwatch'), 'VERSION', '?')} (기록만: 평가와 팔 동작은 그대로)")
+        _say(f"[omx] 떨어뜨림 감지 {getattr(sys.modules.get('omx_dropwatch'), 'VERSION', '?')} "
+             + ("(멈춤: 확정되면 평가를 멈추고 제자리에서 토크 유지)" if DROP.mode == "on" else "(기록만: 평가와 팔 동작은 그대로)"))
     if PLACE is not None:
         _say(f"[omx] 놓음 판정 {PLACE.version} ({'기록만' if PLACE.shadow else '놓으면 평가를 마치고 정렬에 넘김'})")
     if TARGET is not None:
