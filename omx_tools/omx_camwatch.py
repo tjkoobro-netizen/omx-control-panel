@@ -21,6 +21,13 @@ the mission reads (placement judge front, tray judge side camera + front_2). A f
   during an episode (mode "on") -> the policy stops and the arms hold in place, torque on, like 비상 정지
     ("[omx] cam_hold {json}"; the control tower gets a failed report with a HOLD)
 Other cameras: written only. mode "record": everything written, nothing acted on.
+
+3.32.0 (TK 11/27): a camera with a fault picture is first closed and opened again, at most REOPEN_TRIES times (each
+about 1-2 s), before anything is reported or acted on - before the start and during the evaluation, in modes "on" and
+"record". While it is closed, a stand-in in the robot's camera dict hands the control loop its last frame, so the loop
+never waits for it or fails on it (the reopening runs in its own thread). Recovered: one line "[omx] cam_recovered".
+Still faulty after the last try: the usual "[omx] cam_fault" (mode "on": refuse / hold as before).
+11/27 03:06 front black at the start (no USB reconnect in the kernel log, only the picture stopped); 11/26 22:26, 23:12.
 """
 
 from __future__ import annotations
@@ -31,7 +38,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-VERSION = "1126a"
+VERSION = "1127a"
 SUB = 8                 # every 8th pixel (60 x 80 of a 480 x 640 frame)
 BLACK_MEAN = 5.0        # the panel's camera view has shown "검은 화면" below 5 since 3.x
 WHITE_MEAN = 250.0
@@ -46,6 +53,10 @@ PERIOD_S = 0.2          # 5 checks a second
 LINE_S = 5.0            # the "[omx] camwatch:" line during an episode
 START_S = 1.5           # the check before the policy starts
 KEEP_FRAMES = 40        # fault photos kept in the logs folder
+REOPEN_TRIES = 3        # 3.32.0: close and open a faulty camera again this often before reporting it
+REOPEN_VERIFY_S = 1.5   # after opening: good, changing frames wanted within this time
+REOPEN_GOOD = 3         # this many new frames with a usable, changing picture = recovered
+REOPEN_GAP_S = 0.3
 FAULTS = ("stall", "black", "white", "flat", "frozen")
 WARNINGS = ("dim", "glare")
 KO = {"ok": "정상", "stall": "영상 끊김", "black": "검은 화면", "white": "하얀 화면", "flat": "단색 화면",
@@ -92,6 +103,56 @@ def frame_unusable(frame) -> str | None:
     return st if st in FAULTS else None
 
 
+class StandIn:
+    """3.32.0: in the robot's camera dict while the real camera is closed and opened again. It hands out the frame the
+    camera had last (the control loop reads every camera each step and must neither wait nor fail); its timestamp
+    stays old, so the judges see a stale picture and leave it unread."""
+
+    def __init__(self, real, frame) -> None:
+        self.real = real
+        self.latest_frame = frame
+        self.latest_timestamp = getattr(real, "latest_timestamp", None)
+
+    is_connected = True
+
+    def read_latest(self, max_age_ms: int = 500):
+        return self.latest_frame
+
+    def async_read(self, timeout_ms: float = 200):
+        return self.latest_frame
+
+    def read(self, *args, **kwargs):
+        return self.latest_frame
+
+    def disconnect(self) -> None:
+        real = self.real
+        if getattr(real, "is_connected", False) or getattr(real, "thread", None) is not None:
+            real.disconnect()
+
+    def __getattr__(self, key):
+        return getattr(self.real, key)
+
+
+def _last_frame(cam):
+    """A copy of the camera's last frame, or a black one of its size (a camera that never gave one)."""
+    import numpy as np
+
+    lock = getattr(cam, "frame_lock", None)
+    frame = None
+    try:
+        if lock is not None:
+            with lock:
+                frame = getattr(cam, "latest_frame", None)
+        else:
+            frame = getattr(cam, "latest_frame", None)
+    except Exception:  # noqa: BLE001
+        frame = None
+    if frame is not None:
+        return np.array(frame, copy=True)
+    h, w = getattr(cam, "height", None) or 480, getattr(cam, "width", None) or 640
+    return np.zeros((int(h), int(w), 3), np.uint8)
+
+
 class _Cam:
     def __init__(self) -> None:
         self.raw = "none"           # what the latest look shows
@@ -123,6 +184,10 @@ class Watch:
         self.events: list = []          # every fault / warning reported (start, hold, other cameras), last 20
         self.told: dict = {}            # camera -> state last reported (one line per change)
         self.held = False               # this run already held the arms once
+        self.robot_cams: dict | None = None   # 3.32.0: the dict the robot reads each step (attach)
+        self.fixing: dict = {}          # camera -> try now being made (1..REOPEN_TRIES)
+        self.gave_up: set = set()       # cameras still faulty after the last try (cleared when good again)
+        self.reopens: list = []         # every reopening (recovered or not), last 20
         self.t_line = 0.0
         self._stop = threading.Event()
         self.thread: threading.Thread | None = None
@@ -176,8 +241,14 @@ class Watch:
             s.state = raw
 
     def _snapshot(self) -> dict:
-        return {n: {"state": s.state, "state_ko": KO.get(s.state, s.state), "raw": s.raw, "mean": s.mean, "std": s.std,
-                    "diff": s.diff, "role": self.role(n)} for n, s in self.st.items()}
+        out = {}
+        for n, s in self.st.items():
+            ko = KO.get(s.state, s.state)
+            if n in self.fixing:
+                ko += f" · 다시 여는 중 {self.fixing[n]}/{REOPEN_TRIES}"
+            out[n] = {"state": s.state, "state_ko": ko, "raw": s.raw, "mean": s.mean, "std": s.std,
+                      "diff": s.diff, "role": self.role(n), **({"reopen": self.fixing[n]} if n in self.fixing else {})}
+        return out
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -247,7 +318,7 @@ class Watch:
             if self.clock() >= end:
                 break
             time.sleep(PERIOD_S)
-        bad = []
+        bad, found = [], []
         with self.lock:
             for name, s in self.st.items():
                 whole = [r for _, r in s.hist]
@@ -261,12 +332,20 @@ class Watch:
                 if st is None:
                     continue
                 s.state = st
+                found.append((name, st))
+        for name, st in found:
+            # 3.32.0: a fault picture: close and open the camera again first (nothing runs yet: done here, in turn)
+            if st in FAULTS and self.can_reopen(name) and self._fix(name, "start"):
+                continue
+            with self.lock:
                 act = "refuse" if st in FAULTS and self.required(name) and self.mode == "on" else "warn"
                 ev = self.event(name, "start", act)
-                self.told[name] = st
-                self._tell(ev)
-                if act == "refuse":
-                    bad.append(ev)
+                if st in FAULTS and self.can_reopen(name):
+                    ev["reopen_tries"] = REOPEN_TRIES
+                self.told[name] = self.st[name].state
+            self._tell(ev)
+            if act == "refuse":
+                bad.append(ev)
         return bad
 
     # ------------------------------------------------------------ during the evaluation
@@ -295,6 +374,14 @@ class Watch:
             if st == self.told.get(name, "ok"):
                 continue
             self.told[name] = st
+            if st in FAULTS and name in self.fixing:
+                continue
+            if st in FAULTS and self.can_reopen(name) and name not in self.gave_up:
+                # 3.32.0: first close and open it again, in its own thread (the loop and the other cameras go on)
+                self.fixing[name] = 0
+                threading.Thread(target=self._fix, args=(name, "eval" if self.episode else "between"), daemon=True,
+                                 name=f"camreopen_{name}").start()
+                continue
             if st in FAULTS or st in WARNINGS:
                 if st in FAULTS and self.mode == "on" and self.required(name) and self.episode and not self.held:
                     continue
@@ -303,6 +390,7 @@ class Watch:
                     ev = self.event(name, "eval" if self.episode else "between", act)
                 self._tell(ev)
             else:
+                self.gave_up.discard(name)
                 self.say(f"[omx] camwatch: {name} 다시 정상 (밝기 {v['mean']})")
 
     def begin_episode(self) -> None:
@@ -318,13 +406,137 @@ class Watch:
             return None
         with self.lock:
             for name, s in self.st.items():
-                if s.state in FAULTS and self.required(name):
+                if s.state in FAULTS and self.required(name) and not self.waiting_reopen(name):
                     self.held = True
                     ev = self.event(name, "eval", "hold")
                     self.events.append(ev)
                     del self.events[:-20]
                     return ev
         return None
+
+    # ------------------------------------------------------------ 3.32.0: close and open a faulty camera again
+    def attach(self, robot_cams: dict) -> None:
+        """The dict the robot reads every step (robot.cameras): a camera being reopened is replaced in it by a StandIn."""
+        self.robot_cams = robot_cams
+
+    def rebind(self, cams: dict) -> None:
+        """The robot's cameras changed names (the wrist check swapped wrist_left and wrist_right): each name's state
+        follows its camera object."""
+        with self.lock:
+            by_obj = {id(c): n for n, c in self.cams.items()}
+            st, told = {}, {}
+            for n, c in cams.items():
+                old = by_obj.get(id(c), n)
+                st[n] = self.st.get(old) or _Cam()
+                if old in self.told:
+                    told[n] = self.told[old]
+            self.cams, self.st, self.told = dict(cams), st, told
+
+    def can_reopen(self, name: str) -> bool:
+        cam = self.cams.get(name)
+        return (REOPEN_TRIES > 0 and self.mode != "off" and self.robot_cams is not None and cam is not None
+                and callable(getattr(cam, "connect", None)) and callable(getattr(cam, "disconnect", None)))
+
+    def waiting_reopen(self, name: str) -> bool:
+        """Not acted on yet: the camera is being reopened, or will be (fault seen, thread not started)."""
+        return name in self.fixing or (self.can_reopen(name) and name not in self.gave_up)
+
+    def _robot_key(self, real):
+        for k, v in (self.robot_cams or {}).items():
+            if v is real or getattr(v, "real", None) is real:
+                return k
+        return None
+
+    def _reopen_once(self, name: str) -> tuple[bool, str]:
+        """Close and open one camera (the real object, wherever the robot has it now). (recovered, why)."""
+        real = self.cams[name]
+        key = self._robot_key(real)
+        if key is not None and not isinstance(self.robot_cams[key], StandIn):
+            self.robot_cams[key] = StandIn(real, _last_frame(real))
+        try:
+            real.disconnect()
+        except Exception:  # noqa: BLE001  already closed, or its read thread died: open anyway
+            pass
+        try:
+            try:
+                real.connect(warmup=False)
+            except TypeError:
+                real.connect()
+        except Exception as exc:  # noqa: BLE001  the stand-in stays: the loop keeps its last frame
+            return False, f"열지 못함 ({type(exc).__name__}: {exc})"[:160]
+        end = time.perf_counter() + REOPEN_VERIFY_S  # real time (the watch's clock may be a test's)
+        good, prev, last_ts, why = 0, None, None, "새 화면 없음"
+        while time.perf_counter() < end and good < REOPEN_GOOD:
+            time.sleep(0.05)
+            frame, ts = getattr(real, "latest_frame", None), getattr(real, "latest_timestamp", None)
+            if frame is None or ts is None or ts == last_ts:
+                continue
+            last_ts = ts
+            m = measure(frame)
+            if m is None:
+                continue
+            st = picture_state(m[0], m[1])
+            if st in FAULTS:
+                good, why = 0, f"{KO.get(st, st)} (밝기 {m[0]:.1f})"
+                continue
+            if prev is not None and prev.shape == m[2].shape and float(abs(m[2] - prev).mean()) < FROZEN_DIFF:
+                why = KO["frozen"]
+                continue
+            prev, good = m[2], good + 1
+        fresh = last_ts is not None and time.perf_counter() - last_ts < 0.4
+        if key is not None and (good >= REOPEN_GOOD or fresh):
+            self.robot_cams[key] = real  # a camera giving frames (even bad ones) is read live again, as before
+        return good >= REOPEN_GOOD, "정상" if good >= REOPEN_GOOD else why
+
+    def _fix(self, name: str, when: str) -> bool:
+        """Up to REOPEN_TRIES reopenings. True = recovered (state reset, one "[omx] cam_recovered" line). False: the
+        fault stays; in a thread (during the evaluation) it is reported here or by the loop's hold, as before."""
+        with self.lock:
+            before = self.st[name].state
+            mean = self.st[name].mean
+        tries = []
+        for k in range(1, REOPEN_TRIES + 1):
+            self.fixing[name] = k
+            self.say(f"[omx] camwatch: {name} {KO.get(before, before)} → 카메라를 닫았다 다시 엽니다 ({k}/{REOPEN_TRIES})")
+            t0 = time.perf_counter()
+            try:
+                ok, why = self._reopen_once(name)
+            except Exception as exc:  # noqa: BLE001  a reopening never stops the run
+                ok, why = False, f"{type(exc).__name__}: {exc}"[:160]
+            tries.append({"try": k, "ok": ok, "why": why, "s": round(time.perf_counter() - t0, 2)})
+            if ok:
+                break
+            time.sleep(REOPEN_GAP_S)
+        rec = {"camera": name, "state_before": before, "state_before_ko": KO.get(before, before), "brightness_before": mean,
+               "role": self.role(name), "role_ko": ROLE_KO[self.role(name)], "when": when, "tries": tries,
+               "recovered": ok, "mode": self.mode, "version": VERSION, "at": _iso(time.time())}
+        self.reopens.append(rec)
+        del self.reopens[:-20]
+        if ok:
+            with self.lock:
+                self.st[name] = _Cam()  # a fresh look: no stall / frozen history of the closed camera
+                self.told[name] = "ok"
+                self.gave_up.discard(name)
+                self.fixing.pop(name, None)
+            self.say("[omx] cam_recovered " + json.dumps(dict(rec, action="recovered"), ensure_ascii=False))
+            self.say(f"[omx] 카메라 회복: {name} {KO.get(before, before)} → 다시 열어 정상 ({len(tries)}/{REOPEN_TRIES}번째)")
+            return True
+        with self.lock:
+            self.gave_up.add(name)
+            self.fixing.pop(name, None)
+            st = self.st[name].state
+        if when == "start":
+            return False  # start_check reports it (refuse / warn)
+        if st in FAULTS:
+            if self.mode == "on" and self.required(name) and self.episode and not self.held:
+                return False  # the control loop holds the arms and reports it ("[omx] cam_hold")
+            act = "record" if self.mode == "record" and self.required(name) else "warn"
+            with self.lock:
+                ev = self.event(name, when, act)
+                ev["reopen_tries"] = REOPEN_TRIES
+                self.told[name] = st
+            self._tell(ev)
+        return False
 
     def line(self, snap: dict | None = None) -> str:
         snap = snap or self.snapshot()
@@ -337,7 +549,7 @@ class Watch:
 
     def summary(self) -> dict:
         return {"version": VERSION, "mode": self.mode, "input": self.input, "judge": self.judge,
-                "events": list(self.events), "now": self.snapshot()}
+                "events": list(self.events), "reopens": list(self.reopens), "now": self.snapshot()}
 
 
 def _iso(t: float) -> str:

@@ -292,6 +292,7 @@ def _make_place() -> PlaceWatch | None:
 PLACE: PlaceWatch | None = None
 DROP = None  # omx_dropwatch.DropWatch (OMX_DROP_WATCH, 3.23.0): records a dropped box, never acts
 TRAY = None  # TrayWatch (OMX_TRAY_JUDGE, 3.24.0): the unloading's "box on the Pinky tray, hands out" judge
+RELEASE = None  # ReleaseOpen (OMX_RELEASE_OPEN, 3.32.0): loading - open the gripper wide once the policy lets go
 CAMWATCH = None  # omx_camwatch.Watch (OMX_CAM_WATCH, 3.31.0): camera fault watch of an evaluation
 
 
@@ -561,6 +562,89 @@ def _fitted_tray(judge):
     if not tray or "tray_fit_score" not in info or info.get("tray_fit") == "low_score_default_quad":
         return None
     return [[float(u), float(v)] for u, v in tray["quad"]]
+
+
+class ReleaseOpen:
+    """3.32.0 놓기 보정 (TK 11/27, loading): the policy lets go of the box by opening its gripper only 2-5 above the held
+    value (held ~57; after the release the demos open to 58.8 left / 62.5 right at most, approaching 65-68) and then
+    pulls the hand back, so the fingers drag the box's end face (11/27 03:01 box 16 left 54.5 deg askew, 2-4 cm short).
+    Once a release is seen, the gripper command sent is max(policy, OPEN), raised RAMP per frame.
+
+    Per gripper ("gripper.pos", "left_gripper.pos", "right_gripper.pos"), from the policy's commands only:
+      held     after the gripper was open once (>= RELEASE_MIN; the approach), commands <= GRASP_MAX for HOLD_S
+               (the start pose's closed gripper is not a grasp: 129 demos, the first "release" was the approach)
+      release  held, then commands >= RELEASE_MIN for CONFIRM frames (a one-frame blip while carrying stays a blip)
+      undone   a command below UNDO_BELOW (closing again, e.g. at home): the policy's values again. Below 54 rather
+               than the grasp 50.5: the return check wants the gripper <= 54.6 and demos close 54 -> 50.5 in ~3 frames
+    Only numbers per step (no file or network): the 30 Hz loop is not slowed. Joints other than the grippers untouched.
+    Config (OMX_RELEASE_OPEN, a JSON object): open, grasp_max, release_min, undo_below, hold_s, confirm, ramp."""
+
+    def __init__(self, conf: dict, fps: float):
+        self.open = min(float(conf.get("open", 70.0)), 100.0)
+        self.grasp_max = float(conf.get("grasp_max", 50.5))
+        self.release_min = float(conf.get("release_min", 56.0))
+        self.undo_below = float(conf.get("undo_below", 54.0))
+        self.hold_n = max(1, int(round(float(conf.get("hold_s", 0.5)) * fps)))
+        self.confirm = max(1, int(conf.get("confirm", 2)))
+        self.ramp = max(0.5, float(conf.get("ramp", 5.0)))
+        self.st: dict = {}
+        self.events: list = []
+
+    def reset(self) -> None:
+        self.st = {}
+
+    def __call__(self, action: dict, t: float) -> dict:
+        for k in action:
+            if not k.endswith("gripper.pos"):
+                continue
+            c = float(action[k])
+            s = self.st.get(k)
+            if s is None:
+                s = self.st[k] = {"opened": False, "closed": 0, "held": False, "up": 0, "on": False, "sent": c}
+            if s["on"]:
+                if c < self.undo_below:
+                    s.update(on=False, held=False, up=0, closed=1 if c <= self.grasp_max else 0)
+                    continue
+                s["sent"] = max(c, min(self.open, s["sent"] + self.ramp))
+                action[k] = s["sent"]
+                continue
+            if c >= self.release_min:
+                s["opened"] = True
+                if s["held"]:
+                    s["up"] += 1
+                    if s["up"] >= self.confirm:
+                        s.update(on=True, sent=max(c, min(self.open, c + self.ramp)))
+                        action[k] = s["sent"]
+                        side = k[: -len("_gripper.pos")] if k != "gripper.pos" else (os.environ.get("OMX_ARM_SIDE") or "arm")
+                        ev = {"arm": side, "cmd": round(c, 1), "open": self.open, "t": round(t, 2)}
+                        self.events.append(ev)
+                        del self.events[:-10]
+                        _say(f"[omx] release_open: {side} {c:.1f} → {self.open:g} (t={t:.1f}s)")
+                else:
+                    s["closed"] = 0
+            elif c <= self.grasp_max:
+                s["up"] = 0
+                if s["opened"]:
+                    s["closed"] += 1
+                    if s["closed"] >= self.hold_n:
+                        s["held"] = True
+            else:
+                s["up"] = 0  # between: neither a grasp frame nor a release frame
+        return action
+
+
+def _make_release(fps: float):
+    raw = os.environ.get("OMX_RELEASE_OPEN", "").strip()  # read at run time: the warm process gets it late
+    if not raw:
+        return None
+    try:
+        r = ReleaseOpen(json.loads(raw), fps)
+    except Exception as exc:  # noqa: BLE001  no correction = the eval runs as before
+        _say(f"[omx] 놓기 보정을 켜지 못했습니다 ({type(exc).__name__}: {exc}). 평소처럼 평가합니다")
+        return None
+    _say(f"[omx] 놓기 보정: 정책이 상자를 놓으면(쥔 뒤 그리퍼 명령 {r.release_min:g} 이상) 그리퍼를 {r.open:g}까지 엽니다 "
+         f"(다시 {r.undo_below:g} 아래로 닫으면 정책 값)")
+    return r
 
 
 def _make_drop():
@@ -1183,6 +1267,9 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
         DROP.reset(time.time())
     tray = TRAY is not None and policy is not None and dataset is not None  # 3.24.0: not tied to RETURN.on either
     cam_watch = CAMWATCH is not None and policy is not None and dataset is not None  # 3.31.0
+    release = RELEASE is not None and policy is not None and dataset is not None  # 3.32.0 놓기 보정
+    if release:
+        RELEASE.reset()
     if cam_watch:
         CAMWATCH.begin_episode()
     told = False
@@ -1252,6 +1339,8 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
             if filt is not None:
                 act = filt(act)
             action = make_robot_action(act, dataset.features)
+            if release:  # 3.32.0: after the output filter; the judges below see what is really sent
+                action = RELEASE(action, t0 - start)
             if drop:
                 try:
                     DROP.feed(raw, action, time.time())
@@ -1409,6 +1498,8 @@ def run_episodes(cfg: RunConfig, robot, teleop, policy: Policy | None, dataset, 
                 EPISODE_END["tray_judge"] = TRAY.summary()
             if CAMWATCH is not None:
                 EPISODE_END["camera_watch"] = CAMWATCH.summary()
+            if RELEASE is not None:
+                EPISODE_END["release_open"] = {"open": RELEASE.open, "events": list(RELEASE.events)}  # 3.32.0
             if DROP is not None:
                 EPISODE_END["drop_watch"] = DROP.finish()
                 for s in EPISODE_END["drop_watch"]["signals"]:
@@ -1490,6 +1581,8 @@ def wrist_check(robot) -> None:
     _say(omx_wristcheck.line(res))
     if res["ok"] and res["swapped"]:
         ROBOT_CAMS.update(robot.cameras)  # the live views follow the exchange
+        if CAMWATCH is not None:
+            CAMWATCH.rebind(robot.cameras)  # 3.32.0: the watch's names follow the exchange too
         _say(f"[omx] 손목 카메라 확인: 저장된 배정과 반대입니다. 이번 실행에서 wrist_left와 wrist_right를 바꿔 시작합니다 "
              f"(로봇 구성도 고침, {res['ms']}ms)")
     elif res["ok"]:
@@ -1511,13 +1604,16 @@ def camera_check(robot) -> None:
         import omx_camwatch
 
         CAMWATCH = omx_camwatch.load(path, getattr(robot, "cameras", {}) or {}, _say)
+        if getattr(robot, "cameras", None) is not None:
+            CAMWATCH.attach(robot.cameras)  # 3.32.0: a faulty camera is closed and opened again in the robot's dict
     except Exception as exc:  # noqa: BLE001  no watch = the eval runs as before
         _say(f"[omx] 카메라 감시를 켜지 못했습니다 ({type(exc).__name__}: {exc}). 평소처럼 평가합니다")
         CAMWATCH = None
         return
     w = CAMWATCH
     _say(f"[omx] 카메라 감시 {getattr(sys.modules.get('omx_camwatch'), 'VERSION', '?')} "
-         + {"on": "(입력·판정 카메라 이상: 시작 거절, 평가 중 제자리 멈춤)", "record": "(기록만)"}.get(w.mode, "(꺼짐)")
+         + {"on": "(입력·판정 카메라 이상: 다시 열기 3번 뒤 시작 거절, 평가 중 제자리 멈춤)",
+            "record": "(기록만, 이상하면 다시 열기 3번)"}.get(w.mode, "(꺼짐)")
          + f" 입력 {','.join(w.input) or '-'} · 판정 {','.join(w.judge) or '-'}")
     bad = w.start_check()
     if bad:
@@ -1546,9 +1642,10 @@ def run(cfg: RunConfig) -> None:
     global MOTOR_OUT, TARGET, PLACE
     TARGET = _make_target()
     PLACE = _make_place()
-    global DROP, TRAY
+    global DROP, TRAY, RELEASE
     DROP = _make_drop()
     TRAY = _make_tray()
+    RELEASE = _make_release(float(os.environ.get("OMX_FPS") or 30))
     if TRAY is not None and TRAY.one_arm:
         omx_safe_start.AFTER_LAND.append(_tray_recheck)  # 3.25.0: the tray again once the arm is home
         if DROP is not None and getattr(DROP, "arm", None):
