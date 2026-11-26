@@ -39,7 +39,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-CACHE_SIZE = 2  # models kept loaded per server (one GPU, shared by every control PC of this account)
+CACHE_SIZE = 4  # models kept loaded per server (one GPU, shared by every control PC of this account); 3.30.2: 2 -> 4
+CACHE_MAX = 8   # cfg "model_cache" (GPU laptop config) may set 1..8
+
+
+def cache_size() -> int:
+    """3.30.2: how many models one inference server keeps loaded: cfg "model_cache" on the GPU laptop, else CACHE_SIZE.
+    One ACT model takes about 0.3 GB of GPU memory (11/26: the UDP server with two models used 1.0 GB)."""
+    try:
+        import omx_config
+
+        n = int(omx_config.CFG.get("model_cache") or CACHE_SIZE)
+    except Exception:  # noqa: BLE001  no / bad config: the default
+        n = CACHE_SIZE
+    return min(max(n, 1), CACHE_MAX)
 
 
 # ---------------------------------------------------------------- the inference itself (shared)
@@ -203,8 +216,9 @@ def unpack_observations(items: list, data: bytes) -> list:
 
 # ---------------------------------------------------------------- server (GPU laptop)
 class ModelCache:
-    def __init__(self, size: int = CACHE_SIZE):
-        self.size, self.items, self.lock = size, OrderedDict(), threading.Lock()
+    def __init__(self, size: int | None = None):
+        self.size, self.items, self.lock = cache_size() if size is None else int(size), OrderedDict(), threading.Lock()
+        print(f"[omx_infer] model cache: {self.size} models", flush=True)
 
     def get(self, model: str, overrides: dict) -> tuple[PolicyRunner, float]:
         key = (model, json.dumps(overrides, sort_keys=True))
@@ -218,7 +232,9 @@ class ModelCache:
         with self.lock:
             self.items[key] = runner
             while len(self.items) > self.size:
-                self.items.popitem(last=False)
+                (gone, _), _ = self.items.popitem(last=False)
+                # 3.30.2: in the server log, so a model that keeps coming back shows the cache is too small
+                print(f"[omx_infer] model cache full ({self.size}): unloaded {gone}", flush=True)
         return runner, load_ms
 
 

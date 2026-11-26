@@ -43,6 +43,7 @@ import omx_data_notes as data_notes  # noqa: E402  (group and description of eac
 import omx_errors  # noqa: E402  (err_code_N of an abnormal end)
 import omx_home  # noqa: E402  (standard home pose from the training data; config "home_pose")
 import omx_camstats  # noqa: E402  (measured camera fps and brightness)
+import omx_camwatch as camwatch  # noqa: E402  (3.31.1: a black tray photo is a camera fault)
 import omx_host  # noqa: E402  (control tower MQTT Host, started when armed turns on)
 import omx_camauto as camauto  # noqa: E402  (which camera is which after a USB replug)
 
@@ -458,6 +459,116 @@ def tray_line(job, kind: str, line: str) -> None:
             LAST_RESULT.update(kind="eval", source=job.info.get("source", "panel"), repo_id=job.info.get("repo_id"),
                                stage="hold", final=False, hold=hold, placement=job.info.get("tray_placed"),
                                exit_ok=None, err=None)
+
+
+CAM_WATCH_FILE = LOG_DIR / "cam_watch.json"  # omx_run's camera fault watch settings (OMX_CAM_WATCH, 3.31.0)
+CAM_FAULT_FRAMES = LOG_DIR / "camera_fault_frames"  # the picture of each camera fault (40 kept)
+CAM_FAULT_LOG = LOG_DIR / "camera_faults.jsonl"  # every camera fault / warning of an evaluation, one line each
+CAM_PREFIX = {"fault": "[omx] cam_fault ", "hold": "[omx] cam_hold ", "check": "[omx] camera_check ",
+              "recovered": "[omx] cam_recovered "}  # 3.32.0: reopened and good again (kept with the faults)
+
+
+def cam_watch_mode() -> str:
+    """3.31.0: cfg "camera_watch": {"mode": "on" | "record" | "off"} (false = off). Default on (TK 11/26)."""
+    c = CFG.get("camera_watch")
+    c = c if isinstance(c, dict) else {"mode": "off"} if c is False else {}
+    mode = str(c.get("mode") or "on")
+    if mode not in ("on", "record", "off"):
+        raise RuntimeError(f'설정 "camera_watch"의 mode는 on, record, off 중 하나입니다 (지금 {mode}).')
+    return mode
+
+
+def cam_watch_roles(model_cfg: dict, arm: str | None, cams: dict, eval_info: dict) -> tuple[list, dict]:
+    """Which open cameras matter: the model's inputs, and the cameras a judge that ends or reports this mission reads
+    (one-arm placement / two-arm hand-over: front; tray judge mode on: its side or top camera + front_2). Record-only
+    judges (drop watch, a tray judge in record mode, a shadow hand-over) do not count."""
+    try:
+        used = model_camera_map(model_cfg, arm)[0]
+    except RuntimeError:
+        used = []
+    if not used or any(n.startswith("camera") for n in used):
+        used = list(cams)  # old camera names: every open camera may be an input
+    judge: dict = {}
+
+    def add(cam, what):
+        if cam in cams:
+            judge.setdefault(cam, []).append(what)
+
+    if eval_info.get("one_arm_place") or (eval_info.get("handover") or {}).get("mode") == "handover":
+        add("front", "놓음 판정")
+    tj = eval_info.get("tray_judge") or {}
+    if tj.get("mode") == "on":
+        add(tj.get("camera") or "front", "쟁반 판정")
+        add("front_2", "쟁반 판정")
+    return [c for c in used if c in cams], judge
+
+
+def release_open_env(body: dict, eval_info: dict) -> dict:
+    """3.32.0 놓기 보정 (TK 11/27): in a loading the policy lets go with its gripper only 2-5 above the held value and
+    drags the box's end face; omx_run ReleaseOpen opens it to "open" (70) once it lets go. On by default for a loading
+    mission (a shelf alignment / handover follows, or one-arm end_on_place), off for unloading (pinky_check) and panel
+    evals; the command's "release_open" (true / false / a number = the open value) decides when given.
+    Config "release_open": {"open": 70, ...} (ReleaseOpen's keys) or false (never)."""
+    cfg = CFG.get("release_open", {})
+    if cfg is False:
+        return {}
+    want = body.get("release_open")
+    loading = not eval_info.get("pinky_check") and bool(eval_info.get("shelf_align") or eval_info.get("handover")
+                                                         or body.get("end_on_place"))
+    if want is None:
+        want = loading
+    if want is False or want == 0:
+        return {}
+    conf = {"open": 70.0, **(cfg if isinstance(cfg, dict) else {})}
+    if not isinstance(want, bool) and isinstance(want, (int, float)):
+        if not 56 < float(want) <= 100:
+            raise RuntimeError("release_open 값은 56보다 크고 100 이하여야 합니다(그리퍼 여는 값, 기본 70).")
+        conf["open"] = float(want)
+    eval_info["release_open"] = conf
+    return {"OMX_RELEASE_OPEN": json.dumps(conf)}
+
+
+def cam_watch_env(model_cfg: dict, arm: str | None, cams: dict, eval_info: dict) -> dict:
+    """3.31.0 (TK 11/26): the camera fault watch of every evaluation (omx_camwatch in omx_run). Called after the judges'
+    settings are in eval_info."""
+    mode = cam_watch_mode()
+    if mode == "off":
+        return {}
+    used, judge = cam_watch_roles(model_cfg, arm, cams, eval_info)
+    _write_json(CAM_WATCH_FILE, {"mode": mode, "input": used, "judge": judge, "frame_dir": str(CAM_FAULT_FRAMES)})
+    eval_info["camera_watch"] = {"mode": mode, "input": used, "judge": judge}
+    return {"OMX_CAM_WATCH": str(CAM_WATCH_FILE)}
+
+
+def cam_line(job, kind: str, line: str) -> None:
+    """omx_run's camera watch lines (3.31.0). fault: kept with the run and in camera_faults.jsonl. hold: as a confirmed
+    drop (3.28.0) - the result says "hold" at once; the run waits, torque on, for [홈 위치로 이동]."""
+    try:
+        d = json.loads(line[len(CAM_PREFIX[kind]):])
+    except ValueError:
+        return
+    if kind == "check":
+        job.info["camera_check"] = d
+        return
+    faults = job.info.setdefault("camera_faults", [])
+    faults.append(d)
+    del faults[:-20]
+    try:
+        with CAM_FAULT_LOG.open("a") as f:
+            f.write(json.dumps({"repo_id": job.info.get("repo_id"), "source": job.info.get("source"), **d},
+                               ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    if d.get("action") == "refuse":
+        job.info["camera_refused"] = d
+    if kind == "hold":
+        hold = {"reason": "camera_fault", "camera": d.get("camera"), "state": d.get("state"), "role": d.get("role"),
+                "judges": d.get("judges"), "brightness": d.get("brightness"), "for_s": d.get("for_s"), "at": d.get("at"),
+                "frame_file": d.get("frame_file"), "version": d.get("version")}
+        job.info["camera_hold"] = hold
+        LAST_RESULT.clear()
+        LAST_RESULT.update(kind="eval", source=job.info.get("source", "panel"), repo_id=job.info.get("repo_id"),
+                           stage="hold", final=False, hold=hold, camera_fault=d, placement=None, exit_ok=None, err=None)
 
 
 WRIST_CHECK_PREFIX = "[omx] wrist_check "  # omx_run.py / omx_wristcheck.py (3.22.0)
@@ -1559,6 +1670,7 @@ class Job:
         if self.kind == "eval":
             LAST_RESULT.clear()
             LAST_RESULT.update(eval_result(self), stage="done", final=True, align=None, pinky=None, placement=None,
+                               pre_align=(self.info.get("pinky_check") or {}).get("pre_align"),
                                handover=None)
             if self.info.get("tray_placed") and not (self.info.get("pinky_check") or {}).get("one_arm"):
                 LAST_RESULT["placement"] = self.info["tray_placed"]  # 3.24.0: the unloading ended on the tray judge
@@ -1568,6 +1680,8 @@ class Job:
                 LAST_RESULT["hold"] = dict(self.info["tray_hold"], released_at=now_iso())
             if self.info.get("drop_hold"):  # 3.28.0
                 LAST_RESULT["hold"] = dict(self.info["drop_hold"], released_at=now_iso())
+            if self.info.get("camera_hold"):  # 3.31.0
+                LAST_RESULT["hold"] = dict(self.info["camera_hold"], released_at=now_iso())
             if self.info.get("handover"):
                 handover_after_eval(self, proc)  # 3.18.0: placed -> the waiting runner; otherwise the usual alignment
             elif self.info.get("shelf_align"):
@@ -1664,6 +1778,7 @@ class Job:
             if self.kind == "eval" and not self.info.get("frozen"):  # 3.28.0: the run held by itself (a confirmed drop)
                 self.info["frozen"] = time.time()  # -> the button is [홈 위치로 이동] and home_return sends "home"
             self.info["phase"] = ("떨어뜨림 확정 · 제자리에서 멈춤 (토크 유지)" if self.info.get("drop_hold")  # 3.28.0
+                                  else "카메라 이상 · 제자리에서 멈춤 (토크 유지)" if self.info.get("camera_hold")  # 3.31.0
                                   else "비상 정지 · 제자리에서 멈춤 (토크 유지)")
         elif "[omx] safe freeze:" in line:
             self.info["safe_start"] = line.split("safe freeze:", 1)[1].strip()
@@ -1675,6 +1790,10 @@ class Job:
                 self.info["phase"] = "비상 정지 · 제자리에서 기다림 ([홈 위치로 이동])"
         elif self.kind == "eval" and line.startswith(DROP_HOLD_PREFIX):
             drop_hold_line(self, line)
+        elif self.kind == "eval" and line.startswith(("[omx] cam_", "[omx] camera_check ")):
+            for kind, prefix in CAM_PREFIX.items():
+                if line.startswith(prefix):
+                    cam_line(self, kind, line)
         elif self.kind == "eval" and line.startswith("[omx] tray_"):
             for kind, prefix in TRAY_PREFIX.items():
                 if line.startswith(prefix):
@@ -3245,6 +3364,9 @@ def eval_result(job) -> dict:
             "arms": arms or None, "wrist_check": info.get("wrist_check"),
             "tray_judge": (end or {}).get("tray_judge"),
             "drop_watch": (end or {}).get("drop_watch"),
+            # 3.31.0: the camera fault watch: what it acted on (refuse at the start / hold) and every fault it wrote
+            "camera_fault": info.get("camera_hold") or info.get("camera_refused"),
+            "camera_faults": info.get("camera_faults"), "camera_watch": info.get("camera_watch"),
             "home_check": "unknown" if not checks or None in checks else "ok" if all(checks) else "far"}
 
 
@@ -3548,7 +3670,29 @@ TRAY_LOCK = threading.Lock()
 TRAY_WHY = {"not_empty": "쟁반이 비어 있지 않습니다", "no_frame": "위 카메라(front) 사진을 찍지 못했습니다",
             "camera_moved": "위 카메라가 움직여 쟁반 위치를 믿을 수 없습니다",
             "tray_marker_present": "쟁반 마커가 붙어 있습니다(마커를 뗀 쟁반이 기준)", "tray_not_found": "쟁반을 찾지 못했습니다",
-            "timeout": "쟁반 확인이 시간 안에 끝나지 않았습니다", "no_result": "쟁반 확인 결과가 없습니다"}
+            "timeout": "쟁반 확인이 시간 안에 끝나지 않았습니다", "no_result": "쟁반 확인 결과가 없습니다",
+            "camera_fault": "카메라 이상: 위 카메라(front) 사진이 검은(또는 하얀·단색) 화면입니다. 카메라를 다시 열어 찍어도 같았습니다"}
+TRAY_CAM_RETRIES = 3        # 3.31.1: a black tray photo -> the runner runs again (it opens front anew), at most this often
+TRAY_CAM_RETRY_GAP_S = 0.5
+TRAY_PHOTO_LABEL_ROWS = 32  # the runner writes one line of text at the top of its photo: not part of the picture
+
+
+def tray_photo_fault(r: dict, status: str) -> dict | None:
+    """3.31.1 (11/26 23:12 양팔 2B 출고): the runner's front photo was black (brightness 0.0, front stuck after a USB
+    reconnect) and read as "tray_not_found" (Host PANEL_TRAY_CHECK_FAILED). No photo at all ("no_frame") or a photo
+    that is black / white / one colour below the runner's label line is a camera fault, not a reading of the tray."""
+    if status == "no_frame":
+        return {"camera": "front", "state": "no_frame", "photo": r.get("photo_top")}
+    path = r.get("photo_top")
+    g = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE) if path else None
+    if g is None or g.shape[0] <= 2 * TRAY_PHOTO_LABEL_ROWS:
+        return None
+    picture = g[TRAY_PHOTO_LABEL_ROWS:]
+    state = camwatch.frame_unusable(picture)
+    if not state:
+        return None
+    mean, std, _ = camwatch.measure(picture)
+    return {"camera": "front", "state": state, "brightness": round(mean, 1), "std": round(std, 2), "photo": str(path)}
 
 
 class Refused(RuntimeError):
@@ -3579,19 +3723,46 @@ def tray_check_before(plan: dict) -> dict:
                 "--result", str(TRAY_RESULT_FILE), "--tray-ref", str(ref)]
         if plan.get("pinky_no") is not None:
             args += ["--pinky", str(plan["pinky_no"])]
-        t0, rc, timed_out = time.time(), None, False
-        try:
-            rc = subprocess.run(plan["cmd"] + args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, timeout=plan["timeout_s"], cwd=str(HOME),
-                                env=dict(os.environ, OMX_PANEL_URL=f"http://127.0.0.1:{PORT}")).returncode
-        except subprocess.TimeoutExpired:
-            timed_out = True  # subprocess.run has killed it
-        try:
-            res = json.loads(TRAY_RESULT_FILE.read_text())
-            r = res.get("result") if isinstance(res.get("result"), dict) else {}
-        except (OSError, ValueError, AttributeError):
-            r = {}
-        status = r.get("tray_check") or ("timeout" if timed_out else "no_result")
+        t0 = time.time()
+
+        def run_once():
+            TRAY_RESULT_FILE.unlink(missing_ok=True)
+            rc, timed_out = None, False
+            try:
+                rc = subprocess.run(plan["cmd"] + args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, timeout=plan["timeout_s"], cwd=str(HOME),
+                                    env=dict(os.environ, OMX_PANEL_URL=f"http://127.0.0.1:{PORT}")).returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True  # subprocess.run has killed it
+            try:
+                res = json.loads(TRAY_RESULT_FILE.read_text())
+                r = res.get("result") if isinstance(res.get("result"), dict) else {}
+            except (OSError, ValueError, AttributeError):
+                r = {}
+            return r.get("tray_check") or ("timeout" if timed_out else "no_result"), r, rc
+
+        # 3.31.1: a black (white, one colour) or missing photo is the camera, not the tray. The runner is a new process
+        # each time and opens front anew, so run it again (at most TRAY_CAM_RETRIES more times, about 2 s each)
+        faults = []
+        for attempt in range(1 + TRAY_CAM_RETRIES):
+            if attempt:
+                time.sleep(TRAY_CAM_RETRY_GAP_S)
+            status, r, rc = run_once()
+            fault = tray_photo_fault(r, status) if status != "ok" else None
+            if not fault:
+                break
+            faults.append(dict(fault, attempt=attempt + 1, tray_check=status, at=now_iso()))
+        recovered = bool(faults) and not fault
+        for f in faults:
+            try:
+                with CAM_FAULT_LOG.open("a") as fh:
+                    fh.write(json.dumps({"kind": "tray_check", "box": plan["box"], "slot": plan["slot"],
+                                         "recovered": recovered, "attempts": len(faults) + recovered, **f},
+                                        ensure_ascii=False) + "\n")
+            except OSError:
+                pass
+        if fault and fault["state"] != "no_frame":
+            status = "camera_fault"
         out = {"tray_check": status, "tray_reference": r.get("tray_reference"), "tray_ref_file": str(ref),
                "reference_at": r.get("reference_at") or r.get("tray_reference_at"), "observed_at": r.get("observed_at"),
                "not_empty_why": r.get("tray_not_empty_why"), "tray_empty_verified": r.get("tray_empty_verified"),
@@ -3599,9 +3770,97 @@ def tray_check_before(plan: dict) -> dict:
                "box_on_tray_ids": r.get("box_on_tray_ids"), "tray_changed": r.get("tray_changed"),
                "photo_top": r.get("photo_top"), "returncode": rc, "checked_at": now_iso(),
                "elapsed_s": round(time.time() - t0, 1)}
+        if faults:  # 3.31.1: every black / missing photo of this check, and whether a new photo was good
+            out |= {"camera_retries": faults, "camera_recovered": recovered, **({"camera_fault": fault} if fault else {})}
         if status != "ok" or out["tray_reference"] != "pre_mission" or not out["reference_at"]:
             why = TRAY_WHY.get(status, status) if status != "ok" else "작업 직전 쟁반 사진을 기준으로 남기지 못했습니다"
-            raise Refused(f"하차 시작 전 쟁반 확인: {why}. 평가를 시작하지 않았습니다.", refused="tray_check", tray_check=out)
+            raise Refused(f"하차 시작 전 쟁반 확인: {why}. 평가를 시작하지 않았습니다.", refused="tray_check", tray_check=out,
+                          **({"camera_fault": fault} if fault else {}))
+        return out
+    finally:
+        TRAY_LOCK.release()
+
+
+PRE_ALIGN_RESULT_FILE = LOG_DIR / "pre_align_result.json"  # the runner's --pre-outbound result (3.32.0)
+PRE_ALIGN_S = 150.0  # the runner's own budget is 90 s of sweeping (ALIGN_BUDGET_S) plus reading and the landing
+PRE_ALIGN: dict = {}  # the last pre-outbound alignment (for the status and the tests)
+
+
+def pre_align_before(plan: dict, body: dict) -> dict | None:
+    """3.32.0 (TK 11/27) 출고 전 정렬: a two-arm unloading starts from a straight box. The outbound policy learned from
+    aligned boxes (its first move squeezes both ends and pulls 4.3 cm); an inbound alignment that failed (timeout ...)
+    still reports completed + shelf_load_not_aligned and the control tower allows the unloading. Right after the
+    tray photo, the runner's --step shelf_align --pre-outbound reads the box yaw on the top camera: within
+    shelf_align_deg (10 deg) it ends without taking the arms (~2 s), otherwise it sweeps (at most 3 taps, 90 s) and
+    lands the arms (start pose, torque off).
+
+    It runs as the robot job "align" (phase "출고 전 정렬 중"), so [중지] / [즉시 중단] / 비상 정지 act on it as on any
+    alignment; this call waits for it. Not aligned in the end (max_taps, timeout, height_fail, ...): the unloading
+    still starts (TK). The runner failed (returncode != 0), timed out or a person stopped it: the arms' state is not
+    known, the start is refused (400, "refused": "pre_align"). Two-arm mqtt unloading by default; "pre_align": true /
+    false in the command decides; config "pre_align": false never. Armed off: not run (the arms would move)."""
+    want = body.get("pre_align")
+    if want is None:
+        want = body.get("source") == "mqtt" and CFG.get("pre_align", True) is not False
+    if not want or CFG.get("pre_align", True) is False:
+        return None
+    base = {"ran": False, "box": plan["box"], "slot": plan["slot"], "checked_at": now_iso()}
+    if not runner_takes(plan["cmd"], "--pre-outbound"):
+        JOB.lines.append("[omx] 출고 전 정렬: 실행기가 --pre-outbound를 지원하지 않아 건너뜁니다")
+        return dict(base, skipped="runner_unsupported")
+    if not ARMED["on"]:
+        JOB.lines.append("[omx] 출고 전 정렬: armed가 꺼져 있어 건너뜁니다(팔이 움직이는 단계)")
+        return dict(base, skipped="armed_off")
+    if JOB.running():
+        raise RuntimeError("다른 작업이 실행 중입니다.")
+    if not TRAY_LOCK.acquire(blocking=False):
+        raise RuntimeError("쟁반 확인 또는 출고 전 정렬이 이미 진행 중입니다.")
+    try:
+        PREVIEW.stop()  # the runner opens the cameras itself
+        PRE_ALIGN_RESULT_FILE.unlink(missing_ok=True)
+        before = ALIGN.get("before")
+        ALIGN.clear()
+        ALIGN.update(box=plan["box"], slot=plan["slot"], before=before)  # a stop's landing (--release) reads these
+        args = ["--box", str(plan["box"]), "--slot", plan["slot"], "--step", "shelf_align", "--pre-outbound", "--auto",
+                "--result", str(PRE_ALIGN_RESULT_FILE)]
+        t0 = time.time()
+        JOB.start("align", plan["cmd"] + args,
+                  {"phase": "출고 전 정렬 중", "box": plan["box"], "slot": plan["slot"], "pre_outbound": True},
+                  need_leader=False, env_extra={"OMX_PANEL_URL": f"http://127.0.0.1:{PORT}"})
+        proc = JOB.proc
+        PRE_ALIGN.clear()
+        PRE_ALIGN.update(running=True, box=plan["box"], slot=plan["slot"], started_at=now_iso())
+        timed_out = False
+        while JOB.proc is proc and JOB.running():
+            if time.time() - t0 > PRE_ALIGN_S and not timed_out:
+                timed_out = True
+                JOB.lines.append(f"[omx] 출고 전 정렬: {PRE_ALIGN_S:.0f}초 안에 끝나지 않아 멈추고 내려놓습니다")
+                JOB.stop()  # SIGTERM: stops in place, then lands the arms (as 즉시 중단)
+            time.sleep(0.2)
+        info = JOB.info if JOB.proc is proc else {}
+        rc = proc.returncode
+        try:
+            res = json.loads(PRE_ALIGN_RESULT_FILE.read_text())
+            r = res.get("result") if isinstance(res.get("result"), dict) else {}
+        except (OSError, ValueError, AttributeError):
+            res, r = {}, {}
+        stopped = ("시간 초과" if timed_out else "즉시 중단" if info.get("abort_sent") else "비상 정지" if info.get("frozen")
+                   else "강제 종료" if info.get("killed") else None)
+        out = dict(base, ran=True, returncode=rc, stopped_by=stopped, align=r.get("align"), taps=r.get("taps"),
+                   yaw_start=r.get("yaw_start"), yaw_end=r.get("yaw_end"), pre_outbound=r.get("pre_outbound"),
+                   elapsed_s=round(time.time() - t0, 1), log=res.get("log"))
+        out.update({k: v for k, v in r.items() if k not in out})
+        PRE_ALIGN.clear()
+        PRE_ALIGN.update(out)
+        if stopped or rc != 0:
+            why = f"{stopped}" if stopped else f"실행기 오류(returncode {rc})"
+            raise Refused(f"출고 전 정렬 중 {why}: 팔 상태를 확인해야 해서 평가를 시작하지 않았습니다.", refused="pre_align",
+                          pre_align=out)
+        f = lambda v: "?" if v is None else f"{float(v):.1f}°"  # noqa: E731
+        out["line"] = (f"[omx] 출고 전 정렬: {f(out['yaw_start'])} → {f(out['yaw_end'])} {out['align'] or '결과 없음'} "
+                       f"({out['taps'] or 0}탭, {out['elapsed_s']:.0f}초)")
+        JOB.lines.append(out["line"])
+        PRE_ALIGN["line"] = out["line"]
         return out
     finally:
         TRAY_LOCK.release()
@@ -3620,7 +3879,8 @@ def pinky_after_eval(plan: dict, eval_proc) -> None:
                                                               "tray_reference", "tray_reference_state", "pre_mission_match",
                                                               "observed_ts", "observed_clock", "judged_at")},
                                 "on_shelf": False if placed.get("slot_empty") else None, "reported_at": now_iso(),
-                                **({"pre_mission": plan["tray"]} if plan.get("tray") else {})}
+                                **({"pre_mission": plan["tray"]} if plan.get("tray") else {}),
+                                **({"pre_align": plan["pre_align"]} if plan.get("pre_align") else {})}
         return
     pinky = {"ran": False, "on_pinky": None, "on_shelf": None, "box": plan["box"], "slot": plan["slot"],
              "pinky_id": plan.get("pinky_id"), "pinky_no": plan.get("pinky_no"), "returncode": None, "skipped": None}
@@ -3628,6 +3888,8 @@ def pinky_after_eval(plan: dict, eval_proc) -> None:
         pinky["pinky_id_ignored"] = True
     if plan.get("tray"):  # 3.20.0: the empty-tray photo taken right before the eval
         pinky["pre_mission"] = plan["tray"]
+    if plan.get("pre_align"):
+        pinky["pre_align"] = plan["pre_align"]  # 3.32.0: the shelf box straightened before the unloading
     stopped = LAST_RESULT.get("stopped_by")
     if stopped in ("비상 정지", "강제 종료"):
         LAST_RESULT["pinky"] = dict(pinky, skipped=stopped, reported_at=now_iso())
@@ -3804,6 +4066,9 @@ def shelf_read_ended(job, proc) -> None:
 def align_ended(job, proc) -> None:
     """The alignment (or its landing) has ended: last_result.align, then land the arms after a stop."""
     info = job.info
+    if job.kind == "align" and info.get("pre_outbound"):
+        pre_align_ended(job, proc)
+        return
     if job.kind == "align_release":
         if LAST_RESULT.get("align"):
             LAST_RESULT["align"]["released"] = info.get("returncode") == 0
@@ -3872,6 +4137,28 @@ def align_ended(job, proc) -> None:
         LAST_RESULT.update(stage="hold", final=False)
     else:
         align_done_later(proc)
+
+
+def pre_align_ended(job, proc) -> None:
+    """3.32.0: the pre-outbound alignment ended. Its own success ends with the arms landed by the runner. A stop
+    lands them as any alignment's (즉시 중단 / time-out: runner --release), 비상 정지 holds them ([홈 위치로 이동]);
+    last_result is not touched (the unloading has not started; pre_align_before reports to the Host)."""
+    info = job.info
+    if info.get("land_after"):
+        def land() -> None:
+            end = time.time() + 30
+            while JOB.proc is proc and JOB.running() and time.time() < end:
+                time.sleep(0.2)
+            time.sleep(1.0)
+            try:
+                start_align(dict(ALIGN), release=True)
+            except Exception as exc:  # noqa: BLE001
+                ALIGN["hold"] = True
+                job.lines.append(f"[omx] 출고 전 정렬: 내려놓기를 시작하지 못했습니다 ({exc}). [홈 위치로 이동]을 누르세요")
+
+        threading.Thread(target=land, daemon=True).start()
+    elif info.get("frozen"):
+        ALIGN["hold"] = True  # the arms stay in place until [홈 위치로 이동] (the runner lands them)
 
 
 # ---------------------------------------------------------------- 넘겨받기 (3.18.0): 놓은 순간 평가를 끝내고 정렬에 넘김
@@ -4342,6 +4629,9 @@ def start_eval(body: dict) -> dict:
     # (a second start in the same minute, or a folder left by a run that failed to start)
     if pinky and not pinky.get("one_arm"):
         pinky["tray"] = tray_check_before(pinky)  # 3.20.0: an unloading starts only on an empty tray (this photo)
+        pa = pre_align_before(pinky, body)  # 3.32.0: a crooked shelf box is straightened first
+        if pa is not None:
+            pinky["pre_align"] = pa
     step = run.get("step")  # set when an intermediate save was chosen
     base = names.eval_name(run.get("display") or names.display_name(run["id"]), preset, opts,
                            f"{dt.datetime.now():%m%d_%H%M}", step)
@@ -4431,7 +4721,11 @@ def start_eval(body: dict) -> dict:
               | (handover_env(ho) if ho else {}) | ({"OMX_ARM_SIDE": arm} if arm else {})
               | ({"OMX_WRIST_CHECK": "1"} if wrist_check_on() else {}) | drop_env(eval_info, arm, eval_cams, body)
               | tray_env(eval_info, arm, eval_cams) | one_arm_env(model_cfg, arm, body)
-              | place_one_arm_env(body, arm, eval_info, episodes, eval_cams))
+              | place_one_arm_env(body, arm, eval_info, episodes, eval_cams) | release_open_env(body, eval_info)
+              # 3.31.0: last, it reads the judges' settings the calls above put in eval_info
+              | cam_watch_env(model_cfg, arm, eval_cams, eval_info))
+    if pinky and (pinky.get("pre_align") or {}).get("line"):
+        JOB.lines.append(pinky["pre_align"]["line"])  # the eval's log starts empty: the pre-outbound alignment's line
     EVAL_HOME_POSE.clear()
     EVAL_HOME_POSE.update(repo_id=repo_id, home=home)
     if ho and ho["mode"] == "handover":
@@ -4932,6 +5226,7 @@ class Handler(BaseHTTPRequestHandler):
                 "mqtt_host": MQTT_HOST.status(),
                 "host_hold": omx_host.hold_state(),
                 "last_result": LAST_RESULT or None,
+                "pre_align": PRE_ALIGN or None,  # 3.32.0: the running / last pre-outbound alignment
                 "camera_watch": camera_watch(),
                 "live": JOB.running() and JOB.kind in ("record", "eval"),
                 "brightness": PREVIEW.brightness,

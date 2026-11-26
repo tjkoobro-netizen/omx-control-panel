@@ -186,12 +186,14 @@ class PlaceWatch:
         self.last: dict | None = None
         self.updates = 0
         self.errors = 0
+        self.unread = 0  # 3.31.0: frames not judged because the camera showed a fault picture
         threading.Thread(target=self._run, daemon=True).start()
 
     def reset(self, t0: float) -> None:
         with self.lock:
             self.judge.reset(t0)
             self.hit, self.last, self.updates, self.errors, self.frame = None, None, 0, 0, None
+            self.unread = 0
 
     def feed(self, obs: dict, t: float, frame_ts: float | None = None) -> None:
         """Called every control step with the raw observation; copies a frame only when the thread is due.
@@ -216,12 +218,17 @@ class PlaceWatch:
             self.new.wait()
             with self.lock:
                 img, joints, t, frame_ts = self.frame, self.joints, self.t, self.frame_ts
+            bad = _unusable(img)  # 3.31.0: a black / white / one-colour frame is not judged (unread)
             try:
-                gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img  # camera frames are RGB
-                r = self.judge.update(gray, joints, t)
+                if bad:
+                    r = {"placed": False, "error": None, "unread": f"{self.camera}:{bad}"}
+                else:
+                    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img  # camera frames are RGB
+                    r = self.judge.update(gray, joints, t)
             except Exception as exc:  # noqa: BLE001  (the judge returns errors as a key; this is a last guard)
                 r = {"placed": False, "error": f"{type(exc).__name__}: {exc}"[:160]}
             with self.lock:
+                self.unread += bool(bad)
                 self.updates += 1
                 self.errors += bool(r.get("error"))
                 self.last = r
@@ -237,7 +244,7 @@ class PlaceWatch:
     def summary(self) -> dict:
         with self.lock:
             return {"version": self.version, "shadow": self.shadow, "updates": self.updates, "errors": self.errors,
-                    "hit": self.hit, "last": self.last}
+                    "unread": self.unread, "hit": self.hit, "last": self.last}
 
 
 def _frame_ts(robot, name: str, frame) -> float | None:
@@ -260,6 +267,17 @@ def _iso(t: float) -> str:
     return dt.datetime.fromtimestamp(t).astimezone().isoformat(timespec="milliseconds")
 
 
+def _unusable(img) -> str | None:
+    """3.31.0: "black" / "white" / "flat" when a judge's frame shows a broken camera rather than a scene (omx_camwatch),
+    or the camera watch already confirmed a stall / frozen picture on it. Such a frame is never judged."""
+    try:
+        import omx_camwatch
+
+        return omx_camwatch.frame_unusable(img)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _make_place() -> PlaceWatch | None:
     path = os.environ.get("OMX_PLACE_JUDGE", "").strip()
     if not path:
@@ -274,6 +292,8 @@ def _make_place() -> PlaceWatch | None:
 PLACE: PlaceWatch | None = None
 DROP = None  # omx_dropwatch.DropWatch (OMX_DROP_WATCH, 3.23.0): records a dropped box, never acts
 TRAY = None  # TrayWatch (OMX_TRAY_JUDGE, 3.24.0): the unloading's "box on the Pinky tray, hands out" judge
+RELEASE = None  # ReleaseOpen (OMX_RELEASE_OPEN, 3.32.0): loading - open the gripper wide once the policy lets go
+CAMWATCH = None  # omx_camwatch.Watch (OMX_CAM_WATCH, 3.31.0): camera fault watch of an evaluation
 
 
 class TrayWatch:
@@ -307,14 +327,14 @@ class TrayWatch:
         self.taken_at = 0.0
         self.hit: dict | None = None
         self.last: dict | None = None
-        self.updates = self.errors = self.stale = 0
+        self.updates = self.errors = self.stale = self.unread = 0
         threading.Thread(target=self._run, daemon=True, name="traywatch").start()
 
     def reset(self, t0: float) -> None:
         with self.lock:
             self.judge.reset(t0)
             self.hit, self.last, self.data = None, None, None
-            self.updates = self.errors = self.stale = 0
+            self.updates = self.errors = self.stale = self.unread = 0
 
     def feed(self, obs: dict, action: dict, t: float, ts: dict) -> None:
         """Every control step of the episode; copies frames only when the thread is due. ts: camera -> capture time."""
@@ -346,6 +366,10 @@ class TrayWatch:
                 if img is None or cap is None or t - cap > self.max_age:
                     gray[c] = None
                     self.stale += img is not None
+                    continue
+                if _unusable(img) or (CAMWATCH is not None and CAMWATCH.faulty(c)):
+                    gray[c] = None  # 3.31.0: a broken camera's picture is unread, never "the tray changed"
+                    self.unread += 1
                     continue
                 gray[c] = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img  # camera frames are RGB
                 used[c] = cap
@@ -387,7 +411,7 @@ class TrayWatch:
     def summary(self) -> dict:
         with self.lock:
             return {"version": self.version, "mode": self.mode, "updates": self.updates, "errors": self.errors,
-                    "stale_frames": self.stale, "hit": self.hit, "last": self.last}
+                    "stale_frames": self.stale, "unread_frames": self.unread, "hit": self.hit, "last": self.last}
 
     def arm_guard(self) -> None:
         """mode "on", after the placement: the fingertips against the tray zone on the way home (omx_safe_start)."""
@@ -424,10 +448,41 @@ class TrayWatch:
         omx_safe_start.TRAY_GUARD.update(near=near, lift_dz=lift_dz, escape_s=5.0, report=report)
 
 
+RECHECK_S = 1.5        # 3.30.1: how long the tray is read again with the arm home (was 8 frames, about 1.4 s)
+RECHECK_PHOTOS = 30    # 3.30.1: recheck photos kept in the logs folder (3 per recheck: about 10 rechecks; oldest removed)
+
+
+def _save_recheck_photos(frames_bgr: dict) -> dict:
+    """3.30.1: the frames the recheck judged on, next to the panel's tray_judge.json (the logs folder)."""
+    out = {}
+    try:
+        import cv2
+
+        judge_file = os.environ.get("OMX_TRAY_JUDGE", "").strip()
+        logs = Path(judge_file).parent if judge_file else None
+        if logs is None or not logs.is_dir():
+            return out
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        for cam, img in frames_bgr.items():
+            if img is None:
+                continue
+            p = logs / f"tray_recheck_{stamp}_{cam}.jpg"
+            if cv2.imwrite(str(p), img, [cv2.IMWRITE_JPEG_QUALITY, 85]):
+                out[cam] = p.name
+        old = sorted(logs.glob("tray_recheck_*.jpg"))
+        for p in old[: max(len(old) - RECHECK_PHOTOS, 0)]:
+            p.unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001  a photo never stops the report
+        pass
+    return out
+
+
 def _tray_recheck(arm_robot) -> None:
     """3.25.0 (omx_safe_start.AFTER_LAND, one-arm unloading): the arm is home, the Pinky still waits for the report:
-    the tray and the slot are read again from the cameras still open (about 1.2 s at 6 Hz) and reported as
-    "[omx] tray_recheck {json}". The judge compares the tray with this eval's own first frame (empty tray)."""
+    the tray and the slot are read again from the cameras still open (RECHECK_S at about 6 Hz) and reported as
+    "[omx] tray_recheck {json}". The judge compares the tray with this eval's own first frame (empty tray).
+    3.30.1: the box marker seen inside the tray but not confirmed still -> on_pinky null (unread, a person checks),
+    never false (a drop); marker_seen / marker_uv / frames in the report, the judged frames saved in the logs folder."""
     tw = TRAY
     if tw is None or not tw.one_arm:
         return
@@ -438,25 +493,50 @@ def _tray_recheck(arm_robot) -> None:
 
         present = {f"{m}": float(v) for m, v in arm_robot.bus.sync_read("Present_Position").items()}
         grips = {tw.arm: (present.get("gripper", 0.0), present.get("gripper", 0.0))} if tw.arm else {}
-        r, used = None, {}
-        for _ in range(8):
+        r, used, n, seen, last, broken = None, {}, 0, [], {}, {}
+        t_end = time.time() + RECHECK_S
+        while n < 3 or time.time() < t_end:
             frames = {}
             for c in tw.cams:
                 cam = cams.get(c)
                 img = cam.read_latest() if cam is not None else None
+                if img is not None:
+                    last[c] = img
+                bad = None if img is None else (_unusable(img) or (CAMWATCH.faulty(c) if CAMWATCH is not None else None))
+                if bad:  # 3.31.0: a broken camera's picture is not judged
+                    broken[c] = bad
+                    img = None
                 frames[c] = None if img is None else (cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if img.ndim == 3 else img)
                 ts = _frame_ts(ABORT.get("robot") or arm_robot, c, img) if img is not None else None
                 if ts:
                     used[c] = ts
             with tw.lock:
                 r = tw.judge.update(frames.get(tw.tray_cam), frames.get("front_2"), present, grips, time.time())
+            n += 1
+            if r.get("marker_uv") is not None:
+                seen.append(r["marker_uv"])
             time.sleep(1 / 6)
         info = getattr(tw.judge, "tray_info", {}) or {}
         ref = info.get("tray_reference")
         out.update({k: r.get(k) for k in ("on_pinky", "slot_empty", "tray_marker", "tray_changed", "error")},
+                   marker_seen=bool(seen), marker_uv=seen[-1] if seen else None, marker_frames=len(seen), frames=n,
                    tray_reference=ref, tray_reference_state="eval_first_frame" if ref and "error" not in info else "not_checked",
-                   observed_ts=min(used.values()) if used else None, observed_clock="capture" if used else None,
-                   at=_iso(time.time()))
+                   observed_ts=min(used.values()) if used else None, observed_clock="capture" if used else None)
+        if seen and not out.get("on_pinky"):
+            # the box marker was inside the tray but its stillness was not confirmed: unread (a person checks), not a drop
+            out.update(on_pinky=None, on_pinky_reason="marker_seen_not_still")
+        if broken:
+            # 3.31.0: a camera of the recheck showed a fault picture: nothing it says counts (a person checks)
+            out.update(on_pinky=None, on_pinky_reason="camera_fault", camera_fault=broken)
+            if "front_2" in broken:
+                out["slot_empty"] = None
+        shots = {c: (cv2.cvtColor(img, cv2.COLOR_RGB2BGR) if img.ndim == 3 else img)
+                 for c, img in last.items() if c in (tw.tray_cam, "front_2")}
+        ref_img = (getattr(tw.judge, "tray", None) or {}).get("ref")
+        if ref_img is not None:  # the eval's first tray frame the judge compares with (empty tray): the before/after pair
+            shots[f"{tw.tray_cam}_first"] = ref_img
+        out["photos"] = _save_recheck_photos(shots)
+        out["at"] = _iso(time.time())
     except Exception as exc:  # noqa: BLE001  no reading: the panel reports it unread (a person checks)
         out["error"] = f"{type(exc).__name__}: {exc}"[:200]
     _say("[omx] tray_recheck " + json.dumps(out, ensure_ascii=False, default=_jsonable))
@@ -482,6 +562,89 @@ def _fitted_tray(judge):
     if not tray or "tray_fit_score" not in info or info.get("tray_fit") == "low_score_default_quad":
         return None
     return [[float(u), float(v)] for u, v in tray["quad"]]
+
+
+class ReleaseOpen:
+    """3.32.0 놓기 보정 (TK 11/27, loading): the policy lets go of the box by opening its gripper only 2-5 above the held
+    value (held ~57; after the release the demos open to 58.8 left / 62.5 right at most, approaching 65-68) and then
+    pulls the hand back, so the fingers drag the box's end face (11/27 03:01 box 16 left 54.5 deg askew, 2-4 cm short).
+    Once a release is seen, the gripper command sent is max(policy, OPEN), raised RAMP per frame.
+
+    Per gripper ("gripper.pos", "left_gripper.pos", "right_gripper.pos"), from the policy's commands only:
+      held     after the gripper was open once (>= RELEASE_MIN; the approach), commands <= GRASP_MAX for HOLD_S
+               (the start pose's closed gripper is not a grasp: 129 demos, the first "release" was the approach)
+      release  held, then commands >= RELEASE_MIN for CONFIRM frames (a one-frame blip while carrying stays a blip)
+      undone   a command below UNDO_BELOW (closing again, e.g. at home): the policy's values again. Below 54 rather
+               than the grasp 50.5: the return check wants the gripper <= 54.6 and demos close 54 -> 50.5 in ~3 frames
+    Only numbers per step (no file or network): the 30 Hz loop is not slowed. Joints other than the grippers untouched.
+    Config (OMX_RELEASE_OPEN, a JSON object): open, grasp_max, release_min, undo_below, hold_s, confirm, ramp."""
+
+    def __init__(self, conf: dict, fps: float):
+        self.open = min(float(conf.get("open", 70.0)), 100.0)
+        self.grasp_max = float(conf.get("grasp_max", 50.5))
+        self.release_min = float(conf.get("release_min", 56.0))
+        self.undo_below = float(conf.get("undo_below", 54.0))
+        self.hold_n = max(1, int(round(float(conf.get("hold_s", 0.5)) * fps)))
+        self.confirm = max(1, int(conf.get("confirm", 2)))
+        self.ramp = max(0.5, float(conf.get("ramp", 5.0)))
+        self.st: dict = {}
+        self.events: list = []
+
+    def reset(self) -> None:
+        self.st = {}
+
+    def __call__(self, action: dict, t: float) -> dict:
+        for k in action:
+            if not k.endswith("gripper.pos"):
+                continue
+            c = float(action[k])
+            s = self.st.get(k)
+            if s is None:
+                s = self.st[k] = {"opened": False, "closed": 0, "held": False, "up": 0, "on": False, "sent": c}
+            if s["on"]:
+                if c < self.undo_below:
+                    s.update(on=False, held=False, up=0, closed=1 if c <= self.grasp_max else 0)
+                    continue
+                s["sent"] = max(c, min(self.open, s["sent"] + self.ramp))
+                action[k] = s["sent"]
+                continue
+            if c >= self.release_min:
+                s["opened"] = True
+                if s["held"]:
+                    s["up"] += 1
+                    if s["up"] >= self.confirm:
+                        s.update(on=True, sent=max(c, min(self.open, c + self.ramp)))
+                        action[k] = s["sent"]
+                        side = k[: -len("_gripper.pos")] if k != "gripper.pos" else (os.environ.get("OMX_ARM_SIDE") or "arm")
+                        ev = {"arm": side, "cmd": round(c, 1), "open": self.open, "t": round(t, 2)}
+                        self.events.append(ev)
+                        del self.events[:-10]
+                        _say(f"[omx] release_open: {side} {c:.1f} → {self.open:g} (t={t:.1f}s)")
+                else:
+                    s["closed"] = 0
+            elif c <= self.grasp_max:
+                s["up"] = 0
+                if s["opened"]:
+                    s["closed"] += 1
+                    if s["closed"] >= self.hold_n:
+                        s["held"] = True
+            else:
+                s["up"] = 0  # between: neither a grasp frame nor a release frame
+        return action
+
+
+def _make_release(fps: float):
+    raw = os.environ.get("OMX_RELEASE_OPEN", "").strip()  # read at run time: the warm process gets it late
+    if not raw:
+        return None
+    try:
+        r = ReleaseOpen(json.loads(raw), fps)
+    except Exception as exc:  # noqa: BLE001  no correction = the eval runs as before
+        _say(f"[omx] 놓기 보정을 켜지 못했습니다 ({type(exc).__name__}: {exc}). 평소처럼 평가합니다")
+        return None
+    _say(f"[omx] 놓기 보정: 정책이 상자를 놓으면(쥔 뒤 그리퍼 명령 {r.release_min:g} 이상) 그리퍼를 {r.open:g}까지 엽니다 "
+         f"(다시 {r.undo_below:g} 아래로 닫으면 정책 값)")
+    return r
 
 
 def _make_drop():
@@ -947,8 +1110,13 @@ def install_live_view(robot) -> None:
                 last_stats = time.time()
                 try:
                     tmp = f"{prefix}stats.tmp"
+                    st = omx_camstats.stats(ROBOT_CAMS, dict(LIVE_LATEST))
+                    if CAMWATCH is not None:  # 3.31.0: the watch's state of each camera for the panel's views
+                        for n, v in CAMWATCH.snapshot().items():
+                            if n in st:
+                                st[n].update(state=v["state"], state_ko=v["state_ko"], role=v["role"])
                     with open(tmp, "w") as f:
-                        json.dump(omx_camstats.stats(ROBOT_CAMS, dict(LIVE_LATEST)), f)
+                        json.dump(st, f)
                     os.replace(tmp, f"{prefix}stats.json")
                 except Exception:
                     pass
@@ -1098,6 +1266,12 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
     if drop:
         DROP.reset(time.time())
     tray = TRAY is not None and policy is not None and dataset is not None  # 3.24.0: not tied to RETURN.on either
+    cam_watch = CAMWATCH is not None and policy is not None and dataset is not None  # 3.31.0
+    release = RELEASE is not None and policy is not None and dataset is not None  # 3.32.0 놓기 보정
+    if release:
+        RELEASE.reset()
+    if cam_watch:
+        CAMWATCH.begin_episode()
     told = False
     tele = None
     if policy is not None and dataset is not None:  # 3.26.0: the 5 s camera / UDP / loop lines of an eval episode
@@ -1124,6 +1298,18 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
             break
         obs = robot.get_observation()
         raw = obs  # before the target circle is drawn (the drop watch reads the raw top frame)
+        if cam_watch:
+            ev = CAMWATCH.take_hold()
+            if ev is not None:
+                # 3.31.0: an input or judge camera shows a fault picture (black, frozen, no frames ...): the policy would
+                # act blind or the judge could not end the mission. Hold in place with the torque on (비상 정지 path);
+                # a person checks the camera and the arms, then [홈 위치로 이동]. The Host gets failed + HOLD.
+                EPISODE_END.update(end_reason="camera_fault", elapsed_s=round(t0 - start, 1), camera_fault=ev)
+                _say("[omx] cam_hold " + json.dumps(ev, ensure_ascii=False, default=_jsonable))
+                _say(f"[omx] 카메라 이상 확정: {CAMWATCH.describe(ev)} - 평가를 멈추고 제자리에서 토크를 유지합니다. "
+                     "카메라를 확인한 뒤 [홈 위치로 이동]을 누르세요")
+                _on_freeze(None, None)
+                break
         if dataset is not None:
             LAST_STATE.update({k: v for k, v in obs.items() if k.endswith(".pos")})
             STATE_TS["t"] = time.time()
@@ -1153,6 +1339,8 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
             if filt is not None:
                 act = filt(act)
             action = make_robot_action(act, dataset.features)
+            if release:  # 3.32.0: after the output filter; the judges below see what is really sent
+                action = RELEASE(action, t0 - start)
             if drop:
                 try:
                     DROP.feed(raw, action, time.time())
@@ -1213,6 +1401,8 @@ def control_loop(robot, fps: int, seconds: float, *, teleop=None, policy: Policy
         precise_sleep(max(due - time.perf_counter(), 0.0))
     if tele is not None:
         tele.finish()  # the last partial 5 s and the episode's "... total:" lines (never raises)
+    if cam_watch:
+        CAMWATCH.end_episode()
 
 
 def _report_loop_rate(index: int, times: list) -> None:
@@ -1306,6 +1496,10 @@ def run_episodes(cfg: RunConfig, robot, teleop, policy: Policy | None, dataset, 
                 EPISODE_END["judge_watch"] = PLACE.summary()
             if TRAY is not None:
                 EPISODE_END["tray_judge"] = TRAY.summary()
+            if CAMWATCH is not None:
+                EPISODE_END["camera_watch"] = CAMWATCH.summary()
+            if RELEASE is not None:
+                EPISODE_END["release_open"] = {"open": RELEASE.open, "events": list(RELEASE.events)}  # 3.32.0
             if DROP is not None:
                 EPISODE_END["drop_watch"] = DROP.finish()
                 for s in EPISODE_END["drop_watch"]["signals"]:
@@ -1387,6 +1581,8 @@ def wrist_check(robot) -> None:
     _say(omx_wristcheck.line(res))
     if res["ok"] and res["swapped"]:
         ROBOT_CAMS.update(robot.cameras)  # the live views follow the exchange
+        if CAMWATCH is not None:
+            CAMWATCH.rebind(robot.cameras)  # 3.32.0: the watch's names follow the exchange too
         _say(f"[omx] 손목 카메라 확인: 저장된 배정과 반대입니다. 이번 실행에서 wrist_left와 wrist_right를 바꿔 시작합니다 "
              f"(로봇 구성도 고침, {res['ms']}ms)")
     elif res["ok"]:
@@ -1394,6 +1590,37 @@ def wrist_check(robot) -> None:
     else:
         _say(f"[omx] 손목 카메라 확인 실패: {res['why']}. 정책을 시작하지 않습니다")
         raise SystemExit(2)
+
+
+def camera_check(robot) -> None:
+    """3.31.0 (OMX_CAM_WATCH, evaluation): the camera fault watch (omx_camwatch) looks at every camera for 1.5 s before
+    the policy starts. A model input or judge camera with a fault picture: no policy start (err_code_14), the arms stay
+    home. Then the watch keeps looking during the evaluation (5 times a second, a line every 5 s)."""
+    global CAMWATCH
+    path = os.environ.get("OMX_CAM_WATCH", "").strip()
+    if not path:
+        return
+    try:
+        import omx_camwatch
+
+        CAMWATCH = omx_camwatch.load(path, getattr(robot, "cameras", {}) or {}, _say)
+        if getattr(robot, "cameras", None) is not None:
+            CAMWATCH.attach(robot.cameras)  # 3.32.0: a faulty camera is closed and opened again in the robot's dict
+    except Exception as exc:  # noqa: BLE001  no watch = the eval runs as before
+        _say(f"[omx] 카메라 감시를 켜지 못했습니다 ({type(exc).__name__}: {exc}). 평소처럼 평가합니다")
+        CAMWATCH = None
+        return
+    w = CAMWATCH
+    _say(f"[omx] 카메라 감시 {getattr(sys.modules.get('omx_camwatch'), 'VERSION', '?')} "
+         + {"on": "(입력·판정 카메라 이상: 다시 열기 3번 뒤 시작 거절, 평가 중 제자리 멈춤)",
+            "record": "(기록만, 이상하면 다시 열기 3번)"}.get(w.mode, "(꺼짐)")
+         + f" 입력 {','.join(w.input) or '-'} · 판정 {','.join(w.judge) or '-'}")
+    bad = w.start_check()
+    if bad:
+        _say(f"[omx] 카메라 이상: {' / '.join(w.describe(ev) for ev in bad)}. 정책을 시작하지 않습니다")
+        raise SystemExit(2)
+    _say("[omx] camera_check " + json.dumps({"ok": True, "now": w.snapshot()}, ensure_ascii=False))
+    w.start()
 
 
 def run(cfg: RunConfig) -> None:
@@ -1415,9 +1642,10 @@ def run(cfg: RunConfig) -> None:
     global MOTOR_OUT, TARGET, PLACE
     TARGET = _make_target()
     PLACE = _make_place()
-    global DROP, TRAY
+    global DROP, TRAY, RELEASE
     DROP = _make_drop()
     TRAY = _make_tray()
+    RELEASE = _make_release(float(os.environ.get("OMX_FPS") or 30))
     if TRAY is not None and TRAY.one_arm:
         omx_safe_start.AFTER_LAND.append(_tray_recheck)  # 3.25.0: the tray again once the arm is home
         if DROP is not None and getattr(DROP, "arm", None):
@@ -1455,6 +1683,7 @@ def run(cfg: RunConfig) -> None:
             teleop.connect()
         robot.connect()
         if teleop is None and policy is not None:
+            camera_check(robot)  # 3.31.0: before the wrist check (a black wrist camera is a camera fault, not a swap)
             wrist_check(robot)
         run_episodes(cfg, robot, teleop, policy, dataset, viewer)
         clean = True
@@ -1530,7 +1759,7 @@ def warm_wait() -> None:
     the run as if launched with them; stdin then carries the usual controls. stdin closed (the panel ended): exit."""
     t = time.perf_counter()
     for name in ("torch", "cv2", "lerobot.datasets.lerobot_dataset", "lerobot.policies.factory", "omx_async",
-                 "omx_infer", "omx_wristcheck", "omx_camstats"):
+                 "omx_infer", "omx_wristcheck", "omx_camstats", "omx_camwatch"):
         try:
             __import__(name)
         except Exception as exc:  # the run imports it again and reports it there
