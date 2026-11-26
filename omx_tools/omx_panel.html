@@ -527,7 +527,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </svg></div>
       <div>
         <h1>OMX Control Panel</h1>
-        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.31.0</span></div>
+        <div class="sub">모방학습 데이터 수집 · 학습 · 평가 · <span id="appVersion">v3.31.1</span></div>
       </div>
     </div>
     <div class="status">
@@ -1682,7 +1682,7 @@ dialog { border-radius: 8px; border-color: var(--line-strong); }
       </ul>
       <h3>하차 뒤 상차 확인 (Pinky)</h3>
       <p>관제 명령에 <code>"pinky_check": true</code>와 상자 번호(<code>target_marker</code>)가 있으면, 평가가 끝난 뒤 카메라만으로 <b>상차 확인</b>을 해요(로봇은 건드리지 않아 armed와 무관). 위 카메라(front)로 상자가 Pinky 쟁반 위에 있는지, 전방 카메라(front_2)로 선반에 남았는지 봅니다. 선반 정렬과는 함께 쓸 수 없어서, 하차 명령은 <code>"shelf_align": false</code>로 보내요(둘 다 켜면 평가를 시작하지 않고 거절).</p>
-      <p>3.20.0부터 하차 평가는 시작 직전에 쟁반 사진을 먼저 찍어요(실행기 <code>--step tray_check --tray-ref</code>, 이 미션만의 사진 파일). 쟁반이 비었고 그 사진을 이 미션의 기준(<code>pre_mission</code>)으로 남겼을 때만 평가를 시작하고, 아니면(상자가 있음, 사진 없음, 카메라 움직임 등) 로봇을 움직이지 않고 400으로 거절해요(<code>"refused": "tray_check"</code>, <code>tray_check</code>에 결과). 평가 뒤 상차 확인은 같은 사진하고만 비교하고(공통·다른 Pinky 사진은 쓰지 않음), <code>last_result.pinky</code>에 <code>tray_reference: "pre_mission"</code>, <code>reference_at</code>, <code>pre_mission_match</code>, <code>pre_mission</code>(작업 직전 확인 결과)이 함께 나와요.</p>
+      <p>3.20.0부터 하차 평가는 시작 직전에 쟁반 사진을 먼저 찍어요(실행기 <code>--step tray_check --tray-ref</code>, 이 미션만의 사진 파일). 쟁반이 비었고 그 사진을 이 미션의 기준(<code>pre_mission</code>)으로 남겼을 때만 평가를 시작하고, 아니면(상자가 있음, 사진 없음, 카메라 움직임 등) 로봇을 움직이지 않고 400으로 거절해요(<code>"refused": "tray_check"</code>, <code>tray_check</code>에 결과). 평가 뒤 상차 확인은 같은 사진하고만 비교하고(공통·다른 Pinky 사진은 쓰지 않음), <code>last_result.pinky</code>에 <code>tray_reference: "pre_mission"</code>, <code>reference_at</code>, <code>pre_mission_match</code>, <code>pre_mission</code>(작업 직전 확인 결과)이 함께 나와요. 3.31.1부터는 그 사진이 검은·하얀·단색 화면이거나 사진을 못 찍으면 쟁반 탓이 아니라 카메라 탓으로 보고, 카메라를 새로 열어 최대 3번 더 찍어요. 다시 찍은 사진이 정상이면 그대로 진행하고(<code>camera_recovered: true</code>), 끝까지 검으면 <code>tray_check: "camera_fault"</code>로 거절해요(<code>camera_fault</code>에 카메라·밝기·사진).</p>
       <p>상자 번호를 보내면 기본으로 위 카메라 영상에 목표 원을 그려 정책에 보여 줘요. 원 없이 학습한 모델(하차 등)은 <code>"draw_target": false</code>를 함께 보내면 번호는 상차 확인·기록에만 쓰고 원은 그리지 않아요(<code>last_result.target_drawn</code>).</p>
       <p>관제 명령의 <code>"slot"</code>(예 <code>"2B"</code>)은 정렬·선반 확인·상차 확인에 그대로 넘어가고, <code>"pinky_id"</code>(예 <code>"pinky1"</code>)는 상차 확인의 Pinky별 쟁반 기준에 쓰여요. 선반 정렬은 상자가 칸에 놓였는지 먼저 읽어 <code>last_result.placement</code>로 바로 알리고(정렬은 이어서 진행), 결과마다 관측 시각 <code>observed_at</code>과 받은 시각 <code>reported_at</code>이 붙어요.</p>
       <ul>

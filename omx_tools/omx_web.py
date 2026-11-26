@@ -43,6 +43,7 @@ import omx_data_notes as data_notes  # noqa: E402  (group and description of eac
 import omx_errors  # noqa: E402  (err_code_N of an abnormal end)
 import omx_home  # noqa: E402  (standard home pose from the training data; config "home_pose")
 import omx_camstats  # noqa: E402  (measured camera fps and brightness)
+import omx_camwatch as camwatch  # noqa: E402  (3.31.1: a black tray photo is a camera fault)
 import omx_host  # noqa: E402  (control tower MQTT Host, started when armed turns on)
 import omx_camauto as camauto  # noqa: E402  (which camera is which after a USB replug)
 
@@ -3642,7 +3643,29 @@ TRAY_LOCK = threading.Lock()
 TRAY_WHY = {"not_empty": "쟁반이 비어 있지 않습니다", "no_frame": "위 카메라(front) 사진을 찍지 못했습니다",
             "camera_moved": "위 카메라가 움직여 쟁반 위치를 믿을 수 없습니다",
             "tray_marker_present": "쟁반 마커가 붙어 있습니다(마커를 뗀 쟁반이 기준)", "tray_not_found": "쟁반을 찾지 못했습니다",
-            "timeout": "쟁반 확인이 시간 안에 끝나지 않았습니다", "no_result": "쟁반 확인 결과가 없습니다"}
+            "timeout": "쟁반 확인이 시간 안에 끝나지 않았습니다", "no_result": "쟁반 확인 결과가 없습니다",
+            "camera_fault": "카메라 이상: 위 카메라(front) 사진이 검은(또는 하얀·단색) 화면입니다. 카메라를 다시 열어 찍어도 같았습니다"}
+TRAY_CAM_RETRIES = 3        # 3.31.1: a black tray photo -> the runner runs again (it opens front anew), at most this often
+TRAY_CAM_RETRY_GAP_S = 0.5
+TRAY_PHOTO_LABEL_ROWS = 32  # the runner writes one line of text at the top of its photo: not part of the picture
+
+
+def tray_photo_fault(r: dict, status: str) -> dict | None:
+    """3.31.1 (11/26 23:12 양팔 2B 출고): the runner's front photo was black (brightness 0.0, front stuck after a USB
+    reconnect) and read as "tray_not_found" (Host PANEL_TRAY_CHECK_FAILED). No photo at all ("no_frame") or a photo
+    that is black / white / one colour below the runner's label line is a camera fault, not a reading of the tray."""
+    if status == "no_frame":
+        return {"camera": "front", "state": "no_frame", "photo": r.get("photo_top")}
+    path = r.get("photo_top")
+    g = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE) if path else None
+    if g is None or g.shape[0] <= 2 * TRAY_PHOTO_LABEL_ROWS:
+        return None
+    picture = g[TRAY_PHOTO_LABEL_ROWS:]
+    state = camwatch.frame_unusable(picture)
+    if not state:
+        return None
+    mean, std, _ = camwatch.measure(picture)
+    return {"camera": "front", "state": state, "brightness": round(mean, 1), "std": round(std, 2), "photo": str(path)}
 
 
 class Refused(RuntimeError):
@@ -3673,19 +3696,46 @@ def tray_check_before(plan: dict) -> dict:
                 "--result", str(TRAY_RESULT_FILE), "--tray-ref", str(ref)]
         if plan.get("pinky_no") is not None:
             args += ["--pinky", str(plan["pinky_no"])]
-        t0, rc, timed_out = time.time(), None, False
-        try:
-            rc = subprocess.run(plan["cmd"] + args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, timeout=plan["timeout_s"], cwd=str(HOME),
-                                env=dict(os.environ, OMX_PANEL_URL=f"http://127.0.0.1:{PORT}")).returncode
-        except subprocess.TimeoutExpired:
-            timed_out = True  # subprocess.run has killed it
-        try:
-            res = json.loads(TRAY_RESULT_FILE.read_text())
-            r = res.get("result") if isinstance(res.get("result"), dict) else {}
-        except (OSError, ValueError, AttributeError):
-            r = {}
-        status = r.get("tray_check") or ("timeout" if timed_out else "no_result")
+        t0 = time.time()
+
+        def run_once():
+            TRAY_RESULT_FILE.unlink(missing_ok=True)
+            rc, timed_out = None, False
+            try:
+                rc = subprocess.run(plan["cmd"] + args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, timeout=plan["timeout_s"], cwd=str(HOME),
+                                    env=dict(os.environ, OMX_PANEL_URL=f"http://127.0.0.1:{PORT}")).returncode
+            except subprocess.TimeoutExpired:
+                timed_out = True  # subprocess.run has killed it
+            try:
+                res = json.loads(TRAY_RESULT_FILE.read_text())
+                r = res.get("result") if isinstance(res.get("result"), dict) else {}
+            except (OSError, ValueError, AttributeError):
+                r = {}
+            return r.get("tray_check") or ("timeout" if timed_out else "no_result"), r, rc
+
+        # 3.31.1: a black (white, one colour) or missing photo is the camera, not the tray. The runner is a new process
+        # each time and opens front anew, so run it again (at most TRAY_CAM_RETRIES more times, about 2 s each)
+        faults = []
+        for attempt in range(1 + TRAY_CAM_RETRIES):
+            if attempt:
+                time.sleep(TRAY_CAM_RETRY_GAP_S)
+            status, r, rc = run_once()
+            fault = tray_photo_fault(r, status) if status != "ok" else None
+            if not fault:
+                break
+            faults.append(dict(fault, attempt=attempt + 1, tray_check=status, at=now_iso()))
+        recovered = bool(faults) and not fault
+        for f in faults:
+            try:
+                with CAM_FAULT_LOG.open("a") as fh:
+                    fh.write(json.dumps({"kind": "tray_check", "box": plan["box"], "slot": plan["slot"],
+                                         "recovered": recovered, "attempts": len(faults) + recovered, **f},
+                                        ensure_ascii=False) + "\n")
+            except OSError:
+                pass
+        if fault and fault["state"] != "no_frame":
+            status = "camera_fault"
         out = {"tray_check": status, "tray_reference": r.get("tray_reference"), "tray_ref_file": str(ref),
                "reference_at": r.get("reference_at") or r.get("tray_reference_at"), "observed_at": r.get("observed_at"),
                "not_empty_why": r.get("tray_not_empty_why"), "tray_empty_verified": r.get("tray_empty_verified"),
@@ -3693,9 +3743,12 @@ def tray_check_before(plan: dict) -> dict:
                "box_on_tray_ids": r.get("box_on_tray_ids"), "tray_changed": r.get("tray_changed"),
                "photo_top": r.get("photo_top"), "returncode": rc, "checked_at": now_iso(),
                "elapsed_s": round(time.time() - t0, 1)}
+        if faults:  # 3.31.1: every black / missing photo of this check, and whether a new photo was good
+            out |= {"camera_retries": faults, "camera_recovered": recovered, **({"camera_fault": fault} if fault else {})}
         if status != "ok" or out["tray_reference"] != "pre_mission" or not out["reference_at"]:
             why = TRAY_WHY.get(status, status) if status != "ok" else "작업 직전 쟁반 사진을 기준으로 남기지 못했습니다"
-            raise Refused(f"하차 시작 전 쟁반 확인: {why}. 평가를 시작하지 않았습니다.", refused="tray_check", tray_check=out)
+            raise Refused(f"하차 시작 전 쟁반 확인: {why}. 평가를 시작하지 않았습니다.", refused="tray_check", tray_check=out,
+                          **({"camera_fault": fault} if fault else {}))
         return out
     finally:
         TRAY_LOCK.release()
