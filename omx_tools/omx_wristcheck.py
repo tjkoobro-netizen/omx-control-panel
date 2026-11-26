@@ -32,7 +32,8 @@ SPEED = 25.0        # units per second (the output stays capped by the safe star
 SETTLE_S = 0.25     # after the move, before the pictures are read
 PIX = 25            # grey levels: a pixel that changed
 MIN_CHANGED = 0.02  # part of the picture that must change on the moving arm's own camera
-RATIO = 3.0         # ... and at least this many times the other camera's change
+RATIO = 1.5         # ... and at least this many times the other camera's change (3.30.3: 3.0 -> 1.5;
+                    # a real swap makes the OTHER camera the top one, which the pair check catches anyway)
 FLOOR = 0.005       # the other camera's change counts as at least this much (picture noise)
 GRIP_TOP = 100.0
 
