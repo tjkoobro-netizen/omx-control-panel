@@ -460,6 +460,90 @@ def tray_line(job, kind: str, line: str) -> None:
                                exit_ok=None, err=None)
 
 
+CAM_WATCH_FILE = LOG_DIR / "cam_watch.json"  # omx_run's camera fault watch settings (OMX_CAM_WATCH, 3.31.0)
+CAM_FAULT_FRAMES = LOG_DIR / "camera_fault_frames"  # the picture of each camera fault (40 kept)
+CAM_FAULT_LOG = LOG_DIR / "camera_faults.jsonl"  # every camera fault / warning of an evaluation, one line each
+CAM_PREFIX = {"fault": "[omx] cam_fault ", "hold": "[omx] cam_hold ", "check": "[omx] camera_check "}
+
+
+def cam_watch_mode() -> str:
+    """3.31.0: cfg "camera_watch": {"mode": "on" | "record" | "off"} (false = off). Default on (TK 11/26)."""
+    c = CFG.get("camera_watch")
+    c = c if isinstance(c, dict) else {"mode": "off"} if c is False else {}
+    mode = str(c.get("mode") or "on")
+    if mode not in ("on", "record", "off"):
+        raise RuntimeError(f'설정 "camera_watch"의 mode는 on, record, off 중 하나입니다 (지금 {mode}).')
+    return mode
+
+
+def cam_watch_roles(model_cfg: dict, arm: str | None, cams: dict, eval_info: dict) -> tuple[list, dict]:
+    """Which open cameras matter: the model's inputs, and the cameras a judge that ends or reports this mission reads
+    (one-arm placement / two-arm hand-over: front; tray judge mode on: its side or top camera + front_2). Record-only
+    judges (drop watch, a tray judge in record mode, a shadow hand-over) do not count."""
+    try:
+        used = model_camera_map(model_cfg, arm)[0]
+    except RuntimeError:
+        used = []
+    if not used or any(n.startswith("camera") for n in used):
+        used = list(cams)  # old camera names: every open camera may be an input
+    judge: dict = {}
+
+    def add(cam, what):
+        if cam in cams:
+            judge.setdefault(cam, []).append(what)
+
+    if eval_info.get("one_arm_place") or (eval_info.get("handover") or {}).get("mode") == "handover":
+        add("front", "놓음 판정")
+    tj = eval_info.get("tray_judge") or {}
+    if tj.get("mode") == "on":
+        add(tj.get("camera") or "front", "쟁반 판정")
+        add("front_2", "쟁반 판정")
+    return [c for c in used if c in cams], judge
+
+
+def cam_watch_env(model_cfg: dict, arm: str | None, cams: dict, eval_info: dict) -> dict:
+    """3.31.0 (TK 11/26): the camera fault watch of every evaluation (omx_camwatch in omx_run). Called after the judges'
+    settings are in eval_info."""
+    mode = cam_watch_mode()
+    if mode == "off":
+        return {}
+    used, judge = cam_watch_roles(model_cfg, arm, cams, eval_info)
+    _write_json(CAM_WATCH_FILE, {"mode": mode, "input": used, "judge": judge, "frame_dir": str(CAM_FAULT_FRAMES)})
+    eval_info["camera_watch"] = {"mode": mode, "input": used, "judge": judge}
+    return {"OMX_CAM_WATCH": str(CAM_WATCH_FILE)}
+
+
+def cam_line(job, kind: str, line: str) -> None:
+    """omx_run's camera watch lines (3.31.0). fault: kept with the run and in camera_faults.jsonl. hold: as a confirmed
+    drop (3.28.0) - the result says "hold" at once; the run waits, torque on, for [홈 위치로 이동]."""
+    try:
+        d = json.loads(line[len(CAM_PREFIX[kind]):])
+    except ValueError:
+        return
+    if kind == "check":
+        job.info["camera_check"] = d
+        return
+    faults = job.info.setdefault("camera_faults", [])
+    faults.append(d)
+    del faults[:-20]
+    try:
+        with CAM_FAULT_LOG.open("a") as f:
+            f.write(json.dumps({"repo_id": job.info.get("repo_id"), "source": job.info.get("source"), **d},
+                               ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+    if d.get("action") == "refuse":
+        job.info["camera_refused"] = d
+    if kind == "hold":
+        hold = {"reason": "camera_fault", "camera": d.get("camera"), "state": d.get("state"), "role": d.get("role"),
+                "judges": d.get("judges"), "brightness": d.get("brightness"), "for_s": d.get("for_s"), "at": d.get("at"),
+                "frame_file": d.get("frame_file"), "version": d.get("version")}
+        job.info["camera_hold"] = hold
+        LAST_RESULT.clear()
+        LAST_RESULT.update(kind="eval", source=job.info.get("source", "panel"), repo_id=job.info.get("repo_id"),
+                           stage="hold", final=False, hold=hold, camera_fault=d, placement=None, exit_ok=None, err=None)
+
+
 WRIST_CHECK_PREFIX = "[omx] wrist_check "  # omx_run.py / omx_wristcheck.py (3.22.0)
 
 
@@ -1568,6 +1652,8 @@ class Job:
                 LAST_RESULT["hold"] = dict(self.info["tray_hold"], released_at=now_iso())
             if self.info.get("drop_hold"):  # 3.28.0
                 LAST_RESULT["hold"] = dict(self.info["drop_hold"], released_at=now_iso())
+            if self.info.get("camera_hold"):  # 3.31.0
+                LAST_RESULT["hold"] = dict(self.info["camera_hold"], released_at=now_iso())
             if self.info.get("handover"):
                 handover_after_eval(self, proc)  # 3.18.0: placed -> the waiting runner; otherwise the usual alignment
             elif self.info.get("shelf_align"):
@@ -1664,6 +1750,7 @@ class Job:
             if self.kind == "eval" and not self.info.get("frozen"):  # 3.28.0: the run held by itself (a confirmed drop)
                 self.info["frozen"] = time.time()  # -> the button is [홈 위치로 이동] and home_return sends "home"
             self.info["phase"] = ("떨어뜨림 확정 · 제자리에서 멈춤 (토크 유지)" if self.info.get("drop_hold")  # 3.28.0
+                                  else "카메라 이상 · 제자리에서 멈춤 (토크 유지)" if self.info.get("camera_hold")  # 3.31.0
                                   else "비상 정지 · 제자리에서 멈춤 (토크 유지)")
         elif "[omx] safe freeze:" in line:
             self.info["safe_start"] = line.split("safe freeze:", 1)[1].strip()
@@ -1675,6 +1762,10 @@ class Job:
                 self.info["phase"] = "비상 정지 · 제자리에서 기다림 ([홈 위치로 이동])"
         elif self.kind == "eval" and line.startswith(DROP_HOLD_PREFIX):
             drop_hold_line(self, line)
+        elif self.kind == "eval" and line.startswith(("[omx] cam_", "[omx] camera_check ")):
+            for kind, prefix in CAM_PREFIX.items():
+                if line.startswith(prefix):
+                    cam_line(self, kind, line)
         elif self.kind == "eval" and line.startswith("[omx] tray_"):
             for kind, prefix in TRAY_PREFIX.items():
                 if line.startswith(prefix):
@@ -3245,6 +3336,9 @@ def eval_result(job) -> dict:
             "arms": arms or None, "wrist_check": info.get("wrist_check"),
             "tray_judge": (end or {}).get("tray_judge"),
             "drop_watch": (end or {}).get("drop_watch"),
+            # 3.31.0: the camera fault watch: what it acted on (refuse at the start / hold) and every fault it wrote
+            "camera_fault": info.get("camera_hold") or info.get("camera_refused"),
+            "camera_faults": info.get("camera_faults"), "camera_watch": info.get("camera_watch"),
             "home_check": "unknown" if not checks or None in checks else "ok" if all(checks) else "far"}
 
 
@@ -4431,7 +4525,9 @@ def start_eval(body: dict) -> dict:
               | (handover_env(ho) if ho else {}) | ({"OMX_ARM_SIDE": arm} if arm else {})
               | ({"OMX_WRIST_CHECK": "1"} if wrist_check_on() else {}) | drop_env(eval_info, arm, eval_cams, body)
               | tray_env(eval_info, arm, eval_cams) | one_arm_env(model_cfg, arm, body)
-              | place_one_arm_env(body, arm, eval_info, episodes, eval_cams))
+              | place_one_arm_env(body, arm, eval_info, episodes, eval_cams)
+              # 3.31.0: last, it reads the judges' settings the calls above put in eval_info
+              | cam_watch_env(model_cfg, arm, eval_cams, eval_info))
     EVAL_HOME_POSE.clear()
     EVAL_HOME_POSE.update(repo_id=repo_id, home=home)
     if ho and ho["mode"] == "handover":
